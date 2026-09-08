@@ -1,0 +1,8 @@
+# Minimal linear pipeline: keep ERROR records, send them to one sink.
+nodes:
+  - id: keep_errors
+    type: filter
+    condition: 'severity_text == "ERROR"'
+    action: keep
+  - id: out
+    type: sink.nats

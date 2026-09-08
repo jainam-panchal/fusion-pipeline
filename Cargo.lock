@@ -46,6 +46,8 @@ dependencies = [
  "mimalloc",
  "pipeline-core",
  "pipeline-stages",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -131,6 +133,7 @@ name = "pipeline-stages"
 version = "0.1.0"
 dependencies = [
  "pipeline-core",
+ "serde",
 ]
 
 [[package]]

@@ -13,3 +13,7 @@ path = "src/main.rs"
 pipeline-core.workspace = true
 pipeline-stages.workspace = true
 mimalloc.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

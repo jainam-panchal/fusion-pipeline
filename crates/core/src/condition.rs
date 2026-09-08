@@ -255,7 +255,8 @@ fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
             c if c.is_ascii_digit() || c == '-' => {
                 let mut end = i + 1;
                 while end < bytes.len()
-                    && (bytes[end].is_ascii_digit() || matches!(bytes[end], b'.' | b'e' | b'E' | b'+' | b'-'))
+                    && (bytes[end].is_ascii_digit()
+                        || matches!(bytes[end], b'.' | b'e' | b'E' | b'+' | b'-'))
                 {
                     end += 1;
                 }
@@ -269,7 +270,9 @@ fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let mut end = i + 1;
-                while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                {
                     end += 1;
                 }
                 let word = &input[i..end];
@@ -398,7 +401,13 @@ impl Parser {
     }
 
     fn primary(&mut self) -> Result<Expr, ParseError> {
-        if matches!(self.peek(), Some(Token { tok: Tok::LParen, .. })) {
+        if matches!(
+            self.peek(),
+            Some(Token {
+                tok: Tok::LParen,
+                ..
+            })
+        ) {
             self.next();
             let inner = self.expr()?;
             self.expect(Tok::RParen, "`)`")?;
@@ -410,7 +419,9 @@ impl Parser {
     fn comparison(&mut self) -> Result<Expr, ParseError> {
         let path = self.path()?;
         let op = match self.next() {
-            Some(Token { tok: Tok::Op(op), .. }) => op,
+            Some(Token {
+                tok: Tok::Op(op), ..
+            }) => op,
             Some(t) => {
                 return Err(ParseError {
                     message: format!("expected operator, found `{}`", t.text),
@@ -425,10 +436,16 @@ impl Parser {
             }
         };
         let literal = match self.next() {
-            Some(Token { tok: Tok::Str(s), .. }) => Value::String(s),
-            Some(Token { tok: Tok::Num(n), .. }) => n,
+            Some(Token {
+                tok: Tok::Str(s), ..
+            }) => Value::String(s),
+            Some(Token {
+                tok: Tok::Num(n), ..
+            }) => n,
             Some(Token { tok: Tok::True, .. }) => Value::Bool(true),
-            Some(Token { tok: Tok::False, .. }) => Value::Bool(false),
+            Some(Token {
+                tok: Tok::False, ..
+            }) => Value::Bool(false),
             Some(Token { tok: Tok::Null, .. }) => Value::Null,
             Some(t) => {
                 return Err(ParseError {
@@ -448,7 +465,9 @@ impl Parser {
 
     fn path(&mut self) -> Result<Vec<String>, ParseError> {
         let mut path = match self.next() {
-            Some(Token { tok: Tok::Ident(s), .. }) => vec![s],
+            Some(Token {
+                tok: Tok::Ident(s), ..
+            }) => vec![s],
             Some(t) => {
                 return Err(ParseError {
                     message: format!("expected field path, found `{}`", t.text),
@@ -467,11 +486,18 @@ impl Parser {
                 Some(Tok::Dot) => {
                     self.next();
                     match self.next() {
-                        Some(Token { tok: Tok::Ident(s), .. }) => path.push(s),
-                        Some(Token { tok: Tok::Num(n), .. }) => path.push(n.to_string()),
+                        Some(Token {
+                            tok: Tok::Ident(s), ..
+                        }) => path.push(s),
+                        Some(Token {
+                            tok: Tok::Num(n), ..
+                        }) => path.push(n.to_string()),
                         Some(t) => {
                             return Err(ParseError {
-                                message: format!("expected field name after `.`, found `{}`", t.text),
+                                message: format!(
+                                    "expected field name after `.`, found `{}`",
+                                    t.text
+                                ),
                                 offset: t.offset,
                             })
                         }
@@ -486,8 +512,12 @@ impl Parser {
                 Some(Tok::LBracket) => {
                     self.next();
                     match self.next() {
-                        Some(Token { tok: Tok::Str(s), .. }) => path.push(s),
-                        Some(Token { tok: Tok::Num(n), .. }) => path.push(n.to_string()),
+                        Some(Token {
+                            tok: Tok::Str(s), ..
+                        }) => path.push(s),
+                        Some(Token {
+                            tok: Tok::Num(n), ..
+                        }) => path.push(n.to_string()),
                         Some(t) => {
                             return Err(ParseError {
                                 message: format!("expected key inside `[]`, found `{}`", t.text),

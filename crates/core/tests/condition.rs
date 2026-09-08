@@ -66,16 +66,24 @@ fn string_ordering_is_lexicographic() {
 #[test]
 fn and_or_not_and_parentheses() {
     assert!(eval(r#"severity_text == "ERROR" and severity_number > 10"#));
-    assert!(!eval(r#"severity_text == "ERROR" and severity_number > 100"#));
+    assert!(!eval(
+        r#"severity_text == "ERROR" and severity_number > 100"#
+    ));
     assert!(eval(r#"severity_text == "WARN" or severity_number > 10"#));
     assert!(!eval(r#"severity_text == "WARN" or severity_number > 100"#));
     assert!(eval(r#"not severity_text == "WARN""#));
     assert!(!eval(r#"not severity_text == "ERROR""#));
     // `and` binds tighter than `or`.
-    assert!(eval(r#"severity_text == "WARN" or severity_number > 10 and attributes.retry == true"#));
+    assert!(eval(
+        r#"severity_text == "WARN" or severity_number > 10 and attributes.retry == true"#
+    ));
     // Parentheses override that.
-    assert!(!eval(r#"(severity_text == "WARN" or severity_number > 10) and attributes.retry == false"#));
-    assert!(eval(r#"not (severity_text == "WARN" or severity_number > 100)"#));
+    assert!(!eval(
+        r#"(severity_text == "WARN" or severity_number > 10) and attributes.retry == false"#
+    ));
+    assert!(eval(
+        r#"not (severity_text == "WARN" or severity_number > 100)"#
+    ));
 }
 
 #[test]
@@ -104,17 +112,35 @@ fn mismatched_types_do_not_compare() {
 #[test]
 fn regex_operators_parse_but_are_not_wired_yet() {
     let cond = Condition::parse(r#"body =~ "disk.*""#).expect("=~ parses");
-    assert!(matches!(cond.eval(&record()), Err(EvalError::RegexNotWired)));
+    assert!(matches!(
+        cond.eval(&record()),
+        Err(EvalError::RegexNotWired)
+    ));
     let cond = Condition::parse(r#"body !~ "disk.*""#).expect("!~ parses");
-    assert!(matches!(cond.eval(&record()), Err(EvalError::RegexNotWired)));
+    assert!(matches!(
+        cond.eval(&record()),
+        Err(EvalError::RegexNotWired)
+    ));
 }
 
 #[test]
 fn parse_errors_name_the_position() {
-    assert!(matches!(Condition::parse("severity_text =="), Err(ParseError { .. })));
-    assert!(matches!(Condition::parse(r#"severity_text ~ "x""#), Err(ParseError { .. })));
-    assert!(matches!(Condition::parse(r#"(severity_text == "x""#), Err(ParseError { .. })));
-    assert!(matches!(Condition::parse(r#"severity_text == "x" extra"#), Err(ParseError { .. })));
+    assert!(matches!(
+        Condition::parse("severity_text =="),
+        Err(ParseError { .. })
+    ));
+    assert!(matches!(
+        Condition::parse(r#"severity_text ~ "x""#),
+        Err(ParseError { .. })
+    ));
+    assert!(matches!(
+        Condition::parse(r#"(severity_text == "x""#),
+        Err(ParseError { .. })
+    ));
+    assert!(matches!(
+        Condition::parse(r#"severity_text == "x" extra"#),
+        Err(ParseError { .. })
+    ));
     let err = Condition::parse(r#"severity_text == "x" extra"#).unwrap_err();
     assert_eq!(err.offset, 21);
 }

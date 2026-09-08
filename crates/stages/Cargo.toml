@@ -7,3 +7,4 @@ publish.workspace = true
 
 [dependencies]
 pipeline-core.workspace = true
+serde.workspace = true
