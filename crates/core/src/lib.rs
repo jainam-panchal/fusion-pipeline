@@ -2,3 +2,4 @@
 //! and the condition grammar.
 
 pub mod config;
+pub mod dag;
