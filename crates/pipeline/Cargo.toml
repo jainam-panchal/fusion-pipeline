@@ -1,0 +1,26 @@
+[package]
+name = "fusion-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fusion-pipeline"
+path = "src/main.rs"
+
+[dependencies]
+fusion-core.workspace = true
+fusion-stages.workspace = true
+fusion-nats.workspace = true
+fusion-state.workspace = true
+fusion-otel.workspace = true
+anyhow.workspace = true
+mimalloc.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
