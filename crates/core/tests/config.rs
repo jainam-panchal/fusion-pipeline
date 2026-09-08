@@ -80,7 +80,10 @@ nodes:
 
     let err = Config::from_yaml(yaml).expect_err("reserved id rejected");
 
-    assert!(matches!(err, ConfigError::ReservedId { ref node } if node == "source"), "{err}");
+    assert!(
+        matches!(err, ConfigError::ReservedId { ref node } if node == "source"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -97,5 +100,8 @@ nodes:
 
     let err = Config::from_yaml(yaml).expect_err("duplicate rejected");
 
-    assert!(matches!(err, ConfigError::DuplicateId { ref node } if node == "out"), "{err}");
+    assert!(
+        matches!(err, ConfigError::DuplicateId { ref node } if node == "out"),
+        "{err}"
+    );
 }

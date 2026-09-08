@@ -95,21 +95,35 @@ fn missing_field_equals_null_and_nothing_else() {
 
 #[test]
 fn and_or_not_with_precedence() {
-    assert!(eval(r#"severity_number >= 17 and severity_text == "ERROR""#));
-    assert!(!eval(r#"severity_number >= 17 and severity_text == "WARN""#));
+    assert!(eval(
+        r#"severity_number >= 17 and severity_text == "ERROR""#
+    ));
+    assert!(!eval(
+        r#"severity_number >= 17 and severity_text == "WARN""#
+    ));
     assert!(eval(r#"severity_number < 0 or severity_text == "ERROR""#));
     assert!(eval(r#"not severity_number < 0"#));
     // `and` binds tighter than `or`.
-    assert!(eval(r#"severity_number < 0 and severity_number > 0 or severity_text == "ERROR""#));
+    assert!(eval(
+        r#"severity_number < 0 and severity_number > 0 or severity_text == "ERROR""#
+    ));
     // `not` binds tighter than `and`.
-    assert!(eval(r#"not severity_number < 0 and severity_text == "ERROR""#));
+    assert!(eval(
+        r#"not severity_number < 0 and severity_text == "ERROR""#
+    ));
 }
 
 #[test]
 fn parentheses_group() {
-    assert!(!eval(r#"severity_number < 0 and (severity_number > 0 or severity_text == "ERROR")"#));
-    assert!(eval(r#"(severity_number < 0 or severity_number > 0) and severity_text == "ERROR""#));
-    assert!(eval(r#"not (severity_number < 0 or severity_text == "WARN")"#));
+    assert!(!eval(
+        r#"severity_number < 0 and (severity_number > 0 or severity_text == "ERROR")"#
+    ));
+    assert!(eval(
+        r#"(severity_number < 0 or severity_number > 0) and severity_text == "ERROR""#
+    ));
+    assert!(eval(
+        r#"not (severity_number < 0 or severity_text == "WARN")"#
+    ));
 }
 
 #[test]
@@ -138,7 +152,11 @@ fn regex_operators_parse_but_are_not_wired_yet() {
     assert!(c.has_regex_ops());
     let c = Condition::parse(r#"body !~ "disk""#).expect("parses");
     assert!(c.has_regex_ops());
-    assert!(!Condition::parse("severity_number > 1").expect("parses").has_regex_ops());
+    assert!(
+        !Condition::parse("severity_number > 1")
+            .expect("parses")
+            .has_regex_ops()
+    );
 }
 
 #[test]
@@ -147,10 +165,16 @@ fn parse_errors_name_the_problem() {
     assert!(matches!(err, ConditionError::UnexpectedEnd), "{err}");
 
     let err = Condition::parse(r#"severity_number = 1"#).expect_err("bad op");
-    assert!(matches!(err, ConditionError::UnexpectedChar { .. }), "{err}");
+    assert!(
+        matches!(err, ConditionError::UnexpectedChar { .. }),
+        "{err}"
+    );
 
     let err = Condition::parse(r#"nonsense == 1"#).expect_err("unknown root");
-    assert!(matches!(err, ConditionError::UnknownField { ref name } if name == "nonsense"), "{err}");
+    assert!(
+        matches!(err, ConditionError::UnknownField { ref name } if name == "nonsense"),
+        "{err}"
+    );
 
     let err = Condition::parse(r#"severity_number.x == 1"#).expect_err("scalar has no children");
     assert!(matches!(err, ConditionError::NotAMap { .. }), "{err}");
@@ -159,5 +183,8 @@ fn parse_errors_name_the_problem() {
     assert!(matches!(err, ConditionError::UnexpectedEnd), "{err}");
 
     let err = Condition::parse(r#"severity_number == 1 2"#).expect_err("trailing");
-    assert!(matches!(err, ConditionError::UnexpectedToken { .. }), "{err}");
+    assert!(
+        matches!(err, ConditionError::UnexpectedToken { .. }),
+        "{err}"
+    );
 }

@@ -90,7 +90,10 @@ nodes:
 
     let err = dag(yaml).expect_err("unreachable");
 
-    assert!(matches!(err, ConfigError::Unreachable { ref node } if node == "island"), "{err}");
+    assert!(
+        matches!(err, ConfigError::Unreachable { ref node } if node == "island"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -110,7 +113,10 @@ nodes:
 
     let err = dag(yaml).expect_err("unreachable");
 
-    assert!(matches!(err, ConfigError::Unreachable { ref node } if node == "after_sink"), "{err}");
+    assert!(
+        matches!(err, ConfigError::Unreachable { ref node } if node == "after_sink"),
+        "{err}"
+    );
 }
 
 #[test]

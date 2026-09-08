@@ -92,8 +92,9 @@ impl Dag {
         let mut marks = vec![Mark::Unvisited; file_order.len()];
         let mut post_order = Vec::with_capacity(file_order.len());
         for &start in &source_succ {
-            visit(start, &succ, &mut marks, &mut post_order)
-                .map_err(|i| ConfigError::Cycle { node: file_order[i].id.clone() })?;
+            visit(start, &succ, &mut marks, &mut post_order).map_err(|i| ConfigError::Cycle {
+                node: file_order[i].id.clone(),
+            })?;
         }
         post_order.reverse();
 
@@ -102,14 +103,21 @@ impl Dag {
             new_index[old] = NodeIndex(new);
         }
 
-        let nodes: Vec<NodeConfig> = post_order.iter().map(|&old| file_order[old].clone()).collect();
+        let nodes: Vec<NodeConfig> = post_order
+            .iter()
+            .map(|&old| file_order[old].clone())
+            .collect();
         let successors: Vec<Vec<NodeIndex>> = post_order
             .iter()
             .map(|&old| succ[old].iter().map(|&s| new_index[s]).collect())
             .collect();
         let source_successors: Vec<NodeIndex> = source_succ.iter().map(|&s| new_index[s]).collect();
 
-        let ids = |list: &[NodeIndex]| list.iter().map(|&NodeIndex(i)| nodes[i].id.clone()).collect();
+        let ids = |list: &[NodeIndex]| {
+            list.iter()
+                .map(|&NodeIndex(i)| nodes[i].id.clone())
+                .collect()
+        };
         let mut successor_ids: BTreeMap<String, Vec<String>> = nodes
             .iter()
             .zip(&successors)
@@ -157,7 +165,12 @@ impl Dag {
 }
 
 /// Iterative DFS. On a back edge returns the index of the node it points at.
-fn visit(start: usize, succ: &[Vec<usize>], marks: &mut [Mark], post_order: &mut Vec<usize>) -> Result<(), usize> {
+fn visit(
+    start: usize,
+    succ: &[Vec<usize>],
+    marks: &mut [Mark],
+    post_order: &mut Vec<usize>,
+) -> Result<(), usize> {
     if marks[start] == Mark::Done {
         return Ok(());
     }

@@ -110,7 +110,10 @@ impl Root {
     }
 
     const fn is_indexable(self) -> bool {
-        matches!(self, Self::Body | Self::Attributes | Self::Resource | Self::Scope)
+        matches!(
+            self,
+            Self::Body | Self::Attributes | Self::Resource | Self::Scope
+        )
     }
 }
 
@@ -190,14 +193,19 @@ impl FieldPath {
             }
             FieldValue::from_json(v)
         }
-        fn walk_map<'a>(map: &'a serde_json::Map<String, Value>, keys: &[String]) -> FieldValue<'a> {
+        fn walk_map<'a>(
+            map: &'a serde_json::Map<String, Value>,
+            keys: &[String],
+        ) -> FieldValue<'a> {
             match keys.split_first() {
                 None => FieldValue::Composite,
                 Some((first, rest)) => map.get(first).map_or(FieldValue::Null, |v| walk(v, rest)),
             }
         }
         fn opt_u64(v: Option<u64>) -> FieldValue<'static> {
-            v.map_or(FieldValue::Null, |n| FieldValue::Num(Num::Int(i128::from(n))))
+            v.map_or(FieldValue::Null, |n| {
+                FieldValue::Num(Num::Int(i128::from(n)))
+            })
         }
         fn opt_str(v: Option<&str>) -> FieldValue<'_> {
             v.map_or(FieldValue::Null, FieldValue::Str)
@@ -209,10 +217,13 @@ impl FieldPath {
             Root::TimeUnixNano => opt_u64(record.time_unix_nano),
             Root::ObservedTimeUnixNano => opt_u64(record.observed_time_unix_nano),
             Root::SeverityText => opt_str(record.severity_text.as_deref()),
-            Root::SeverityNumber => record
-                .severity_number
-                .map_or(FieldValue::Null, |n| FieldValue::Num(Num::Int(i128::from(n)))),
-            Root::Body => record.body.as_ref().map_or(FieldValue::Null, |b| walk(b, &self.keys)),
+            Root::SeverityNumber => record.severity_number.map_or(FieldValue::Null, |n| {
+                FieldValue::Num(Num::Int(i128::from(n)))
+            }),
+            Root::Body => record
+                .body
+                .as_ref()
+                .map_or(FieldValue::Null, |b| walk(b, &self.keys)),
             Root::Attributes => walk_map(&record.attributes, &self.keys),
             Root::Resource => walk_map(&record.resource, &self.keys),
             Root::Scope => walk_map(&record.scope, &self.keys),
@@ -340,7 +351,9 @@ fn equals(value: FieldValue<'_>, literal: &Literal) -> bool {
         (FieldValue::Null, Literal::Null) => true,
         (FieldValue::Bool(a), Literal::Bool(b)) => a == *b,
         (FieldValue::Str(a), Literal::Str(b)) => a == b,
-        (FieldValue::Num(_), Literal::Int(_) | Literal::Float(_)) => order(value, literal) == Some(Ordering::Equal),
+        (FieldValue::Num(_), Literal::Int(_) | Literal::Float(_)) => {
+            order(value, literal) == Some(Ordering::Equal)
+        }
         _ => false,
     }
 }
@@ -444,7 +457,9 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
             }
             b'-' | b'0'..=b'9' => {
                 i += 1;
-                while i < bytes.len() && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                while i < bytes.len()
+                    && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                {
                     i += 1;
                 }
                 let text = &expr[start..i];
@@ -461,7 +476,9 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
             }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
                 i += 1;
-                while i < bytes.len() && matches!(bytes[i], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') {
+                while i < bytes.len()
+                    && matches!(bytes[i], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+                {
                     i += 1;
                 }
                 Tok::Ident(expr[start..i].to_owned())
@@ -484,7 +501,10 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
 /// the offset just past the closing quote.
 fn lex_string(expr: &str, start: usize) -> Result<(String, usize), ConditionError> {
     let mut chars = expr[start..].char_indices();
-    let quote = chars.next().map(|(_, c)| c).ok_or(ConditionError::UnexpectedEnd)?;
+    let quote = chars
+        .next()
+        .map(|(_, c)| c)
+        .ok_or(ConditionError::UnexpectedEnd)?;
     let mut out = String::new();
     while let Some((i, c)) = chars.next() {
         match c {
@@ -513,7 +533,10 @@ impl Parser {
     }
 
     fn next(&mut self) -> Result<&Token, ConditionError> {
-        let t = self.tokens.get(self.pos).ok_or(ConditionError::UnexpectedEnd)?;
+        let t = self
+            .tokens
+            .get(self.pos)
+            .ok_or(ConditionError::UnexpectedEnd)?;
         self.pos += 1;
         Ok(t)
     }
@@ -556,14 +579,18 @@ impl Parser {
             Tok::LParen => {
                 let inner = self.or()?;
                 match self.next()?.clone() {
-                    Token { tok: Tok::RParen, .. } => Ok(inner),
+                    Token {
+                        tok: Tok::RParen, ..
+                    } => Ok(inner),
                     other => Err(other.unexpected()),
                 }
             }
             Tok::Ident(name) => {
                 let field = self.field_path(&name)?;
                 let op = match self.next()?.clone() {
-                    Token { tok: Tok::Op(op), .. } => op,
+                    Token {
+                        tok: Tok::Op(op), ..
+                    } => op,
                     other => return Err(other.unexpected()),
                 };
                 let literal = self.literal()?;
@@ -583,18 +610,24 @@ impl Parser {
                 Some(Tok::Dot) => {
                     self.pos += 1;
                     match self.next()?.clone() {
-                        Token { tok: Tok::Ident(k), .. } => keys.push(k),
+                        Token {
+                            tok: Tok::Ident(k), ..
+                        } => keys.push(k),
                         other => return Err(other.unexpected()),
                     }
                 }
                 Some(Tok::LBracket) => {
                     self.pos += 1;
                     match self.next()?.clone() {
-                        Token { tok: Tok::Str(k), .. } => keys.push(k),
+                        Token {
+                            tok: Tok::Str(k), ..
+                        } => keys.push(k),
                         other => return Err(other.unexpected()),
                     }
                     match self.next()?.clone() {
-                        Token { tok: Tok::RBracket, .. } => {}
+                        Token {
+                            tok: Tok::RBracket, ..
+                        } => {}
                         other => return Err(other.unexpected()),
                     }
                 }
