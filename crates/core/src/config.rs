@@ -108,14 +108,22 @@ impl NodeConfig {
     /// Returns [`ConfigError::InvalidParams`] naming this node when the parameters do not
     /// match `T`.
     pub fn parse_params<T: DeserializeOwned>(&self) -> Result<T, ConfigError> {
-        serde_yaml_ng::from_value(self.params.clone()).map_err(|e| ConfigError::InvalidParams {
+        serde_yaml_ng::from_value(self.params.clone())
+            .map_err(|e| self.invalid_params(e.to_string()))
+    }
+
+    /// An [`ConfigError::InvalidParams`] naming this node.
+    #[must_use]
+    pub fn invalid_params(&self, message: impl Into<String>) -> ConfigError {
+        ConfigError::InvalidParams {
             node: self.id.clone(),
-            message: e.to_string(),
-        })
+            message: message.into(),
+        }
     }
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
     workers: Option<usize>,

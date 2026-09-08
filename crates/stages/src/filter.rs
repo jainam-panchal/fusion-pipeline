@@ -46,19 +46,13 @@ impl Filter {
     /// parse, or it uses `=~`/`!~` (not wired until the regex ticket).
     pub fn from_node(node: &NodeConfig) -> Result<Self, ConfigError> {
         let params: Params = node.parse_params()?;
-        let condition =
-            Condition::parse(&params.condition).map_err(|e| ConfigError::InvalidParams {
-                node: node.id.clone(),
-                message: format!("condition `{}`: {e}", params.condition),
-            })?;
+        let condition = Condition::parse(&params.condition)
+            .map_err(|e| node.invalid_params(format!("condition `{}`: {e}", params.condition)))?;
         if condition.has_regex_ops() {
-            return Err(ConfigError::InvalidParams {
-                node: node.id.clone(),
-                message: format!(
-                    "condition `{}`: regex operators `=~` and `!~` are not wired yet",
-                    params.condition
-                ),
-            });
+            return Err(node.invalid_params(format!(
+                "condition `{}`: regex operators `=~` and `!~` are not wired yet",
+                params.condition
+            )));
         }
         Ok(Self {
             condition,

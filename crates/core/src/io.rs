@@ -33,7 +33,8 @@ impl std::fmt::Debug for Envelope {
 }
 
 /// The engine side of the source bridge. Bounded: `send` blocks when workers are behind.
-#[derive(Debug, Clone)]
+/// Not `Clone`: the engine drains and exits once the source returns and this is dropped.
+#[derive(Debug)]
 pub struct Intake {
     tx: crossbeam_channel::Sender<Envelope>,
 }

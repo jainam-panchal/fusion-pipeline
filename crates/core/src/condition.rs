@@ -124,7 +124,8 @@ pub struct FieldPath {
     keys: Vec<String>,
 }
 
-/// A number as seen by the grammar: integers compare exactly, floats approximately.
+/// A number as seen by the grammar. Two integers compare exactly; when either side is a
+/// float both are compared as `f64`, which is lossy above 2^53 and never equal for NaN.
 #[derive(Debug, Clone, Copy)]
 enum Num {
     Int(i128),
@@ -143,18 +144,25 @@ impl Num {
         }
     }
 
-    fn partial_cmp(self, other: Self) -> Option<Ordering> {
-        match (self, other) {
-            (Self::Int(a), Self::Int(b)) => Some(a.cmp(&b)),
-            // Lossy on purpose: mixed comparisons happen in float space.
-            (a, b) => a.as_f64().partial_cmp(&b.as_f64()),
-        }
-    }
-
     fn as_f64(self) -> f64 {
         match self {
             Self::Int(i) => i as f64,
             Self::Float(f) => f,
+        }
+    }
+}
+
+impl PartialEq for Num {
+    fn eq(&self, other: &Self) -> bool {
+        self.partial_cmp(other) == Some(Ordering::Equal)
+    }
+}
+
+impl PartialOrd for Num {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (*self, *other) {
+            (Self::Int(a), Self::Int(b)) => Some(a.cmp(&b)),
+            (a, b) => a.as_f64().partial_cmp(&b.as_f64()),
         }
     }
 }
@@ -360,8 +368,8 @@ fn equals(value: FieldValue<'_>, literal: &Literal) -> bool {
 
 fn order(value: FieldValue<'_>, literal: &Literal) -> Option<Ordering> {
     match (value, literal) {
-        (FieldValue::Num(a), Literal::Int(b)) => a.partial_cmp(Num::Int(*b)),
-        (FieldValue::Num(a), Literal::Float(b)) => a.partial_cmp(Num::Float(*b)),
+        (FieldValue::Num(a), Literal::Int(b)) => a.partial_cmp(&Num::Int(*b)),
+        (FieldValue::Num(a), Literal::Float(b)) => a.partial_cmp(&Num::Float(*b)),
         (FieldValue::Str(a), Literal::Str(b)) => Some(a.cmp(b.as_str())),
         _ => None,
     }

@@ -10,7 +10,15 @@ use crate::config::{Config, ConfigError, NodeConfig, SOURCE_ID};
 
 /// Position of a node in [`Dag::order`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NodeIndex(pub usize);
+pub struct NodeIndex(usize);
+
+impl NodeIndex {
+    /// Position in [`Dag::order`].
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
 
 /// A validated pipeline graph.
 #[derive(Debug, Clone)]

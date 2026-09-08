@@ -34,11 +34,19 @@ fn start(yaml: &str, workers: usize) -> Harness {
     registry.register_sink("sink.memory", sinks.clone());
     let pipeline = Pipeline::from_yaml(yaml, &registry).expect("pipeline loads");
     let (source, input) = MemorySource::new();
-    let engine = Engine::start(pipeline, Box::new(source), workers);
+    let engine = Engine::start(pipeline, Box::new(source), workers).expect("engine starts");
     Harness {
         engine,
         source: input,
         sinks,
+    }
+}
+
+impl Harness {
+    /// Close the source and wait for the workers to drain.
+    fn finish(self) {
+        drop(self.source);
+        self.engine.join().expect("clean shutdown");
     }
 }
 
@@ -76,8 +84,7 @@ fn record_passing_filter_reaches_sink_and_is_acked() {
             delivered[0].body.as_ref().and_then(|b| b.as_str()),
             Some("disk full")
         );
-        drop(h.source);
-        h.engine.join().expect("clean shutdown");
+        h.finish();
     });
 }
 
@@ -90,8 +97,7 @@ fn record_dropped_by_filter_does_not_reach_sink_and_is_still_acked() {
 
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
         assert!(h.sinks.records("out").is_empty(), "workers={workers}");
-        drop(h.source);
-        h.engine.join().expect("clean shutdown");
+        h.finish();
     });
 }
 
@@ -108,8 +114,7 @@ fn drop_action_inverts_the_filter() {
     let delivered = h.sinks.records("out");
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].id.map(|id| id.0), Some(3));
-    drop(h.source);
-    h.engine.join().expect("clean shutdown");
+    h.finish();
 }
 
 #[test]
@@ -126,8 +131,7 @@ fn record_without_id_reaches_no_sink_and_is_nakked() {
             "workers={workers}"
         );
         assert!(h.sinks.records("out").is_empty(), "workers={workers}");
-        drop(h.source);
-        h.engine.join().expect("clean shutdown");
+        h.finish();
     });
 }
 
@@ -159,8 +163,7 @@ fn many_records_are_all_settled_across_workers() {
         ids.sort_unstable();
         let expected: Vec<u64> = (0..200).step_by(2).collect();
         assert_eq!(ids, expected, "workers={workers}");
-        drop(h.source);
-        h.engine.join().expect("clean shutdown");
+        h.finish();
     });
 }
 
@@ -193,11 +196,54 @@ fn unknown_node_type_is_rejected_naming_the_node() {
 }
 
 #[test]
-fn engine_defaults_workers_from_config() {
-    let yaml = format!("workers: 2\n{KEEP_ERRORS}");
-    let sinks = MemorySinks::new();
+fn worker_count_comes_from_config_or_defaults_to_cores() {
     let mut registry = default_registry();
-    registry.register_sink("sink.memory", sinks.clone());
-    let pipeline = Pipeline::from_yaml(&yaml, &registry).expect("pipeline loads");
-    assert_eq!(pipeline.workers(), Some(2));
+    registry.register_sink("sink.memory", MemorySinks::new());
+
+    let explicit = Pipeline::from_yaml(&format!("workers: 2\n{KEEP_ERRORS}"), &registry)
+        .expect("pipeline loads");
+    assert_eq!(explicit.workers(), Some(2));
+    assert_eq!(explicit.worker_count(), 2);
+
+    let defaulted = Pipeline::from_yaml(KEEP_ERRORS, &registry).expect("pipeline loads");
+    assert_eq!(defaulted.workers(), None);
+    assert!(defaulted.worker_count() >= 1);
+}
+
+#[test]
+fn metric_and_span_records_are_rejected_and_acked_without_reaching_a_sink() {
+    for_each_worker_count(|workers| {
+        let h = start(KEEP_ERRORS, workers);
+        let metric = Record::from_json(r#"{"id": 9, "kind": "metric", "severity_text": "ERROR"}"#)
+            .expect("record parses");
+        let span = Record::from_json(r#"{"id": 10, "kind": "span", "severity_text": "ERROR"}"#)
+            .expect("record parses");
+
+        let metric_probe = h.source.push(metric);
+        let span_probe = h.source.push(span);
+
+        assert_eq!(
+            metric_probe.wait(WAIT),
+            Some(AckOutcome::Ack),
+            "workers={workers}"
+        );
+        assert_eq!(
+            span_probe.wait(WAIT),
+            Some(AckOutcome::Ack),
+            "workers={workers}"
+        );
+        assert!(h.sinks.records("out").is_empty(), "workers={workers}");
+        h.finish();
+    });
+}
+
+#[test]
+fn unknown_top_level_config_key_is_rejected() {
+    let yaml = format!("worker: 2\n{KEEP_ERRORS}");
+    let mut registry = default_registry();
+    registry.register_sink("sink.memory", MemorySinks::new());
+
+    let err = Pipeline::from_yaml(&yaml, &registry).expect_err("typo rejected");
+
+    assert!(err.to_string().contains("worker"), "{err}");
 }

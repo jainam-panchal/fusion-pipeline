@@ -75,6 +75,15 @@ impl Pipeline {
         self.workers
     }
 
+    /// Worker threads to run: the config's `workers`, else one per core (at least one).
+    #[must_use]
+    pub fn worker_count(&self) -> usize {
+        self.workers
+            .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
+            .unwrap_or(1)
+            .max(1)
+    }
+
     /// The validated graph.
     #[must_use]
     pub fn dag(&self) -> &Dag {
@@ -84,6 +93,6 @@ impl Pipeline {
     /// The built node at `index`.
     #[must_use]
     pub fn node(&self, index: NodeIndex) -> &CompiledNode {
-        &self.nodes[index.0]
+        &self.nodes[index.index()]
     }
 }

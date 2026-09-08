@@ -25,7 +25,7 @@ fusion-otel = { path = "crates/otel" }
 
 anyhow = "1"
 crossbeam-channel = "0.5"
-mimalloc = "0.1"
+mimalloc = { version = "0.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
