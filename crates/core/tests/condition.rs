@@ -144,3 +144,19 @@ fn parse_errors_name_the_position() {
     let err = Condition::parse(r#"severity_text == "x" extra"#).unwrap_err();
     assert_eq!(err.offset, 21);
 }
+
+#[test]
+fn number_literal_does_not_swallow_a_following_operator_or_path() {
+    // `5-3` is not one number: the lexer stops at the sign and the parser
+    // then rejects the trailing `-3`.
+    let err = Condition::parse("severity_number == 5-3").unwrap_err();
+    assert_eq!(err.offset, 20);
+    assert!(Condition::parse("attributes.latency_ms == 1.25e1")
+        .unwrap()
+        .eval(&record())
+        .unwrap());
+    assert!(Condition::parse("attributes.latency_ms > -1")
+        .unwrap()
+        .eval(&record())
+        .unwrap());
+}

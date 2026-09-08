@@ -79,13 +79,6 @@ impl Pipeline {
         registry: &StageRegistry,
         sinks: SinkBindings,
     ) -> Result<Pipeline, BuildError> {
-        let index: HashMap<&str, usize> = config
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.id.as_str(), i))
-            .collect();
-
         let mut nodes: Vec<Node> = Vec::with_capacity(config.nodes.len());
         for node in &config.nodes {
             nodes.push(Node {
@@ -96,22 +89,16 @@ impl Pipeline {
         }
 
         let mut from_source = Vec::new();
-        for (i, node) in config.nodes.iter().enumerate() {
-            for target in &node.from {
-                let (base, label) = match target.split_once('.') {
-                    Some((base, label)) => (base, Some(label.to_string())),
-                    None => (target.as_str(), None),
-                };
-                let edge = Edge { to: i, label };
-                if base == SOURCE_ID {
-                    from_source.push(edge);
-                } else {
-                    // Validated by the config loader; a sink never emits.
-                    let j = index[base];
-                    if !config.nodes[j].is_sink() {
-                        nodes[j].outputs.push(edge);
-                    }
-                }
+        for edge in &config.edges {
+            let out = Edge {
+                to: edge.to,
+                label: edge.label.clone(),
+            };
+            match edge.from {
+                None => from_source.push(out),
+                // A sink never emits, so an edge out of one goes nowhere.
+                Some(j) if !config.nodes[j].is_sink() => nodes[j].outputs.push(out),
+                Some(_) => {}
             }
         }
 

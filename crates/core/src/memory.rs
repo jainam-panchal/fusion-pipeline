@@ -85,7 +85,7 @@ impl MemoryAck {
         )
     }
 
-    fn record(&self, what: AckOutcome) {
+    fn set(&self, what: AckOutcome) {
         let mut slot = self.outcome.lock().unwrap();
         assert!(
             slot.is_none(),
@@ -97,11 +97,11 @@ impl MemoryAck {
 
 impl AckHandle for MemoryAck {
     fn ack(self: Box<Self>) {
-        self.record(AckOutcome::Ack);
+        self.set(AckOutcome::Ack);
     }
 
     fn nak(self: Box<Self>, delay: Option<Duration>) {
-        self.record(AckOutcome::Nak(delay));
+        self.set(AckOutcome::Nak(delay));
     }
 }
 

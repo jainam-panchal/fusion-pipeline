@@ -65,10 +65,21 @@ impl NodeConfig {
     }
 }
 
-/// A loaded, validated topology. Nodes keep file order.
+/// One resolved `from` entry: `to` reads from `from`, optionally only the
+/// branch called `label` (`from: router.label`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edge {
+    /// Index into `nodes`, or `None` for `source`.
+    pub from: Option<usize>,
+    pub to: usize,
+    pub label: Option<String>,
+}
+
+/// A loaded, validated topology: nodes in file order plus the edge list.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
     pub nodes: Vec<NodeConfig>,
+    pub edges: Vec<Edge>,
 }
 
 impl PipelineConfig {
@@ -112,47 +123,60 @@ pub fn load_str(yaml: &str) -> Result<PipelineConfig, ConfigError> {
             params: node.params,
         });
     }
-    let config = PipelineConfig { nodes };
+    let edges = resolve_edges(&nodes)?;
+    let config = PipelineConfig { nodes, edges };
     validate(&config)?;
     Ok(config)
 }
 
-/// Load-time DAG checks, in order: every `from` target exists, every node is
-/// reachable from `source`, no cycles, at least one sink. A `from` target may
-/// be `node` or `node.label`; only the node part is checked here.
-fn validate(config: &PipelineConfig) -> Result<(), ConfigError> {
-    let index: HashMap<&str, usize> = config
-        .nodes
+/// Turn every `from` entry into an [`Edge`]. A target is `node` or
+/// `node.label`; `source` takes no label.
+fn resolve_edges(nodes: &[NodeConfig]) -> Result<Vec<Edge>, ConfigError> {
+    let index: HashMap<&str, usize> = nodes
         .iter()
         .enumerate()
         .map(|(i, n)| (n.id.as_str(), i))
         .collect();
+    let mut edges = Vec::new();
+    for (to, node) in nodes.iter().enumerate() {
+        for target in &node.from {
+            let unknown = || ConfigError::UnknownFrom {
+                node: node.id.clone(),
+                target: target.clone(),
+            };
+            let (base, label) = match target.split_once('.') {
+                Some((base, label)) => (base, Some(label.to_string())),
+                None => (target.as_str(), None),
+            };
+            let from = if target == SOURCE_ID {
+                None
+            } else {
+                Some(*index.get(base).ok_or_else(unknown)?)
+            };
+            edges.push(Edge { from, to, label });
+        }
+    }
+    Ok(edges)
+}
 
+/// Load-time DAG checks, in order: every node is reachable from `source`,
+/// no cycles, at least one sink. Unknown `from` targets are caught earlier
+/// by [`resolve_edges`].
+fn validate(config: &PipelineConfig) -> Result<(), ConfigError> {
     // Adjacency: out-edges per node index. Sinks emit nothing.
     let mut out: Vec<Vec<usize>> = vec![Vec::new(); config.nodes.len()];
     let mut from_source: Vec<usize> = Vec::new();
-    for (i, node) in config.nodes.iter().enumerate() {
-        for target in &node.from {
-            let base = target.split('.').next().unwrap_or(target);
-            if base == SOURCE_ID {
-                from_source.push(i);
-                continue;
-            }
-            let Some(&j) = index.get(base) else {
-                return Err(ConfigError::UnknownFrom {
-                    node: node.id.clone(),
-                    target: target.clone(),
-                });
-            };
-            if !config.nodes[j].is_sink() {
-                out[j].push(i);
-            }
+    for edge in &config.edges {
+        match edge.from {
+            None => from_source.push(edge.to),
+            Some(j) if !config.nodes[j].is_sink() => out[j].push(edge.to),
+            Some(_) => {}
         }
     }
 
     // Reachability from `source`.
     let mut reached = vec![false; config.nodes.len()];
-    let mut stack = from_source.clone();
+    let mut stack = from_source;
     while let Some(i) = stack.pop() {
         if std::mem::replace(&mut reached[i], true) {
             continue;

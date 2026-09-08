@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::borrow::Cow;
 
 /// Producer-supplied snowflake. Always present on a valid record; a record
 /// without one is negatively acknowledged by the engine.
@@ -65,26 +66,35 @@ impl Record {
 
     /// Resolve a path into the record. The first segment names a top-level
     /// field; later segments index into maps (`attributes`, `resource`,
-    /// `scope`) or into a structured `body`. Returns an owned `Value` for the
-    /// scalar top-level fields and a borrowed one otherwise.
-    pub fn get_path(&self, path: &[String]) -> Option<Value> {
+    /// `scope`) or into a structured `body`. Borrows wherever the value
+    /// already exists as a `Value`; the scalar top-level fields are boxed
+    /// into an owned `Value` on the way out.
+    pub fn get_path(&self, path: &[String]) -> Option<Cow<'_, Value>> {
         let (head, rest) = path.split_first()?;
-        let root: Value = match head.as_str() {
-            "id" => return rest.is_empty().then(|| self.id.map(|i| Value::from(i.0)))?,
-            "kind" => serde_json::to_value(self.kind).ok()?,
-            "time_unix_nano" => Value::from(self.time_unix_nano),
-            "observed_time_unix_nano" => Value::from(self.observed_time_unix_nano),
-            "severity_text" => self.severity_text.clone().map(Value::from)?,
-            "severity_number" => self.severity_number.map(Value::from)?,
-            "trace_id" => self.trace_id.clone().map(Value::from)?,
-            "span_id" => self.span_id.clone().map(Value::from)?,
-            "body" => return walk(&self.body, rest).cloned(),
-            "attributes" => return walk_map(&self.attributes, rest).cloned(),
-            "resource" => return walk_map(&self.resource, rest).cloned(),
-            "scope" => return walk_map(&self.scope, rest).cloned(),
-            _ => return None,
+        let borrowed = match head.as_str() {
+            "body" => walk(&self.body, rest),
+            "attributes" => walk_map(&self.attributes, rest),
+            "resource" => walk_map(&self.resource, rest),
+            "scope" => walk_map(&self.scope, rest),
+            _ => {
+                if !rest.is_empty() {
+                    return None;
+                }
+                let owned = match head.as_str() {
+                    "id" => Value::from(self.id?.0),
+                    "kind" => serde_json::to_value(self.kind).ok()?,
+                    "time_unix_nano" => Value::from(self.time_unix_nano),
+                    "observed_time_unix_nano" => Value::from(self.observed_time_unix_nano),
+                    "severity_text" => Value::from(self.severity_text.as_deref()?),
+                    "severity_number" => Value::from(self.severity_number?),
+                    "trace_id" => Value::from(self.trace_id.as_deref()?),
+                    "span_id" => Value::from(self.span_id.as_deref()?),
+                    _ => return None,
+                };
+                return Some(Cow::Owned(owned));
+            }
         };
-        walk(&root, rest).cloned()
+        borrowed.map(Cow::Borrowed)
     }
 }
 

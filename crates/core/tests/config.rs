@@ -163,3 +163,24 @@ nodes:
 "#;
     assert_eq!(load_str(yaml).unwrap_err(), ConfigError::NoSink);
 }
+
+#[test]
+fn source_has_no_labelled_branches() {
+    let yaml = r#"
+nodes:
+  - id: a
+    type: filter
+    condition: 'severity_text == "ERROR"'
+    action: keep
+    from: source.errors
+  - id: out
+    type: sink.memory
+"#;
+    match load_str(yaml) {
+        Err(ConfigError::UnknownFrom { node, target }) => {
+            assert_eq!(node, "a");
+            assert_eq!(target, "source.errors");
+        }
+        other => panic!("expected UnknownFrom, got {other:?}"),
+    }
+}

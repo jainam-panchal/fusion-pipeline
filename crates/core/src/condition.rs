@@ -17,8 +17,8 @@
 
 use crate::record::Record;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -30,21 +30,6 @@ pub enum Op {
     Ge,
     Regex,
     NotRegex,
-}
-
-impl Op {
-    fn as_str(self) -> &'static str {
-        match self {
-            Op::Eq => "==",
-            Op::Ne => "!=",
-            Op::Lt => "<",
-            Op::Gt => ">",
-            Op::Le => "<=",
-            Op::Ge => ">=",
-            Op::Regex => "=~",
-            Op::NotRegex => "!~",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,31 +77,8 @@ impl Condition {
         Ok(Condition { expr })
     }
 
-    pub fn expr(&self) -> &Expr {
-        &self.expr
-    }
-
     pub fn eval(&self, record: &Record) -> Result<bool, EvalError> {
         eval(&self.expr, record)
-    }
-}
-
-impl fmt::Display for Condition {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.expr)
-    }
-}
-
-impl fmt::Display for Expr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Expr::Compare { path, op, literal } => {
-                write!(f, "{} {} {}", path.join("."), op.as_str(), literal)
-            }
-            Expr::And(a, b) => write!(f, "({a} and {b})"),
-            Expr::Or(a, b) => write!(f, "({a} or {b})"),
-            Expr::Not(a) => write!(f, "not {a}"),
-        }
     }
 }
 
@@ -128,18 +90,19 @@ fn eval(expr: &Expr, record: &Record) -> Result<bool, EvalError> {
         Expr::Or(a, b) => eval(a, record)? || eval(b, record)?,
         Expr::Not(a) => !eval(a, record)?,
         Expr::Compare { path, op, literal } => {
-            let actual = record.get_path(path).unwrap_or(Value::Null);
+            let actual = record.get_path(path).unwrap_or(Cow::Owned(Value::Null));
+            let actual: &Value = &actual;
             match op {
-                Op::Eq => values_equal(&actual, literal),
-                Op::Ne => !values_equal(&actual, literal),
-                Op::Lt => compare(&actual, literal) == Some(Ordering::Less),
-                Op::Gt => compare(&actual, literal) == Some(Ordering::Greater),
+                Op::Eq => values_equal(actual, literal),
+                Op::Ne => !values_equal(actual, literal),
+                Op::Lt => compare(actual, literal) == Some(Ordering::Less),
+                Op::Gt => compare(actual, literal) == Some(Ordering::Greater),
                 Op::Le => matches!(
-                    compare(&actual, literal),
+                    compare(actual, literal),
                     Some(Ordering::Less | Ordering::Equal)
                 ),
                 Op::Ge => matches!(
-                    compare(&actual, literal),
+                    compare(actual, literal),
                     Some(Ordering::Greater | Ordering::Equal)
                 ),
                 Op::Regex | Op::NotRegex => return Err(EvalError::RegexNotWired),
@@ -253,13 +216,7 @@ fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
                 Tok::Op(op)
             }
             c if c.is_ascii_digit() || c == '-' => {
-                let mut end = i + 1;
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_digit()
-                        || matches!(bytes[end], b'.' | b'e' | b'E' | b'+' | b'-'))
-                {
-                    end += 1;
-                }
+                let end = number_end(bytes, i);
                 let text = &input[i..end];
                 let num: serde_json::Number = text.parse().map_err(|_| ParseError {
                     message: format!("invalid number `{text}`"),
@@ -301,6 +258,35 @@ fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
         });
     }
     Ok(tokens)
+}
+
+/// End of a number literal starting at `start`: an optional `-`, digits, an
+/// optional fraction, an optional exponent with its own sign. Nothing else.
+fn number_end(bytes: &[u8], start: usize) -> usize {
+    let mut i = start;
+    if bytes.get(i) == Some(&b'-') {
+        i += 1;
+    }
+    let digits = |mut i: usize| {
+        while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        i
+    };
+    i = digits(i);
+    if bytes.get(i) == Some(&b'.') && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+        i = digits(i + 1);
+    }
+    if matches!(bytes.get(i), Some(b'e' | b'E')) {
+        let mut j = i + 1;
+        if matches!(bytes.get(j), Some(b'+' | b'-')) {
+            j += 1;
+        }
+        if bytes.get(j).is_some_and(u8::is_ascii_digit) {
+            i = digits(j);
+        }
+    }
+    i
 }
 
 /// Lex a quoted string starting at `start` (the quote). Supports `\"`, `\'`,

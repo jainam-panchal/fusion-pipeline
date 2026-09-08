@@ -22,23 +22,6 @@ pub enum DropReason {
     MissingId,
 }
 
-impl DropReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            DropReason::Filter => "filter",
-            DropReason::RouteDefaultDrop => "route_default_drop",
-            DropReason::Sample => "sample",
-            DropReason::Dedupe => "dedupe",
-            DropReason::LuaDrop => "lua_drop",
-            DropReason::LuaError => "lua_error",
-            DropReason::RegexLimit => "regex_limit",
-            DropReason::StateError => "state_error",
-            DropReason::InvalidRecord => "invalid_record",
-            DropReason::MissingId => "missing_id",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct StageError(pub String);
