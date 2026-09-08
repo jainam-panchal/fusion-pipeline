@@ -1,0 +1,15 @@
+[package]
+name = "fusion-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fusion-pipeline"
+path = "src/main.rs"
+
+[dependencies]
+pipeline-core.workspace = true
+pipeline-stages.workspace = true
+mimalloc.workspace = true

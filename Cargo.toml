@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/stages",
+    "crates/regex",
+    "crates/nats",
+    "crates/state",
+    "crates/otel",
+    "crates/pipeline",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+pipeline-core = { path = "crates/core" }
+pipeline-stages = { path = "crates/stages" }
+pipeline-regex = { path = "crates/regex" }
+pipeline-nats = { path = "crates/nats" }
+pipeline-state = { path = "crates/state" }
+pipeline-otel = { path = "crates/otel" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+thiserror = "2"
+crossbeam-channel = "0.5"
+mimalloc = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
