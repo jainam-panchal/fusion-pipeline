@@ -1,0 +1,149 @@
+Signal,Canonical Transformation,Fundamental Feature,Priority Tier,Vendor Adoption,Vendors Supporting It,What It Does,Config Method,Custom Code
+Logs,Filter/Drop,Conditional record drop/keep,Tier 1,14 / 16,"Chronosphere, Coralogix, Cribl, Datadog, Dynatrace, Edge Delta, Elastic, Grafana Labs, Mezmo, New Relic, OpenTelemetry, Splunk, Sumo Logic, Vector (Datadog)","Drops or retains whole records based on a match condition (regex, field value, boolean expression).",UI/YAML/API,"Optional - DPXL, JavaScript, OTTL, NRQL, SPL2, VRL"
+Logs,Parse/Extract,Pattern-based field extraction (Grok/regex/dissect),Tier 1,11 / 16,"Chronosphere, Coralogix, Cribl, Datadog, Edge Delta, Elastic, Grafana Labs, Mezmo, New Relic, Splunk, Sumo Logic","Extracts structured fields from unstructured text using regex, Grok, or delimiter-based patterns.",UI/YAML/API,"Optional - JavaScript, SPL2"
+Logs,Convert Signal,Log-to-metric conversion (count/gauge/distribution),Tier 1,9 / 16,"Chronosphere, Datadog, Elastic, Grafana Labs, Mezmo, New Relic, Splunk, Sumo Logic, Vector (Datadog)","Derives count, gauge, or distribution metrics from matching log events at ingest.",UI/YAML/API,"Yes - NRQL, SPL2"
+Logs,Redact/Mask,Regex/pattern-based value masking or redaction,Tier 1,9 / 16,"Chronosphere, Cribl, Datadog, Edge Delta, Elastic, New Relic, OpenTelemetry, Splunk, Sumo Logic",Detects sensitive values via regex/keyword patterns and replaces or obscures them in place.,UI/YAML/API,"Optional - JavaScript, SPL2"
+Logs,Sample,Percentage/rate-based random sampling,Tier 1,8 / 16,"Chronosphere, Cribl, Datadog, Edge Delta, Grafana Labs, Mezmo, OpenTelemetry, Vector (Datadog)","Retains a configurable percentage or 1-in-N rate of matching records, discarding the rest.",UI/YAML/API,No
+Logs,Enrich,Static key/value tag enrichment,Tier 2,7 / 16,"Chronosphere, Datadog, Dynatrace, Edge Delta, Elastic, Grafana Labs, OpenTelemetry",Adds one or more fixed or conditionally-scoped key/value pairs to matching records.,UI/YAML/API,No
+Logs,Rename/Remap,Field/key rename,Tier 2,7 / 16,"Chronosphere, Cribl, Dynatrace, Elastic, Grafana Labs, Mezmo, Splunk",Changes the name of one or more fields/keys without altering their values.,UI/YAML/API,"Optional - JavaScript, OTTL, SPL2"
+Logs,Custom Transform,General-purpose scripted transform (custom-code escape hatch),Tier 2,6 / 16,"Chronosphere, Datadog, Dynatrace, Elastic, OpenTelemetry, Vector (Datadog)",A scripting stage (VRL/OTTL/Lua/Painless/DQL) for logic too complex for the declarative rule set.,UI/YAML/API,"Yes - VRL, DQL, Painless, OTTL, Lua 5.4"
+Logs,Dedupe,Time-windowed duplicate record suppression,Tier 2,6 / 16,"Chronosphere, Cribl, Datadog, Edge Delta, Mezmo, Vector (Datadog)","Detects and drops duplicate/repetitive records within a sliding time window, keyed on configurable fields.",UI/YAML/API,No
+Logs,Enrich,External lookup-table join enrichment,Tier 2,5 / 16,"Cribl, Datadog, Edge Delta, Elastic, Splunk","Enriches records by matching a field against an external lookup table/file (CSV, MMDB, etc.).",UI/YAML/API,Yes - SPL2
+Logs,Enrich,GeoIP lookup enrichment,Tier 2,5 / 16,"Cribl, Datadog, Dynatrace, Elastic, Grafana Labs",Enriches a record with geographic fields derived from an IP address.,UI/YAML/API,No
+Logs,Route,Condition-based multi-destination routing,Tier 2,5 / 16,"Edge Delta, Mezmo, OpenTelemetry, Splunk, Vector (Datadog)",Splits the event stream into multiple named paths/destinations based on match conditions.,UI/YAML,"Yes - OTTL, SPL2, VRL"
+Logs,Aggregate/Rollup,Combine multiple related events into one,Tier 2,4 / 16,"Datadog, Elastic, Mezmo, Vector (Datadog)",Merges multiple related events into a single event using group-by fields and a merge strategy.,UI/YAML/API,"Yes - Ruby, VRL"
+Logs,Parse/Extract,JSON field extraction,Tier 2,4 / 16,"Coralogix, Datadog, Elastic, Splunk",Parses a JSON-formatted field/string into individual structured fields.,UI/YAML/API,Yes - SPL2
+Logs,Rate-limit/Quota,Throughput rate-limiting (token bucket / GCRA),Tier 2,4 / 16,"Datadog, Grafana Labs, Mezmo, Vector (Datadog)","Rate-limits event throughput using a token-bucket-style algorithm, dropping or queuing entries above the configured rate.",UI/YAML/API,No
+Logs,Format Conversion,Array-to-multiple-records expansion (unroll/split),Tier 3,3 / 16,"Chronosphere, Cribl, Mezmo","Breaks an array field into individual standalone records, one per array element.",UI/YAML,Optional - JavaScript
+Logs,Format Conversion,Nested object flatten/unflatten,Tier 3,3 / 16,"Chronosphere, Cribl, Elastic",Moves nested key-value pairs to/from the top level of a record.,UI/YAML/API,No
+Logs,Parse/Extract,Automatic timestamp detection & extraction,Tier 3,3 / 16,"Cribl, Elastic, Grafana Labs","Detects and extracts a timestamp from a field, trying a sequence of formats, to set the record's official time.",UI/YAML/API,Optional - JavaScript
+Logs,Redact/Mask,Field value hashing,Tier 3,3 / 16,"Chronosphere, Grafana Labs, Sumo Logic","Hashes a field's value in place (or into a new field), obscuring it while preserving uniqueness.",UI/YAML,No
+Logs,Rename/Remap,Remove specific attribute,Tier 3,3 / 16,"Datadog, Dynatrace, Grafana Labs",Deletes a named field/label from a record.,UI/YAML,No
+Logs,Aggregate/Rollup,Time-windowed statistical aggregation (sum/avg/count/etc.),Tier 3,2 / 16,"Cribl, Splunk",Computes summary statistics from event data over a configurable time window and group-by fields.,UI,Yes - SPL2
+Logs,Enrich,Kubernetes metadata enrichment,Tier 3,2 / 16,"Grafana Labs, OpenTelemetry",Adds Kubernetes pod/namespace metadata to records by querying the Kubernetes API.,YAML,No
+Logs,Filter/Drop,Remove specific field/key (record kept),Tier 3,2 / 16,"Chronosphere, Elastic",Strips one or more named fields/keys from a record while keeping the record itself.,UI/YAML/API,No
+Logs,Format Conversion,JSON encode/decode (string <-> object),Tier 3,2 / 16,"Chronosphere, Elastic",Converts between a JSON string and a structured JSON object.,UI/YAML,No
+Logs,Format Conversion,Regex-based string substitution (format repair),Tier 3,2 / 16,"Coralogix, Elastic","Modifies matched text within a field using a regex pattern and replacement string, often to repair malformed data.",UI/YAML/API,No
+Logs,Format Conversion,Security-schema normalization (OCSF),Tier 3,2 / 16,"Datadog, Splunk",Normalizes security log events into the Open Cybersecurity Schema Framework standard.,UI/API,Yes - SPL2
+Logs,Parse/Extract,User-Agent string parsing,Tier 3,2 / 16,"Datadog, Elastic",Parses a User-Agent header string into OS/browser/device fields.,UI/YAML/API,No
+Logs,Rename/Remap,Bulk field add/rename/modify (generic edit),Tier 3,2 / 16,"Cribl, Datadog","A single generic UI/processor that covers adding, renaming, and modifying field values together.",UI/API,Yes - JavaScript
+Logs,Rename/Remap,Field value find/replace (regex substitution),Tier 3,2 / 16,"Chronosphere, Grafana Labs",Finds and replaces text within a field's value using a regex pattern.,UI/YAML,No
+Logs,Route,Storage-bucket/index assignment routing,Tier 3,2 / 16,"Dynatrace, Splunk","Assigns the first matching record to a specific storage bucket or index, controlling retention/analysis scope.",UI/YAML,Yes - SPL2
+Logs,Aggregate/Rollup,Combine values from multiple records into an array,Tier 3,1 / 16,Chronosphere,Combines values from multiple related records into a single array field.,UI/YAML,No
+Logs,Aggregate/Rollup,Threshold/condition-triggered aggregation (custom-code evaluation),Tier 3,1 / 16,Mezmo,Accumulates field values over a window and evaluates them via a custom scripted condition.,UI,Yes - JavaScript
+Logs,Convert Signal,Direct field-value-to-metric extraction,Tier 3,1 / 16,Edge Delta,"Generates metric datapoints directly from specific log field values (e.g. status codes, latency).",UI/YAML,No
+Logs,Convert Signal,Log-to-AI-anomaly-event extraction,Tier 3,1 / 16,Dynatrace,Generates an AI-anomaly-detection event record from a record matching a query rule.,UI/YAML,No
+Logs,Convert Signal,Log-to-business/lifecycle-event extraction,Tier 3,1 / 16,Dynatrace,Extracts specified fields from a matching record into a new business or SDLC event record.,UI/YAML,No
+Logs,Convert Signal,Log-to-metric via pattern clustering,Tier 3,1 / 16,Edge Delta,Clusters log messages by structural similarity and generates metrics summarizing each pattern.,YAML,No
+Logs,Convert Signal,Query-derived metric extraction (counter/histogram/value),Tier 3,1 / 16,Dynatrace,"Derives a counter, histogram, or value metric from records matching a query-language rule.",UI/YAML,Yes - DQL
+Logs,Decrypt,Field-level decryption,Tier 3,1 / 16,Splunk,"Reverses field-level encryption applied upstream, using a stored key.",UI,Yes - SPL2
+Logs,Dedupe,Stable-hash-based dedup via document fingerprinting,Tier 3,1 / 16,Elastic,"Generates a consistent hash from event fields as a stable document ID, so re-ingestion updates rather than duplicates.",YAML,No
+Logs,Enrich,Buffered context capture around a trigger,Tier 3,1 / 16,Edge Delta,"Captures and emits surrounding records when a trigger condition is met, for debugging context.",YAML,Yes - OTTL
+Logs,Enrich,Cloud/host resource-metadata auto-detection,Tier 3,1 / 16,OpenTelemetry,"Auto-detects host/cloud environment metadata (AWS, GCP, Azure, K8s, Docker) and attaches it as resource attributes.",YAML,No
+Logs,Enrich,Cost-attribution tagging,Tier 3,1 / 16,Dynatrace,Tags matching records with a cost-center/product-usage attribution field.,UI/YAML,No
+Logs,Enrich,Cross-signal correlation enrichment (span/trace-log linking),Tier 3,1 / 16,Datadog,Remaps span/trace-identifying attributes so logs correlate with associated traces.,UI,No
+Logs,Enrich,Resource-level attribute editing,Tier 3,1 / 16,OpenTelemetry,Generic insert/update/upsert/delete/hash operations on resource-level (not record-level) attributes.,YAML,No
+Logs,Enrich,Search-query-driven categorization/classification tagging,Tier 3,1 / 16,Datadog,Adds a classification attribute to a record based on a search-query match.,UI,No
+Logs,Enrich,Threat-intelligence indicator enrichment,Tier 3,1 / 16,Datadog,Enriches records by matching attributes against threat-intelligence indicators of compromise.,UI,No
+Logs,Enrich,Topology/service-graph relationship enrichment,Tier 3,1 / 16,Dynatrace,Enriches records with computed service-topology node/edge identifiers.,UI/YAML,No
+Logs,Filter/Drop,Usage-driven automatic drop recommendations,Tier 3,1 / 16,Grafana Labs,Analyzes which log patterns are actually queried and recommends/auto-applies drop rules for the rest.,UI/API,No
+Logs,Format Conversion,CSV encode/decode,Tier 3,1 / 16,Chronosphere,Converts between CSV-formatted text and structured JSON.,UI/YAML,No
+Logs,Format Conversion,Data-type conversion,Tier 3,1 / 16,Elastic,"Converts a field's value to a different data type (int, float, string, boolean, ip, etc.).",UI/YAML/API,No
+Logs,Format Conversion,Encoded-field decoding (Base64/Hex),Tier 3,1 / 16,Datadog,"Converts an encoded field (Base64, Hex) back to its original form.",UI,No
+Logs,Format Conversion,Generic output-format serialization,Tier 3,1 / 16,Cribl,"Converts an event's content into a chosen output format (CSV, JSON, key=value).",UI,No
+Logs,Format Conversion,Merge multiple raw lines into one entry,Tier 3,1 / 16,Grafana Labs,Merges multiple raw log lines into a single log entry before further processing.,YAML,No
+Logs,Format Conversion,Remove empty/null structural noise,Tier 3,1 / 16,Mezmo,Recursively removes empty arrays/objects/nulls from a field to clean up message structure.,UI,No
+Logs,Format Conversion,String-to-numeric type conversion,Tier 3,1 / 16,Chronosphere,Converts string values to numeric format using regex patterns.,UI/YAML,No
+Logs,Format Conversion,Strip ANSI/terminal escape codes,Tier 3,1 / 16,Grafana Labs,Removes ANSI color escape codes from log lines.,YAML,No
+Logs,Parse/Extract,CSV field extraction,Tier 3,1 / 16,Elastic,Parses comma-separated value data into individual named fields.,YAML,No
+Logs,Parse/Extract,JSON array element extraction/expansion,Tier 3,1 / 16,Datadog,"Applies extraction logic across, or expands, elements within a JSON array field.",UI/API,No
+Logs,Parse/Extract,Key-value / logfmt auto-extraction,Tier 3,1 / 16,Elastic,Automatically parses key=value formatted text into structured fields.,YAML,No
+Logs,Parse/Extract,Multiline log joining,Tier 3,1 / 16,Chronosphere,Combines multiple raw log lines into a single logical log entry.,UI/YAML,No
+Logs,Parse/Extract,URL component parsing,Tier 3,1 / 16,Datadog,Extracts query parameters and other components from a URL field.,UI,No
+Logs,Parse/Extract,XML field extraction,Tier 3,1 / 16,Datadog,Parses an XML-formatted field into individual structured fields.,UI/API,No
+Logs,Parse/Extract,Zero-config automatic parsing of known log formats,Tier 3,1 / 16,New Relic,"Auto-parses common log formats (NGINX, Apache, syslog, etc.) into structured fields with no rule authoring.",UI,No
+Logs,Rate-limit/Quota,Rolling volume/event quota with overflow handling,Tier 3,1 / 16,Datadog,"Measures traffic against a rolling volume/event quota and drops, retains, or reroutes excess once the limit is reached.",UI/API,No
+Logs,Redact/Mask,Built-in checksum-pattern detection (e.g. Luhn),Tier 3,1 / 16,Grafana Labs,Detects and redacts values matching a known checksum algorithm (e.g. credit-card numbers).,YAML,No
+Logs,Redact/Mask,Field-level encryption,Tier 3,1 / 16,Mezmo,Encrypts a specified field's value with a key before it reaches storage.,UI,No
+Logs,Redact/Mask,Remove specific attribute (vs. mask in place),Tier 3,1 / 16,New Relic,Deletes a matching sensitive attribute entirely rather than masking its value.,UI/API,No
+Logs,Rename/Remap,Assign canonical field mapping (message/status/timestamp/service),Tier 3,1 / 16,Datadog,"Designates which existing attribute is the record's official timestamp, message, status, or service field.",UI,No
+Logs,Rename/Remap,Compute new field via arithmetic/formula,Tier 3,1 / 16,Datadog,Adds a new field containing the result of a formula applied to existing numeric fields.,UI,No
+Logs,Rename/Remap,Field/key copy (duplicate),Tier 3,1 / 16,Chronosphere,Duplicates a source field's value into a new destination field.,UI/YAML,No
+Logs,Rename/Remap,Multi-op field mutation (rename/replace/case/split/merge/convert),Tier 3,1 / 16,Elastic,"One processor bundling several field-level string mutations (rename, gsub, case, split/join/merge, type conversion).",YAML,No
+Logs,Rename/Remap,Template-based new field construction,Tier 3,1 / 16,Datadog,Builds a new field by combining static text and existing field values via a template.,UI,No
+Logs,Route,Conditional nested-stage branching,Tier 3,1 / 16,Grafana Labs,Conditionally applies a nested set of processing stages (or drops the entry) based on a matcher.,YAML,No
+Logs,Route,Cost-tiered storage routing (hot/warm/cold),Tier 3,1 / 16,Coralogix,"Routes matching records to a hot/warm/cold storage tier based on policy, for cost control.",UI/API,No
+Logs,Route,External/3rd-party destination forwarding,Tier 3,1 / 16,Sumo Logic,"Sends matching data to a non-primary external destination (e.g. S3) instead of, or alongside, the main destination.",UI,No
+Logs,Route,Multi-tenant routing (tenant ID assignment),Tier 3,1 / 16,Grafana Labs,"Sets the tenant ID of a record from an extracted value or fixed string, controlling multi-tenant routing.",YAML,No
+Logs,Windowing/Buffering,Sliding-window event buffering around a trigger,Tier 3,1 / 16,Vector (Datadog),Buffers a window of events around a trigger condition and forwards the surrounding context.,YAML,Yes - VRL
+Metrics,Filter/Drop,Conditional metric/datapoint drop,Tier 1,10 / 16,"Chronosphere, Datadog, Dynatrace, Edge Delta, Grafana Labs, New Relic, OpenTelemetry, Splunk, Sumo Logic, Vector (Datadog)",Drops or retains whole metric series/datapoints based on a match condition.,UI/YAML/API,"Optional - OTTL, NRQL, VRL"
+Metrics,Aggregate/Rollup,Time-windowed rollup (merge datapoints into longer intervals),Tier 2,6 / 16,"Chronosphere, Cribl, Datadog, Edge Delta, Splunk, Vector (Datadog)",Merges/rolls up metric datapoints into longer time-window summaries.,UI/YAML/API,No
+Metrics,Custom Transform,General-purpose scripted transform (custom-code escape hatch),Tier 2,5 / 16,"Chronosphere, Datadog, Dynatrace, OpenTelemetry, Vector (Datadog)",A scripting stage (VRL/OTTL/Lua/DQL) for metric-specific logic beyond the declarative rule set.,UI/YAML/API,"Yes - VRL, DQL, OTTL, Lua 5.4"
+Metrics,Enrich,Static key/value tag enrichment,Tier 2,5 / 16,"Chronosphere, Dynatrace, Edge Delta, Grafana Labs, OpenTelemetry",Adds fixed or conditionally-scoped key/value pairs to matching metric series.,UI/YAML,No
+Metrics,Rename/Remap,Metric/tag rename,Tier 2,5 / 16,"Chronosphere, Datadog, Dynatrace, Grafana Labs, OpenTelemetry","Changes the name of a metric or its tag/label keys, including bulk regex-based rename.",UI/YAML/API,Yes - OTTL
+Metrics,Redact/Mask,Attribute/dimension value masking,Tier 3,3 / 16,"Chronosphere, Edge Delta, OpenTelemetry",Obfuscates sensitive values in metric attributes/dimensions by replacing matched patterns.,UI/YAML,No
+Metrics,Aggregate/Rollup,Cardinality-reduction via dimension dropping,Tier 3,2 / 16,"Cribl, Edge Delta","Removes specified dimensions and re-aggregates the remaining series, reducing cardinality.",UI/YAML,No
+Metrics,Dedupe,Time-windowed duplicate datapoint suppression,Tier 3,2 / 16,"Chronosphere, Edge Delta",Detects and removes duplicate metric datapoints within a time window.,UI/YAML,No
+Metrics,Enrich,Kubernetes metadata enrichment,Tier 3,2 / 16,"Grafana Labs, OpenTelemetry",Adds Kubernetes pod/namespace metadata to metric resource attributes.,YAML,No
+Metrics,Filter/Drop,Tag/dimension allow-list or block-list,Tier 3,2 / 16,"Chronosphere, Datadog",Controls which metric tags/dimensions are allowed or blocked from passing through.,UI/YAML/API,No
+Metrics,Format Conversion,Cumulative-to-delta temporality conversion,Tier 3,2 / 16,"Edge Delta, OpenTelemetry",Converts cumulative sum/histogram metrics to delta aggregation temporality for easier rate calculation.,UI/YAML,No
+Metrics,Rate-limit/Quota,Tag-cardinality cap (circuit breaker),Tier 3,2 / 16,"Datadog, Vector (Datadog)","Limits the number of distinct tag values per metric, dropping the offending tag or event past a threshold.",UI/YAML/API,No
+Metrics,Redact/Mask,Attribute value hashing,Tier 3,2 / 16,"Chronosphere, Grafana Labs","Hashes a metric attribute value in place, obscuring it while preserving uniqueness.",UI/YAML,No
+Metrics,Route,Condition-based multi-destination routing,Tier 3,2 / 16,"OpenTelemetry, Vector (Datadog)",Routes metric series to different downstream pipelines/destinations based on a match condition.,YAML,"Yes - OTTL, VRL"
+Metrics,Sample,Percentage/rate-based random sampling,Tier 3,2 / 16,"Chronosphere, Edge Delta","Retains a configurable percentage of metric datapoints, discarding the rest.",UI/YAML,No
+Metrics,Aggregate/Rollup,Threshold/condition-triggered aggregation (custom evaluation),Tier 3,1 / 16,Mezmo,Accumulates metric field values over a window and evaluates them against threshold/change conditions.,UI,Optional - JavaScript
+Metrics,Aggregate/Rollup,Usage-driven automatic aggregation recommendations,Tier 3,1 / 16,Grafana Labs,Analyzes metric usage across dashboards/alerts and aggregates underutilized metrics into lower-cardinality versions.,UI/API,No
+Metrics,Convert Signal,Metric-to-log conversion,Tier 3,1 / 16,Vector (Datadog),Converts a metric event into a log event for log-only downstream destinations.,YAML,No
+Metrics,Enrich,Cloud/host resource-metadata auto-detection,Tier 3,1 / 16,OpenTelemetry,Auto-detects host/cloud environment metadata and attaches it as resource attributes on metric data.,YAML,No
+Metrics,Enrich,External lookup-table join enrichment,Tier 3,1 / 16,Edge Delta,Enriches metrics dynamically using an external lookup table with configurable match modes.,UI/YAML,No
+Metrics,Enrich,GeoIP lookup enrichment,Tier 3,1 / 16,Dynatrace,Enriches metric records with geolocation data derived from an IP address field.,UI/YAML,No
+Metrics,Enrich,Resource-level attribute editing,Tier 3,1 / 16,OpenTelemetry,Generic insert/update/upsert/delete/hash operations on resource-level attributes attached to metric data.,YAML,No
+Metrics,Enrich,Topology/service-graph relationship enrichment,Tier 3,1 / 16,Dynatrace,Enriches metric records with computed service-topology node/edge identifiers.,UI/YAML,No
+Metrics,Filter/Drop,Delete specific tag/key,Tier 3,1 / 16,Chronosphere,Deletes a specified tag/key and its value from all metric records.,UI/YAML,No
+Metrics,Format Conversion,Incremental-to-absolute value conversion,Tier 3,1 / 16,Vector (Datadog),Converts incremental counter metrics to absolute metrics by accumulating values over time.,YAML,No
+Metrics,Format Conversion,Nested attribute flatten/unflatten,Tier 3,1 / 16,Chronosphere,Moves nested key-value pairs to/from the top level of a metric record.,UI/YAML,No
+Metrics,Format Conversion,String-to-numeric type conversion,Tier 3,1 / 16,Chronosphere,Converts string-encoded values to numeric format.,UI/YAML,No
+Metrics,Redact/Mask,Remove specific attribute,Tier 3,1 / 16,New Relic,Deletes a specific matching attribute/field from a metric record.,UI/API,No
+Metrics,Rename/Remap,Field value find/replace,Tier 3,1 / 16,Chronosphere,Finds and replaces text within a tag/label value using regex.,UI/YAML,No
+Metrics,Rename/Remap,Field/key copy,Tier 3,1 / 16,Chronosphere,Duplicates a source tag's value into a new destination tag.,UI/YAML,No
+Metrics,Rename/Remap,Remove high-cardinality dimension,Tier 3,1 / 16,Dynatrace,"Deletes a specified dimension/field, documented as a way to remove high-cardinality tags from metrics.",UI/YAML,No
+Traces,Filter/Drop,Conditional span/trace drop,Tier 1,10 / 16,"Chronosphere, Datadog, Dynatrace, Edge Delta, Grafana Labs, New Relic, OpenTelemetry, Splunk, Sumo Logic, Vector (Datadog)",Drops or retains whole spans/traces based on a match condition.,UI/YAML/API,"Optional - OTTL, NRQL, VRL"
+Traces,Sample,Head-based sampling (per-span/agent-side),Tier 1,10 / 16,"Chronosphere, Datadog, Edge Delta, Elastic, Grafana Labs, Honeycomb, New Relic, OpenTelemetry, Sumo Logic, Vector (Datadog)","Makes a keep/drop decision per span at ingestion time, targeting a percentage or rate, without waiting for the full trace.",UI/YAML/API,No
+Traces,Sample,"Tail-based sampling (whole-trace, post-completion)",Tier 2,7 / 16,"Datadog, Edge Delta, Elastic, Grafana Labs, OpenTelemetry, Splunk, Sumo Logic","Evaluates a completed trace against policies (status, latency, match condition) using full trace context to decide keep/drop.",UI/YAML/API,Optional - OTTL
+Traces,Enrich,Static key/value tag enrichment,Tier 2,6 / 16,"Chronosphere, Dynatrace, Edge Delta, Grafana Labs, OpenTelemetry, Sumo Logic",Adds fixed or conditionally-scoped key/value pairs to matching spans.,UI/YAML,No
+Traces,Custom Transform,General-purpose scripted transform (custom-code escape hatch),Tier 2,5 / 16,"Chronosphere, Datadog, Dynatrace, OpenTelemetry, Vector (Datadog)",A scripting stage (VRL/OTTL/Lua/DQL) for span-level logic beyond the declarative rule set.,UI/YAML/API,"Yes - Lua, VRL, DQL, OTTL"
+Traces,Redact/Mask,Span attribute masking/redaction,Tier 2,4 / 16,"Chronosphere, Datadog, Edge Delta, OpenTelemetry",Detects and obscures sensitive values in span attributes by replacing matched patterns.,UI/YAML/API,No
+Traces,Redact/Mask,Span attribute hashing,Tier 3,3 / 16,"Chronosphere, Grafana Labs, Sumo Logic",Hashes a span attribute value in place or deletes/hashes it on the collector.,UI/YAML,No
+Traces,Rename/Remap,Span attribute/key rename,Tier 3,3 / 16,"Chronosphere, Dynatrace, Grafana Labs",Changes the name of one or more span attributes/keys.,UI/YAML,Yes - OTTL
+Traces,Convert Signal,Span-to-RED-metric derivation,Tier 3,2 / 16,"Grafana Labs, New Relic","Derives request/error/duration Prometheus-style metrics from ingested spans, per service/operation/status.",YAML/API,Yes - NRQL
+Traces,Dedupe,Time-windowed duplicate span suppression,Tier 3,2 / 16,"Chronosphere, Edge Delta",Detects and removes duplicate spans within a time window.,UI/YAML,No
+Traces,Enrich,Kubernetes metadata enrichment,Tier 3,2 / 16,"Grafana Labs, OpenTelemetry",Adds Kubernetes pod/namespace metadata to span resource attributes.,YAML,No
+Traces,Rename/Remap,Span name rewrite/extraction,Tier 3,2 / 16,"Grafana Labs, OpenTelemetry","Renames a span by combining attribute values or regex, and/or extracts new attributes from the span name.",YAML,No
+Traces,Route,Condition-based multi-destination routing,Tier 3,2 / 16,"OpenTelemetry, Vector (Datadog)",Routes spans/traces to different downstream pipelines/destinations based on a match condition.,YAML,"Yes - OTTL, VRL"
+Traces,Sample,Dynamic/adaptive sampling rate by key frequency,Tier 3,2 / 16,"Dynatrace, Honeycomb","Automatically raises or lowers the sample rate per key based on how frequently that key occurs, to hit a volume/license target.",UI/YAML/API,No
+Traces,Convert Signal,Sampling-rate-corrected metric derivation,Tier 3,1 / 16,Dynatrace,"Derives a counter/histogram/value metric from spans matching a query rule, correcting for the trace sampling rate at ingest.",UI/YAML,Yes - DQL
+Traces,Convert Signal,Service-graph/topology metric derivation,Tier 3,1 / 16,Grafana Labs,Inspects parent-child span relationships to build service-to-service call-graph metrics.,YAML,No
+Traces,Convert Signal,Span-to-AI-anomaly-event extraction,Tier 3,1 / 16,Dynatrace,Generates an AI-anomaly-detection event record from a span matching a query rule.,UI/YAML,No
+Traces,Convert Signal,Trace-to-log conversion,Tier 3,1 / 16,Vector (Datadog),"Converts a trace event into a log event, preserving span/trace attributes as log fields.",YAML,No
+Traces,Enrich,Cloud/host resource-metadata auto-detection,Tier 3,1 / 16,OpenTelemetry,Auto-detects host/cloud environment metadata and attaches it as resource attributes on trace data.,YAML,No
+Traces,Enrich,Cost-attribution tagging,Tier 3,1 / 16,Dynatrace,Tags matching spans with a cost-center/product-usage attribution field.,UI/YAML,No
+Traces,Enrich,External lookup-table join enrichment,Tier 3,1 / 16,Edge Delta,Enriches spans dynamically using an external lookup table with configurable match modes.,UI/YAML,No
+Traces,Enrich,GeoIP lookup enrichment,Tier 3,1 / 16,Dynatrace,Enriches span records with geolocation data derived from an IP address field.,UI/YAML,No
+Traces,Enrich,Resource-level attribute editing,Tier 3,1 / 16,OpenTelemetry,Generic insert/update/upsert/delete/hash operations on resource-level attributes attached to trace data.,YAML,No
+Traces,Enrich,Topology/service-graph relationship enrichment,Tier 3,1 / 16,Dynatrace,Enriches span records with computed service-topology node/edge identifiers.,UI/YAML,No
+Traces,Filter/Drop,Payload-stripping trace-skeleton retention,Tier 3,1 / 16,Coralogix,"Strips the span payload for matched traces at ingest, retaining only a minimal skeleton so traces still assemble visually at lower cost.",UI/API,No
+Traces,Filter/Drop,Remove specific span attribute/key,Tier 3,1 / 16,Chronosphere,Strips one or more named attributes/keys from a span while keeping the span.,UI/YAML,No
+Traces,Filter/Drop,Retention-scoped indexing filter,Tier 3,1 / 16,Datadog,"Selects which ingested spans are indexed/stored, via always-on intelligent filtering plus configurable query-based filters.",UI,No
+Traces,Format Conversion,Array-to-multiple-records expansion,Tier 3,1 / 16,Chronosphere,Converts an array of span-related JSON objects into individual standalone records.,UI/YAML,No
+Traces,Format Conversion,JSON encode/decode,Tier 3,1 / 16,Chronosphere,Converts between a JSON string and a structured JSON object for span data.,UI/YAML,No
+Traces,Format Conversion,Nested attribute flatten/unflatten,Tier 3,1 / 16,Chronosphere,Moves nested key-value pairs to/from the top level of a span record.,UI/YAML,No
+Traces,Format Conversion,OTLP protocol-version normalization/batching,Tier 3,1 / 16,Cribl,Normalizes trace data across OTLP protocol versions and optionally batches spans with matching resource attributes.,UI,No
+Traces,Format Conversion,String-to-numeric type conversion,Tier 3,1 / 16,Chronosphere,Converts string-encoded values to numeric format.,UI/YAML,No
+Traces,Rate-limit/Quota,Throughput-targeted adaptive sampling rate,Tier 3,1 / 16,Honeycomb,"Targets a fixed spans-per-second throughput goal via an adaptive sampler, rather than a fixed percentage.",YAML,No
+Traces,Redact/Mask,Remove specific span attribute,Tier 3,1 / 16,New Relic,Deletes a specific matching attribute from a span.,UI/API,No
+Traces,Rename/Remap,Field value find/replace,Tier 3,1 / 16,Chronosphere,Finds and replaces text within a span attribute value using regex.,UI/YAML,No
+Traces,Rename/Remap,Field/key copy,Tier 3,1 / 16,Chronosphere,Duplicates a source attribute's value into a new destination attribute.,UI/YAML,No
+Traces,Rename/Remap,Remove specific attribute,Tier 3,1 / 16,Dynatrace,Deletes a named attribute from a span.,UI/YAML,No
+Traces,Route,Cost-tiered storage routing (hot/warm/cold),Tier 3,1 / 16,Coralogix,"Routes ingested spans to a hot/warm/cold storage tier based on policy, for cost control.",UI/API,No
+Traces,Route,Storage-bucket assignment routing,Tier 3,1 / 16,Dynatrace,"Assigns the first matching record to a specific storage bucket, controlling retention/analysis scope.",UI/YAML,No
+Traces,Sample,Rules-based conditional sampling,Tier 3,1 / 16,Honeycomb,Evaluates an ordered list of conditional rules against trace fields (e.g. always keep errors) and applies the first match.,YAML,No

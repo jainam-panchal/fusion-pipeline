@@ -1,0 +1,8 @@
+.claude/
+.agents/
+/target/
+**/*.rs.bk
+.scratch/
+.env
+*.log
+!testdata/**/*.log
