@@ -27,6 +27,6 @@ pub fn compile(pattern: &str, engine: EngineChoice, limits: Limits) -> Regex {
 }
 
 /// Compiles on the given engine with default limits, no lint, no canary.
-pub fn on(engine: EngineChoice, pattern: &str) -> Regex {
+pub fn compile_on(engine: EngineChoice, pattern: &str) -> Regex {
     compile(pattern, engine, Limits::default())
 }

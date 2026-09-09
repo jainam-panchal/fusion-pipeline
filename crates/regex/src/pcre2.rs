@@ -263,8 +263,9 @@ impl Pcre2Regex {
         Ok(out)
     }
 
-    pub(crate) fn capture_names(&self) -> &[Option<String>] {
-        &self.names
+    /// Hands the group names to the facade, which owns them from then on.
+    pub(crate) fn take_names(&mut self) -> Vec<Option<String>> {
+        std::mem::take(&mut self.names)
     }
 
     /// Whether the pattern matches, without recording group spans.
@@ -304,7 +305,15 @@ impl Pcre2Regex {
             std::slice::from_raw_parts(ptr, count * 2)
         };
         // `rc` is the highest group number that matched plus one; groups at or beyond it are
-        // unset. PCRE2 also marks unset groups inside that range with `PCRE2_UNSET`.
+        // unset. PCRE2 also marks unset groups inside that range with `PCRE2_UNSET`. Zero
+        // means the ovector was too small, which `MatchData::new(capture_count + 1)` rules
+        // out; treat it as the wrapper bug it would be rather than as a match.
+        if rc == 0 {
+            return Err(MatchError::Engine {
+                code: 0,
+                message: "match data block too small for the pattern's groups".to_owned(),
+            });
+        }
         let set_groups = usize::try_from(rc).unwrap_or(0);
         let spans = ovector
             .chunks_exact(2)

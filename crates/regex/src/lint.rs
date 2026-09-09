@@ -67,6 +67,10 @@ pub enum RedosRisk {
         /// Byte offset of the first repetition.
         offset: usize,
     },
+    /// The lint could not parse the pattern even after desugaring, and no canary was
+    /// configured to check it instead. Raised by [`crate::Regex::with_options`], never by
+    /// [`lint`] itself, which reports this through [`LintReport::parsed`].
+    NotParsed,
 }
 
 impl RedosRisk {
@@ -77,6 +81,7 @@ impl RedosRisk {
             Self::NestedQuantifiers { offset }
             | Self::OverlappingAlternation { offset }
             | Self::OverlappingSuffix { offset } => *offset,
+            Self::NotParsed => 0,
         }
     }
 }
@@ -96,6 +101,9 @@ impl fmt::Display for RedosRisk {
             Self::OverlappingSuffix { offset } => write!(
                 f,
                 "unbounded quantifier followed by an overlapping quantifier at offset {offset}"
+            ),
+            Self::NotParsed => f.write_str(
+                "pattern could not be parsed for the lint and no canary is configured to check it",
             ),
         }
     }

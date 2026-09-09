@@ -17,6 +17,7 @@ fn kinds(pattern: &str) -> Vec<&'static str> {
             RedosRisk::NestedQuantifiers { .. } => "nested",
             RedosRisk::OverlappingAlternation { .. } => "alternation",
             RedosRisk::OverlappingSuffix { .. } => "suffix",
+            RedosRisk::NotParsed => "not-parsed",
             other => panic!("unexpected risk {other:?}"),
         })
         .collect()
@@ -116,4 +117,30 @@ fn reject_policy_fails_compilation_and_warn_policy_keeps_findings() {
             .redos_warnings()
             .is_empty()
     );
+}
+
+#[test]
+fn unparseable_pattern_is_a_finding_when_no_canary_can_check_it() {
+    // A PCRE2 conditional never parses on regex-syntax (`(?R)` would: it is the CRLF flag
+    // there). With the canary off nothing else looks at it, so silence must not read as
+    // clean; with the canary on, the canary is the check.
+    let no_canary = Options {
+        lint: true,
+        canary: None,
+        ..Options::default()
+    };
+    let err = Regex::with_options(r"(a)?(?(1)b|c)", &no_canary).unwrap_err();
+    assert!(
+        matches!(err, CompileError::RedosRisk(ref r) if r == &[RedosRisk::NotParsed]),
+        "{err:?}"
+    );
+
+    let warn = Options {
+        on_redos_risk: RedosPolicy::Warn,
+        ..no_canary
+    };
+    let re = Regex::with_options(r"(a)?(?(1)b|c)", &warn).unwrap();
+    assert_eq!(re.redos_warnings(), &[RedosRisk::NotParsed]);
+
+    assert!(Regex::with_options(r"(a)?(?(1)b|c)", &Options::checked()).is_ok());
 }

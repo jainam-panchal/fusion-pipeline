@@ -5,7 +5,9 @@ mod common;
 
 use common::LINUX_SYSLOG;
 use fusion_regex::canary::{CanaryConfig, run};
-use fusion_regex::{CompileError, Engine, Limits, MatchError, Options, RedosPolicy, Regex};
+use fusion_regex::{
+    CompileError, Engine, EngineChoice, Limits, MatchError, Options, RedosPolicy, Regex,
+};
 
 fn tight() -> CanaryConfig {
     CanaryConfig {
@@ -112,6 +114,23 @@ fn checked_options_reject_and_warn_policy_keeps_the_trip() {
             .canary_warning()
             .is_none()
     );
+}
+
+#[test]
+fn facade_rejects_nested_quantifier_by_canary_when_forced_onto_pcre2() {
+    // The acceptance criterion's pattern compiles linear under `Auto`, where the lint
+    // rejects it; forcing the backtracking engine is what routes it to the canary.
+    let options = Options {
+        engine: EngineChoice::Backtracking,
+        canary: Some(tight()),
+        lint: false,
+        ..Options::default()
+    };
+    let err = Regex::with_options(r"(a+)+$", &options).unwrap_err();
+    match err {
+        CompileError::CanaryTripped(trip) => assert_eq!(trip.error, MatchError::MatchLimit),
+        other => panic!("expected CanaryTripped, got {other:?}"),
+    }
 }
 
 #[test]

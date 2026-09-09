@@ -22,7 +22,8 @@ use std::num::NonZeroU32;
 
 use lint::RedosRisk;
 
-/// Which engine a pattern compiled on.
+/// Which engine a pattern compiled on. A closed set: it is a metric label and the facade
+/// is defined as exactly these two engines, so callers may match it exhaustively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Engine {
     /// The Rust `regex` crate: linear time, cannot backtrack.
@@ -50,6 +51,7 @@ impl fmt::Display for Engine {
 
 /// Which engine the caller wants. [`EngineChoice::Auto`] is the facade's normal behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum EngineChoice {
     /// Linear first, PCRE2 if the `regex` crate rejects the syntax.
     #[default]
@@ -90,12 +92,13 @@ pub struct Limits {
     /// else: about two minutes on a 64 KiB record. This limit is what bounds it, at
     /// 1.5–1.8× the matching cost on the PCRE2 path. Single-character repeats loop inside
     /// one item and are not counted; their worst case is one character scan per start
-    /// position, seconds at 64 KiB, bounded by `input_bytes`.
+    /// position, seconds at 64 KiB, bounded by `input_bytes`. That only matters for
+    /// patterns that need PCRE2: `\w+\s+\w+` itself compiles on the linear engine.
     pub work_limit: Option<NonZeroU32>,
     /// Largest haystack accepted, in bytes. Longer inputs are [`MatchError::InputTooLarge`].
     ///
     /// On the backtracking engine this is the only bound on unanchored patterns made of
-    /// single-character repeats (`\w+\s+\w+`, `[a-z]+[0-9]+`): they scan from every start
+    /// single-character repeats in PCRE2-only syntax (`(?<=:)\w+\s+\w+`): they scan from every start
     /// position, `match_limit` resets per start and `work_limit` does not see inside a
     /// repeat, so a non-matching record costs O(n²) character steps. At the default 64 KiB
     /// that is a few seconds; it is also the largest input the canary tries.
@@ -122,12 +125,28 @@ impl Default for Limits {
 
 /// What to do when the lint or the canary finds a ReDoS risk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum RedosPolicy {
     /// Fail compilation with [`CompileError::RedosRisk`] or [`CompileError::CanaryTripped`].
     #[default]
     Reject,
     /// Compile anyway and expose the findings through [`Regex::redos_warnings`].
     Warn,
+}
+
+impl RedosPolicy {
+    /// Applies the policy to one finding: `Reject` turns it into the error `reject` builds,
+    /// `Warn` hands it back to be kept.
+    fn apply<T>(
+        self,
+        finding: T,
+        reject: impl FnOnce(T) -> CompileError,
+    ) -> Result<Option<T>, CompileError> {
+        match self {
+            Self::Reject => Err(reject(finding)),
+            Self::Warn => Ok(Some(finding)),
+        }
+    }
 }
 
 /// Everything [`Regex::with_options`] needs beyond the pattern.
@@ -336,7 +355,7 @@ impl Regex {
         let limits = &options.limits;
         scan::check_guards(pattern, limits)?;
 
-        let inner = match options.engine {
+        let mut inner = match options.engine {
             EngineChoice::Auto => match compile_linear(pattern) {
                 Ok(re) => Inner::Linear(re),
                 Err(_) => Inner::Backtracking(pcre2::Pcre2Regex::compile(pattern, limits)?),
@@ -352,12 +371,19 @@ impl Regex {
         // regardless of classification. The canary below is different: it measures PCRE2.
         let mut warnings = Vec::new();
         if options.lint {
-            let risks = lint::lint(pattern).risks;
+            let report = lint::lint(pattern);
+            let mut risks = report.risks;
+            // A pattern the lint cannot parse is only ever PCRE2-only syntax, so the canary
+            // covers it when configured. With the canary off, nothing has looked at it,
+            // and silence would read as "clean".
+            if !report.parsed && options.canary.is_none() {
+                risks.push(RedosRisk::NotParsed);
+            }
             if !risks.is_empty() {
-                match options.on_redos_risk {
-                    RedosPolicy::Reject => return Err(CompileError::RedosRisk(risks)),
-                    RedosPolicy::Warn => warnings = risks,
-                }
+                warnings = options
+                    .on_redos_risk
+                    .apply(risks, CompileError::RedosRisk)?
+                    .unwrap_or_default();
             }
         }
 
@@ -368,16 +394,15 @@ impl Regex {
         let mut canary_warning = None;
         if let (Some(config), Inner::Backtracking(_)) = (&options.canary, &inner) {
             if let Some(trip) = canary::run(pattern, config, limits)? {
-                match options.on_redos_risk {
-                    RedosPolicy::Reject => return Err(CompileError::CanaryTripped(trip)),
-                    RedosPolicy::Warn => canary_warning = Some(trip),
-                }
+                canary_warning = options
+                    .on_redos_risk
+                    .apply(trip, CompileError::CanaryTripped)?;
             }
         }
 
-        let names = match &inner {
+        let names = match &mut inner {
             Inner::Linear(re) => re.capture_names().map(|n| n.map(str::to_owned)).collect(),
-            Inner::Backtracking(re) => re.capture_names().to_vec(),
+            Inner::Backtracking(re) => re.take_names(),
         };
 
         Ok(Self {
