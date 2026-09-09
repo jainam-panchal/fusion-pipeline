@@ -73,7 +73,10 @@ pub enum EngineChoice {
 /// crate with one consumer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
-    /// Upper bound on PCRE2 backtracking steps per match call.
+    /// Upper bound on PCRE2 backtracking steps within one start position. PCRE2 resets the
+    /// counter each time its bump-along loop advances, so an unanchored call over n start
+    /// positions may spend up to n times this; see `work_limit` for the bound on the whole
+    /// call.
     pub match_limit: u32,
     /// Upper bound on nested backtracking frames per match call.
     pub depth_limit: u32,

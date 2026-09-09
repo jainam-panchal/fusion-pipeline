@@ -154,7 +154,10 @@ fn zero_input_limit_gives_no_budget_rather_than_rejecting_everything() {
         input_bytes: 0,
         ..Limits::default()
     };
-    assert_eq!(run(LINUX_SYSLOG, &CanaryConfig::default(), &limits).unwrap(), None);
+    assert_eq!(
+        run(LINUX_SYSLOG, &CanaryConfig::default(), &limits).unwrap(),
+        None
+    );
 }
 
 #[test]

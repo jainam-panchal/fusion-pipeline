@@ -1,5 +1,5 @@
-//! Load-time canary: runs the pattern on PCRE2 under a tight match limit against generated
-//! adversarial inputs.
+//! Load-time canary: runs the pattern on PCRE2 against generated adversarial inputs under
+//! the runtime match limit and a per-byte work budget.
 //!
 //! Inputs are built from the pattern's literal alphabet (literal characters plus one
 //! representative of every character class) at each configured size: every alphabet
@@ -8,14 +8,17 @@
 //! character the pattern never mentions appended, since catastrophic backtracking needs a
 //! near-miss rather than a match.
 //!
-//! Every input is probed anchored, and the smallest size is probed unanchored as well.
-//! Anchored probes find blow-ups inside one start position (the exponential shapes) at
-//! every size without paying for the start loop. PCRE2 resets `match_limit` at every start
-//! position (`pcre2_match.c`, bump-along loop), so the start loop needs a different bound:
-//! the unanchored probe runs under a work budget of `work_per_byte × size` counted across
-//! all start positions, which a group loop that restarts everywhere (`(?:a|b)*(?=c)`)
-//! exceeds even at 1 KiB. Sizes are clamped to [`Limits::input_bytes`], since the runtime
-//! rejects anything larger before matching it.
+//! Every probe runs under the runtime `match_limit` and a work budget of
+//! `work_per_byte × size` counted across all start positions; whichever trips first is the
+//! verdict, and on an exponential shape that is usually the work budget. Every input is
+//! probed anchored at every size, which finds blow-ups inside one start position without
+//! paying for the start loop, and unanchored at the smallest size only: PCRE2 resets
+//! `match_limit` at every start position (`pcre2_match.c`, bump-along loop), so a group
+//! loop that restarts everywhere (`(?:a|b)*(?=c)`) is only visible to the work budget, and
+//! it is quadratic, so 1 KiB is enough to see it. Sizes are clamped to
+//! [`Limits::input_bytes`], since the runtime rejects anything larger before matching it.
+//! The work budget is the canary's own; it applies even when the node's runtime
+//! [`Limits::work_limit`] is `None`.
 //!
 //! The canary describes PCRE2 behaviour, so [`crate::Regex::with_options`] runs it only for
 //! patterns that will execute on PCRE2. [`run`] itself is engine-agnostic.
@@ -55,7 +58,7 @@ impl Default for CanaryConfig {
     fn default() -> Self {
         Self {
             match_limit: None,
-            work_per_byte: NonZeroU32::new(64).unwrap_or(NonZeroU32::MIN),
+            work_per_byte: const { NonZeroU32::new(64).unwrap() },
             sizes: vec![1024, 8192, 65536],
         }
     }
@@ -122,7 +125,8 @@ impl fmt::Display for CanaryTrip {
             self.input_shape,
             self.input_len,
             self.match_limit,
-            self.work_limit.map_or(0, NonZeroU32::get)
+            self.work_limit
+                .map_or_else(|| "none".to_owned(), |n| n.get().to_string())
         )
     }
 }

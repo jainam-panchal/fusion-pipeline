@@ -55,7 +55,7 @@ use crate::{CompileError, Limits, MatchError, Span};
 // The first parameter is really `pcre2_callout_block_8 *`; the wrapper never reads it, so an
 // opaque pointer has the same ABI and avoids redeclaring the struct.
 unsafe extern "C" {
-    fn pcre2_set_callout_8(
+    unsafe fn pcre2_set_callout_8(
         ctx: *mut pcre2_match_context_8,
         callout: Option<extern "C" fn(*mut c_void, *mut c_void) -> c_int>,
         data: *mut c_void,
