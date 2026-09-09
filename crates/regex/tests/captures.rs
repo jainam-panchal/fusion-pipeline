@@ -1,22 +1,10 @@
 //! Named capture extraction gives the same answer on both engines for shared syntax.
 #![allow(clippy::unwrap_used)]
 
-use fusion_regex::{Engine, EngineChoice, Options, Regex};
+mod common;
 
-const LINUX_SYSLOG: &str = r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$";
-const LINUX_LINE: &str =
-    "Jun 14 15:16:01 combo sshd(pam_unix)[19939]: authentication failure; logname= uid=0";
-
-fn on(engine: EngineChoice, pattern: &str) -> Regex {
-    Regex::with_options(
-        pattern,
-        &Options {
-            engine,
-            ..Options::unchecked()
-        },
-    )
-    .unwrap()
-}
+use common::{LINUX_LINE, LINUX_SYSLOG, on};
+use fusion_regex::{Engine, EngineChoice, Regex};
 
 fn named(re: &Regex, hay: &str) -> Vec<(String, String)> {
     let caps = re.captures(hay).unwrap().expect("should match");

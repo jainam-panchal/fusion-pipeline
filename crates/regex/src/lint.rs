@@ -121,8 +121,7 @@ pub fn lint(pattern: &str) -> LintReport {
         };
     };
     let mut walker = Walker {
-        text: &parsed.text.text,
-        offsets: &parsed.text.offsets,
+        source: &parsed.text,
         risks: Vec::new(),
     };
     walker.walk(&parsed.ast);
@@ -148,14 +147,18 @@ fn parse(pattern: &str) -> Option<Parsed> {
 }
 
 struct Walker<'a> {
-    text: &'a str,
-    offsets: &'a [usize],
+    /// The text that parsed and its offset map back to the original pattern.
+    source: &'a scan::Desugared,
     risks: Vec<RedosRisk>,
 }
 
 impl Walker<'_> {
     fn original_offset(&self, span_start: usize) -> usize {
-        self.offsets.get(span_start).copied().unwrap_or(span_start)
+        self.source
+            .offsets
+            .get(span_start)
+            .copied()
+            .unwrap_or(span_start)
     }
 
     fn walk(&mut self, ast: &Ast) {
@@ -331,7 +334,7 @@ impl Walker<'_> {
     /// Translates one leaf node to its character classes.
     fn leaf_classes(&self, leaf: &Ast) -> Vec<hir::ClassUnicode> {
         let mut translator = hir::translate::TranslatorBuilder::new().build();
-        let Ok(hir) = translator.translate(self.text, leaf) else {
+        let Ok(hir) = translator.translate(&self.source.text, leaf) else {
             return Vec::new();
         };
         hir_classes(&hir)

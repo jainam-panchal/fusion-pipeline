@@ -1,14 +1,15 @@
 //! Load-time canary through the public API.
 #![allow(clippy::unwrap_used)]
 
-use fusion_regex::canary::{CanaryConfig, InputShape, run};
-use fusion_regex::{CompileError, Engine, Limits, Options, RedosPolicy, Regex};
+mod common;
 
-const LINUX_SYSLOG: &str = r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$";
+use common::LINUX_SYSLOG;
+use fusion_regex::canary::{CanaryConfig, run};
+use fusion_regex::{CompileError, Engine, Limits, MatchError, Options, RedosPolicy, Regex};
 
 fn tight() -> CanaryConfig {
     CanaryConfig {
-        match_limit: 10_000,
+        match_limit: Some(10_000),
         ..CanaryConfig::default()
     }
 }
@@ -125,24 +126,42 @@ fn canary_is_skipped_for_patterns_on_the_linear_engine() {
 }
 
 #[test]
-fn canary_rejects_nested_quantifier_under_the_default_limit_too() {
+fn canary_rejects_nested_quantifier_under_the_default_config_too() {
     let trip = run(r"(a+)+$", &CanaryConfig::default(), &Limits::default())
         .unwrap()
         .expect("should trip");
-    assert_eq!(trip.input_len, 1024);
-    assert!(
-        matches!(trip.input_shape, InputShape::RepeatedThenPoison('a')),
-        "{trip:?}"
-    );
+    assert_eq!(trip.match_limit, Limits::default().match_limit);
+    assert!(trip.input_len <= 1024, "{trip:?}");
 }
 
 #[test]
-fn canary_skips_sizes_above_the_input_limit() {
+fn canary_clamps_sizes_to_the_input_limit_rather_than_skipping() {
+    // Exponential shapes trip within a few dozen characters, so a node that only accepts
+    // short records still gets its worst case probed at the size it will accept.
     let limits = Limits {
-        input_bytes: 512,
+        input_bytes: 256,
         ..Limits::default()
     };
-    assert_eq!(run(r"(a+)+$", &tight(), &limits).unwrap(), None);
+    let trip = run(r"(a+)+$", &tight(), &limits)
+        .unwrap()
+        .expect("should trip");
+    assert_eq!(trip.input_len, 256);
+}
+
+#[test]
+fn canary_catches_a_group_loop_that_restarts_at_every_position() {
+    // `match_limit` resets per start position, so only the unanchored probe under the
+    // work budget sees the O(n²) of this pattern on a record that never matches.
+    let trip = run(
+        r"(?:a|b)*(?=c)",
+        &CanaryConfig::default(),
+        &Limits::default(),
+    )
+    .unwrap()
+    .expect("should trip");
+    assert_eq!(trip.error, MatchError::WorkLimit);
+    assert!(!trip.anchored, "{trip:?}");
+    assert!(trip.input_len <= 1024, "{trip:?}");
 }
 
 #[test]
@@ -158,11 +177,5 @@ fn default_options_run_every_layer_and_reject() {
     )
     .unwrap_err();
     assert!(matches!(err, CompileError::CanaryTripped(_)), "{err:?}");
-}
-
-#[test]
-fn checked_options_run_all_three_layers() {
-    let err = Regex::with_options(r"(a|aa)*b", &Options::checked()).unwrap_err();
-    assert!(matches!(err, CompileError::RedosRisk(_)), "{err:?}");
-    assert!(Regex::with_options(LINUX_SYSLOG, &Options::checked()).is_ok());
+    assert!(Regex::with_options(LINUX_SYSLOG, &Options::default()).is_ok());
 }

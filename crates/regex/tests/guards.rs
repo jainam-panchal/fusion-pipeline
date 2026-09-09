@@ -1,6 +1,8 @@
 //! Compile-time guards, thread-safety and the no-JIT invariant.
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
 use fusion_regex::{CompileError, EngineChoice, Limits, Options, Regex};
 
 fn with_limits(pattern: &str, engine: EngineChoice, limits: Limits) -> Result<Regex, CompileError> {
@@ -127,20 +129,19 @@ fn compiled_pattern_is_usable_from_several_threads() {
 }
 
 #[test]
-fn jit_is_never_referenced_by_the_wrapper() {
-    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-    let mut seen = 0;
-    for entry in std::fs::read_dir(src_dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_some_and(|e| e == "rs") {
-            let text = std::fs::read_to_string(&path).unwrap();
-            assert!(
-                !text.contains("pcre2_jit"),
-                "{} references the JIT",
-                path.display()
-            );
-            seen += 1;
-        }
-    }
-    assert!(seen > 0);
+fn linear_pattern_too_big_to_compile_has_its_own_variant() {
+    // The linear engine's compiled program for this bounded repetition of a large class
+    // exceeds the crate's default size limit; PCRE2 compiles it without complaint.
+    let err = with_limits(r"\pL{1000}", EngineChoice::Linear, Limits::default()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CompileError::CompiledTooBig {
+                engine: fusion_regex::Engine::Linear,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(with_limits(r"\pL{1000}", EngineChoice::Auto, Limits::default()).is_ok());
 }

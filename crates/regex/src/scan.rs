@@ -198,10 +198,10 @@ fn bracketed_len(rest: &[u8]) -> Option<usize> {
     rest.iter().skip(1).position(|&c| c == close).map(|n| n + 2)
 }
 
-/// Characters that appear literally in the pattern, in first-seen order. Used by the canary
-/// when the pattern does not parse on `regex-syntax`. Escaped characters are skipped since
-/// most escapes are classes, not literals.
-pub(crate) fn raw_literal_alphabet(pattern: &str) -> Vec<char> {
+/// Alphanumeric characters that appear literally in the pattern, in pattern order with
+/// repeats kept. Used by the canary when the pattern does not parse on `regex-syntax`.
+/// Escaped characters are skipped since most escapes are classes, not literals.
+pub(crate) fn raw_literal_sequence(pattern: &str) -> Vec<char> {
     let mut out = Vec::new();
     let mut escaped = false;
     for c in pattern.chars() {
@@ -213,7 +213,7 @@ pub(crate) fn raw_literal_alphabet(pattern: &str) -> Vec<char> {
             escaped = true;
             continue;
         }
-        if c.is_alphanumeric() && !out.contains(&c) {
+        if c.is_alphanumeric() {
             out.push(c);
         }
     }

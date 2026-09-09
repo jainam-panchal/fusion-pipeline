@@ -17,26 +17,68 @@
 //! - Compiled code and the match context are immutable after construction and are shared
 //!   across threads. Match data is created per call and never shared.
 //!
+//! - When `Limits::work_limit` is set the pattern is compiled with `PCRE2_AUTO_CALLOUT` and
+//!   a callout counts every pattern item PCRE2 visits, across all start positions, aborting
+//!   the call with `MatchError::WorkLimit` when the budget runs out. This is the only limit
+//!   that bounds an unanchored non-match whose leading group loop restarts at every
+//!   position (`(?:a|b)*(?=c)`); it costs about 1.8× on the PCRE2 path. Single-character
+//!   repeats loop inside one item and stay invisible to it, but their worst case is a
+//!   character scan per start, seconds rather than minutes at 64 KiB.
+//!
 //! Every PCRE2 allocation is owned by an RAII newtype (`Code`, `CompileContext`,
 //! `MatchContext`, `MatchData`) so no error path can leak.
 
 #![allow(unsafe_code)]
 
-use std::ffi::c_int;
+use std::cell::Cell;
+use std::ffi::{c_int, c_void};
 use std::ptr::{self, NonNull};
 
 use pcre2_sys::{
-    PCRE2_ANCHORED, PCRE2_DOLLAR_ENDONLY, PCRE2_ERROR_DEPTHLIMIT, PCRE2_ERROR_HEAPLIMIT,
-    PCRE2_ERROR_MATCHLIMIT, PCRE2_ERROR_NOMATCH, PCRE2_INFO_CAPTURECOUNT, PCRE2_INFO_NAMECOUNT,
-    PCRE2_INFO_NAMEENTRYSIZE, PCRE2_INFO_NAMETABLE, PCRE2_NEVER_BACKSLASH_C, PCRE2_NO_UTF_CHECK,
-    PCRE2_UCP, PCRE2_UNSET, PCRE2_UTF, pcre2_code_8, pcre2_code_free_8, pcre2_compile_8,
-    pcre2_compile_context_8, pcre2_compile_context_create_8, pcre2_compile_context_free_8,
-    pcre2_get_error_message_8, pcre2_get_ovector_count_8, pcre2_get_ovector_pointer_8,
-    pcre2_match_8, pcre2_match_context_8, pcre2_match_context_create_8, pcre2_match_context_free_8,
-    pcre2_match_data_8, pcre2_match_data_create_8, pcre2_match_data_free_8, pcre2_pattern_info_8,
+    PCRE2_ANCHORED, PCRE2_AUTO_CALLOUT, PCRE2_DOLLAR_ENDONLY, PCRE2_ERROR_CALLOUT,
+    PCRE2_ERROR_DEPTHLIMIT, PCRE2_ERROR_HEAPLIMIT, PCRE2_ERROR_MATCHLIMIT, PCRE2_ERROR_NOMATCH,
+    PCRE2_INFO_CAPTURECOUNT, PCRE2_INFO_NAMECOUNT, PCRE2_INFO_NAMEENTRYSIZE, PCRE2_INFO_NAMETABLE,
+    PCRE2_NEVER_BACKSLASH_C, PCRE2_NO_UTF_CHECK, PCRE2_UCP, PCRE2_UNSET, PCRE2_UTF, pcre2_code_8,
+    pcre2_code_free_8, pcre2_compile_8, pcre2_compile_context_8, pcre2_compile_context_create_8,
+    pcre2_compile_context_free_8, pcre2_get_error_message_8, pcre2_get_ovector_count_8,
+    pcre2_get_ovector_pointer_8, pcre2_match_8, pcre2_match_context_8,
+    pcre2_match_context_create_8, pcre2_match_context_free_8, pcre2_match_data_8,
+    pcre2_match_data_create_8, pcre2_match_data_free_8, pcre2_pattern_info_8,
     pcre2_set_depth_limit_8, pcre2_set_heap_limit_8, pcre2_set_match_limit_8,
-    pcre2_set_max_pattern_length_8, pcre2_set_parens_nest_limit_8,
+    pcre2_set_parens_nest_limit_8,
 };
+
+// `pcre2-sys` does not bind the callout API; the symbol is in the bundled static library.
+// The first parameter is really `pcre2_callout_block_8 *`; the wrapper never reads it, so an
+// opaque pointer has the same ABI and avoids redeclaring the struct.
+unsafe extern "C" {
+    fn pcre2_set_callout_8(
+        ctx: *mut pcre2_match_context_8,
+        callout: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int>,
+        data: *mut c_void,
+    ) -> c_int;
+}
+
+thread_local! {
+    /// Work budget remaining for the match call running on this thread. The callout is
+    /// registered on the shared match context with no data pointer, so the per-call counter
+    /// has to live somewhere the callback can reach without an allocation; PCRE2 invokes
+    /// callouts on the calling thread, so a thread-local is exactly per call.
+    static WORK_REMAINING: Cell<u64> = const { Cell::new(u64::MAX) };
+}
+
+/// Auto-callout hook: one call per pattern item PCRE2 visits. Returning a negative value
+/// aborts the match with that value; `PCRE2_ERROR_CALLOUT` is the one reserved for callers.
+unsafe extern "C" fn count_work(_block: *mut c_void, _data: *mut c_void) -> c_int {
+    WORK_REMAINING.with(|remaining| {
+        let left = remaining.get();
+        if left == 0 {
+            return PCRE2_ERROR_CALLOUT;
+        }
+        remaining.set(left - 1);
+        0
+    })
+}
 
 use crate::{CompileError, Limits, MatchError, Span};
 
@@ -46,15 +88,18 @@ pub(crate) struct Pcre2Regex {
     match_context: MatchContext,
     /// Number of capture groups, not counting group 0.
     capture_count: usize,
+    /// Total pattern items one match call may visit, when callouts are compiled in.
+    work_limit: Option<u32>,
     /// Group name by group index (index 0 is the whole match and has no name).
     names: Vec<Option<String>>,
 }
 
 // SAFETY: PCRE2 documents that a compiled pattern is never modified by matching and can be
 // used by several threads at once, and that a match context is only read by
-// `pcre2_match`. Neither pointer is mutated after `compile` returns, and match data (the
-// only mutable per-match state) is created and freed inside each `captures` or `is_match`
-// call.
+// `pcre2_match`. Neither pointer is mutated after `compile` returns; the callout registered
+// on the context is a plain function pointer with no data pointer, and the counter it
+// touches is thread-local. Match data (the only mutable per-match state) is created and
+// freed inside each `captures` or `is_match` call.
 unsafe impl Send for Pcre2Regex {}
 // SAFETY: see the `Send` impl above; shared references only ever read immutable state.
 unsafe impl Sync for Pcre2Regex {}
@@ -77,9 +122,12 @@ impl CompileContext {
         // SAFETY: a null general context selects PCRE2's default allocator.
         let raw = unsafe { pcre2_compile_context_create_8(ptr::null_mut()) };
         let ctx = NonNull::new(raw).ok_or(CompileError::OutOfMemory)?;
+        // `max_pattern_length` is not set here: `scan::check_guards` rejects long patterns
+        // before PCRE2 sees them, so PCRE2's own check could never fire. The nest limit is
+        // set because the scanner can undercount parentheses inside `\Q…\E` and `(?x)`
+        // comments, and PCRE2's count is exact.
         // SAFETY: `ctx` is a live compile context owned by this function.
         unsafe {
-            pcre2_set_max_pattern_length_8(ctx.as_ptr(), limits.max_pattern_length);
             pcre2_set_parens_nest_limit_8(ctx.as_ptr(), limits.parens_nest_limit);
         }
         Ok(Self(ctx))
@@ -101,11 +149,15 @@ impl MatchContext {
         // SAFETY: a null general context selects the default allocator.
         let raw = unsafe { pcre2_match_context_create_8(ptr::null_mut()) };
         let ctx = NonNull::new(raw).ok_or(CompileError::OutOfMemory)?;
-        // SAFETY: `ctx` is live and owned by this function.
+        // SAFETY: `ctx` is live and owned by this function. `count_work` has the ABI PCRE2
+        // expects and never dereferences its arguments.
         unsafe {
             pcre2_set_match_limit_8(ctx.as_ptr(), limits.match_limit);
             pcre2_set_depth_limit_8(ctx.as_ptr(), limits.depth_limit);
             pcre2_set_heap_limit_8(ctx.as_ptr(), limits.heap_limit_kib);
+            if limits.work_limit.is_some() {
+                pcre2_set_callout_8(ctx.as_ptr(), Some(count_work), ptr::null_mut());
+            }
         }
         Ok(Self(ctx))
     }
@@ -122,12 +174,11 @@ impl Drop for MatchContext {
 struct MatchData(NonNull<pcre2_match_data_8>);
 
 impl MatchData {
-    /// A block with room for `pairs` offset pairs. PCRE2 needs at least one.
+    /// A block with room for `pairs` offset pairs. PCRE2 needs at least one and allows at
+    /// most 65 535 groups, so the conversion cannot fail in practice; saturating keeps the
+    /// signature honest without inventing an error.
     fn new(pairs: usize) -> Result<Self, MatchError> {
-        let pairs = u32::try_from(pairs.max(1)).map_err(|_| MatchError::Engine {
-            code: 0,
-            message: "too many capture groups for a match data block".to_owned(),
-        })?;
+        let pairs = u32::try_from(pairs.max(1)).unwrap_or(u32::MAX);
         // SAFETY: a null general context selects the default allocator.
         let raw = unsafe { pcre2_match_data_create_8(pairs, ptr::null_mut()) };
         NonNull::new(raw).map(Self).ok_or(MatchError::OutOfMemory)
@@ -145,7 +196,10 @@ impl Pcre2Regex {
     /// Compiles `pattern` under `limits`. Never calls the JIT compiler.
     pub(crate) fn compile(pattern: &str, limits: &Limits) -> Result<Self, CompileError> {
         let compile_context = CompileContext::new(limits)?;
-        let options = PCRE2_UTF | PCRE2_UCP | PCRE2_NEVER_BACKSLASH_C | PCRE2_DOLLAR_ENDONLY;
+        let mut options = PCRE2_UTF | PCRE2_UCP | PCRE2_NEVER_BACKSLASH_C | PCRE2_DOLLAR_ENDONLY;
+        if limits.work_limit.is_some() {
+            options |= PCRE2_AUTO_CALLOUT;
+        }
         let mut error_code: c_int = 0;
         let mut error_offset: usize = 0;
         // SAFETY: `pattern` is valid for `pattern.len()` bytes for the duration of the call;
@@ -175,8 +229,31 @@ impl Pcre2Regex {
             code,
             match_context,
             capture_count,
+            work_limit: limits.work_limit,
             names,
         })
+    }
+
+    /// Bytes of JIT code attached to the pattern. Always zero: the wrapper never compiles
+    /// it. Exposed for the unit test that pins that.
+    #[cfg(test)]
+    fn jit_size(&self) -> Result<usize, CompileError> {
+        let mut out: usize = 0;
+        // SAFETY: `code` is live; `PCRE2_INFO_JITSIZE` writes a `size_t`, which `out` is.
+        let rc = unsafe {
+            pcre2_pattern_info_8(
+                self.code.0.as_ptr(),
+                pcre2_sys::PCRE2_INFO_JITSIZE,
+                (&mut out as *mut usize).cast(),
+            )
+        };
+        if rc != 0 {
+            return Err(CompileError::Internal {
+                code: rc,
+                message: error_message(rc),
+            });
+        }
+        Ok(out)
     }
 
     pub(crate) fn capture_names(&self) -> &[Option<String>] {
@@ -241,6 +318,9 @@ impl Pcre2Regex {
         let mut options = PCRE2_NO_UTF_CHECK;
         if anchored {
             options |= PCRE2_ANCHORED;
+        }
+        if let Some(budget) = self.work_limit {
+            WORK_REMAINING.with(|remaining| remaining.set(u64::from(budget)));
         }
         // SAFETY: `haystack` is valid UTF-8 (it is a `&str`), which is what
         // `PCRE2_NO_UTF_CHECK` requires; it is valid for `haystack.len()` bytes for the
@@ -307,6 +387,7 @@ fn read_name_table(code: &Code, capture_count: usize) -> Result<Vec<Option<Strin
     }
     let entry_size = pattern_info_u32(code, U32Info::NameEntrySize)? as usize;
     if entry_size < 3 {
+        // Code 0 marks a check the wrapper made itself; PCRE2 codes are never zero.
         return Err(CompileError::Internal {
             code: 0,
             message: format!("name table entry size {entry_size} is too small"),
@@ -351,6 +432,7 @@ fn match_error(rc: c_int) -> MatchError {
         PCRE2_ERROR_MATCHLIMIT => MatchError::MatchLimit,
         PCRE2_ERROR_DEPTHLIMIT => MatchError::DepthLimit,
         PCRE2_ERROR_HEAPLIMIT => MatchError::HeapLimit,
+        PCRE2_ERROR_CALLOUT => MatchError::WorkLimit,
         other => MatchError::Engine {
             code: other,
             message: error_message(other),
@@ -367,4 +449,28 @@ pub(crate) fn error_message(code: c_int) -> String {
         return format!("PCRE2 error {code}");
     };
     String::from_utf8_lossy(&buf[..len.min(buf.len())]).into_owned()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiled_pattern_carries_no_jit_code() {
+        let re = Pcre2Regex::compile(r"(?<=x)(?<n>\d+)", &Limits::default()).unwrap();
+        assert_eq!(re.jit_size().unwrap(), 0);
+    }
+
+    #[test]
+    fn work_limit_bounds_the_start_loop() {
+        let limits = Limits {
+            work_limit: Some(50_000),
+            ..Limits::default()
+        };
+        let re = Pcre2Regex::compile(r"(?:a|b)*(?=c)", &limits).unwrap();
+        let hay = "a".repeat(2048);
+        assert_eq!(re.is_match(&hay, false).unwrap_err(), MatchError::WorkLimit);
+        assert!(!re.is_match(&hay[..64], false).unwrap());
+    }
 }

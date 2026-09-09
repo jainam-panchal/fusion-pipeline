@@ -61,9 +61,15 @@ pub enum EngineChoice {
 
 /// Limits applied to a pattern.
 ///
-/// `match_limit`, `depth_limit` and `heap_limit_kib` apply on the PCRE2 path only; the
-/// linear engine cannot backtrack and needs none of them. `input_bytes` applies on both.
-/// `max_pattern_length` and `parens_nest_limit` are checked at compile time on both.
+/// `match_limit`, `depth_limit`, `heap_limit_kib` and `work_limit` apply on the PCRE2 path
+/// only; the linear engine cannot backtrack and needs none of them. `input_bytes` applies
+/// on both. `max_pattern_length` and `parens_nest_limit` are checked at compile time on
+/// both.
+///
+/// Public structs in this crate are not `#[non_exhaustive]` on purpose: callers build them
+/// with struct-literal syntax and `..Default::default()`, which that attribute forbids from
+/// outside the crate. Adding a field is therefore a breaking change here, accepted for a
+/// crate with one consumer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
     /// Upper bound on PCRE2 backtracking steps per match call.
@@ -72,13 +78,23 @@ pub struct Limits {
     pub depth_limit: u32,
     /// Upper bound on heap PCRE2 may use for backtracking frames, in KiB.
     pub heap_limit_kib: u32,
+    /// Upper bound on pattern items PCRE2 may visit in one match call, counted across every
+    /// start position, or `None` to skip the count.
+    ///
+    /// PCRE2 resets `match_limit` at each start position, so an unanchored non-match whose
+    /// leading group loop restarts everywhere (`(?:a|b)*(?=c)`) is O(n²) and trips nothing
+    /// else: about two minutes on a 64 KiB record. This limit is what bounds it, at roughly
+    /// 1.8× the matching cost on the PCRE2 path. Single-character repeats loop inside one
+    /// item and are not counted; their worst case is one character scan per start position,
+    /// seconds at 64 KiB, bounded by `input_bytes`.
+    pub work_limit: Option<u32>,
     /// Largest haystack accepted, in bytes. Longer inputs are [`MatchError::InputTooLarge`].
     ///
-    /// On the backtracking engine this is the only bound on one class of slow pattern:
-    /// PCRE2 resets its match counter at every start position, so an unanchored pattern
-    /// whose leading loop can start anywhere (`\w+\s+\w+`, `(?:a|b)*(?=c)`) costs
-    /// O(n²) on a non-matching record and never trips `match_limit`. Keep this small enough
-    /// that n² is affordable; the default 64 KiB is the largest input the canary tries.
+    /// On the backtracking engine this is the only bound on unanchored patterns made of
+    /// single-character repeats (`\w+\s+\w+`, `[a-z]+[0-9]+`): they scan from every start
+    /// position, `match_limit` resets per start and `work_limit` does not see inside a
+    /// repeat, so a non-matching record costs O(n²) character steps. At the default 64 KiB
+    /// that is a few seconds; it is also the largest input the canary tries.
     pub input_bytes: usize,
     /// Longest pattern accepted, in bytes.
     pub max_pattern_length: usize,
@@ -92,6 +108,7 @@ impl Default for Limits {
             match_limit: 1_000_000,
             depth_limit: 1_000_000,
             heap_limit_kib: 20_000,
+            work_limit: Some(10_000_000),
             input_bytes: 64 * 1024,
             max_pattern_length: 8192,
             parens_nest_limit: 250,
@@ -114,7 +131,7 @@ pub enum RedosPolicy {
 /// `Default` is [`Options::checked`]: lint and canary on, rejecting on any finding, as the
 /// spec requires of a stage at config load. [`Regex::new`] opts out with
 /// [`Options::unchecked`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// Runtime and compile-time limits.
     pub limits: Limits,
@@ -139,9 +156,11 @@ impl Options {
     #[must_use]
     pub fn unchecked() -> Self {
         Self {
+            limits: Limits::default(),
+            engine: EngineChoice::default(),
+            on_redos_risk: RedosPolicy::default(),
             lint: false,
             canary: None,
-            ..Self::checked()
         }
     }
 
@@ -149,11 +168,9 @@ impl Options {
     #[must_use]
     pub fn checked() -> Self {
         Self {
-            limits: Limits::default(),
-            engine: EngineChoice::default(),
-            on_redos_risk: RedosPolicy::default(),
             lint: true,
             canary: Some(canary::CanaryConfig::default()),
+            ..Self::unchecked()
         }
     }
 }
@@ -181,8 +198,17 @@ pub enum CompileError {
         len: usize,
         /// The configured limit.
         limit: usize,
-        /// Byte offset at which the limit was exceeded.
+        /// The last char boundary at or before the limit.
         offset: usize,
+    },
+    /// The linear engine's compiled program exceeded its size limit. Only the linear engine
+    /// has this limit; PCRE2 bounds pattern size through `max_pattern_length`.
+    #[error("{engine} engine: compiled program larger than {limit} bytes")]
+    CompiledTooBig {
+        /// Engine that produced the error.
+        engine: Engine,
+        /// The engine's size limit in bytes.
+        limit: usize,
     },
     /// Parentheses nest deeper than [`Limits::parens_nest_limit`].
     #[error("parentheses nest deeper than {limit} at offset {offset}")]
@@ -224,6 +250,9 @@ pub enum MatchError {
     /// [`Limits::heap_limit_kib`] tripped.
     #[error("heap limit exceeded")]
     HeapLimit,
+    /// [`Limits::work_limit`] tripped.
+    #[error("work limit exceeded across start positions")]
+    WorkLimit,
     /// The haystack is longer than [`Limits::input_bytes`].
     #[error("input is {len} bytes, longer than the {limit} byte limit")]
     InputTooLarge {
@@ -313,6 +342,9 @@ impl Regex {
             }
         };
 
+        // The lint runs whichever engine was chosen: it describes the pattern's shape, which
+        // stays the same if the engine choice changes, and the spec asks for it at load
+        // regardless of classification. The canary below is different: it measures PCRE2.
         let mut warnings = Vec::new();
         if options.lint {
             let risks = lint::lint(pattern).risks;
@@ -447,6 +479,10 @@ fn compile_linear(pattern: &str) -> Result<regex::Regex, CompileError> {
                 code: None,
                 offset: linear_error_offset(pattern),
                 message: msg,
+            },
+            regex::Error::CompiledTooBig(limit) => CompileError::CompiledTooBig {
+                engine: Engine::Linear,
+                limit,
             },
             other => CompileError::Syntax {
                 engine: Engine::Linear,

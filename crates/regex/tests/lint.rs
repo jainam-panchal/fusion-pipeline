@@ -1,10 +1,11 @@
 //! Structural ReDoS lint verdicts through the public API.
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
+use common::LINUX_SYSLOG;
 use fusion_regex::lint::{RedosRisk, lint};
 use fusion_regex::{CompileError, Options, RedosPolicy, Regex};
-
-const LINUX_SYSLOG: &str = r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$";
 
 fn kinds(pattern: &str) -> Vec<&'static str> {
     let report = lint(pattern);

@@ -1,21 +1,13 @@
 //! Each runtime limit trips on a known pattern and returns its own error variant.
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
+use common::{NESTED_BACKTRACKING as NESTED, compile};
 use fusion_regex::{Engine, EngineChoice, Limits, MatchError, Options, Regex};
 
-/// Exponential on PCRE2; the lookahead keeps it off the linear engine.
-const NESTED: &str = r"^(?=a)(a+)+$";
-
 fn backtracking(pattern: &str, limits: Limits) -> Regex {
-    let re = Regex::with_options(
-        pattern,
-        &Options {
-            limits,
-            engine: EngineChoice::Auto,
-            ..Options::unchecked()
-        },
-    )
-    .unwrap();
+    let re = compile(pattern, EngineChoice::Auto, limits);
     assert_eq!(re.engine(), Engine::Backtracking);
     re
 }
@@ -74,6 +66,37 @@ fn heap_limit_trips_with_its_own_variant() {
     let mut hay = "ab".repeat(5000);
     hay.push('!');
     assert_eq!(re.captures(&hay).unwrap_err(), MatchError::HeapLimit);
+}
+
+#[test]
+fn work_limit_trips_with_its_own_variant_on_a_start_loop_quadratic() {
+    // `match_limit` resets at every start position, so only the work limit sees the
+    // O(n²) of a group loop that restarts everywhere on a record that never matches.
+    let re = backtracking(
+        r"(?:a|b)*(?=c)",
+        Limits {
+            work_limit: Some(100_000),
+            ..Limits::default()
+        },
+    );
+    assert_eq!(
+        re.is_match(&"ab".repeat(2048)).unwrap_err(),
+        MatchError::WorkLimit
+    );
+    assert!(!re.is_match(&"ab".repeat(32)).unwrap());
+    assert!(re.is_match("abc").unwrap());
+}
+
+#[test]
+fn work_limit_off_lets_the_same_match_run_to_completion() {
+    let re = backtracking(
+        r"(?:a|b)*(?=c)",
+        Limits {
+            work_limit: None,
+            ..Limits::default()
+        },
+    );
+    assert!(!re.is_match(&"ab".repeat(256)).unwrap());
 }
 
 #[test]

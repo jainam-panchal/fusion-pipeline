@@ -8,14 +8,14 @@
 //! character the pattern never mentions appended, since catastrophic backtracking needs a
 //! near-miss rather than a match.
 //!
-//! Matching is anchored. An unanchored run retries from every start position, which is
-//! quadratic for any pattern that has no required literal and would make the 64 KiB input
-//! take seconds for patterns as ordinary as `[a-z]+[0-9]+`. Anchoring loses nothing the
-//! match limit can detect: PCRE2 resets its match counter at every start position
-//! (`pcre2_match.c`, bump-along loop), so a limit that never trips within one start
-//! position never trips at all, and the exponential blow-ups it does catch happen within
-//! one start position. The cost of the start loop itself is bounded only by
-//! [`Limits::input_bytes`], which is why input sizes above it are not tried.
+//! Every input is probed anchored, and the smallest size is probed unanchored as well.
+//! Anchored probes find blow-ups inside one start position (the exponential shapes) at
+//! every size without paying for the start loop. PCRE2 resets `match_limit` at every start
+//! position (`pcre2_match.c`, bump-along loop), so the start loop needs a different bound:
+//! the unanchored probe runs under a work budget of `work_per_byte × size` counted across
+//! all start positions, which a group loop that restarts everywhere (`(?:a|b)*(?=c)`)
+//! exceeds even at 1 KiB. Sizes are clamped to [`Limits::input_bytes`], since the runtime
+//! rejects anything larger before matching it.
 //!
 //! The canary describes PCRE2 behaviour, so [`crate::Regex::with_options`] runs it only for
 //! patterns that will execute on PCRE2. [`run`] itself is engine-agnostic.
@@ -29,20 +29,31 @@ use crate::{CompileError, Limits, MatchError, pcre2, scan};
 /// Canary configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanaryConfig {
-    /// Match limit for the canary runs. The default equals the default runtime limit: an
-    /// exponential shape trips it inside the 1 KiB input, while a benign group loop such as
-    /// `^(?:a|b)*$` needs about 130 000 steps at 64 KiB and must pass. Lower it together
-    /// with [`crate::Limits::match_limit`] when records are known to be short.
-    pub match_limit: u32,
-    /// Input sizes to generate, in bytes. Sizes above [`Limits::input_bytes`] are skipped,
-    /// since the runtime would reject such a record before matching it.
+    /// Match limit for the canary runs, or `None` for the runtime `match_limit` in the
+    /// [`Limits`] passed to [`run`].
+    ///
+    /// The canary asks "would this pattern trip at runtime on its worst input?", so the
+    /// runtime limit is the honest answer: a lower value rejects patterns the runtime would
+    /// accept (`^(?:a|b)*$` needs about 130 000 steps at 64 KiB). What makes the canary
+    /// tight is `work_per_byte`, which bounds the whole call at a fraction of the runtime
+    /// `work_limit`.
+    pub match_limit: Option<u32>,
+    /// Work budget for one probe, per byte of input, counted across start positions.
+    /// The default 64 lets a linear scan of the input pass with margin (`^(?:a|b)*$` needs
+    /// about 2 items per byte) and trips a group loop that restarts at every position
+    /// (`(?:a|b)*(?=c)` needs about 2 500 per byte at 1 KiB).
+    pub work_per_byte: u32,
+    /// Input sizes to generate, in bytes. Each is clamped to [`Limits::input_bytes`] and
+    /// duplicates are dropped, so a node with short records still gets its worst case
+    /// probed at the largest size it will accept.
     pub sizes: Vec<usize>,
 }
 
 impl Default for CanaryConfig {
     fn default() -> Self {
         Self {
-            match_limit: 1_000_000,
+            match_limit: None,
+            work_per_byte: 64,
             sizes: vec![1024, 8192, 65536],
         }
     }
@@ -85,6 +96,8 @@ pub struct CanaryTrip {
     pub input_len: usize,
     /// How the input was built.
     pub input_shape: InputShape,
+    /// Whether the probe was anchored at the start of the input.
+    pub anchored: bool,
     /// The match limit the canary ran under.
     pub match_limit: u32,
     /// Which limit tripped.
@@ -95,8 +108,16 @@ impl fmt::Display for CanaryTrip {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} on {} input of {} bytes (match limit {})",
-            self.error, self.input_shape, self.input_len, self.match_limit
+            "{} on {} {} input of {} bytes (match limit {})",
+            self.error,
+            if self.anchored {
+                "anchored"
+            } else {
+                "unanchored"
+            },
+            self.input_shape,
+            self.input_len,
+            self.match_limit
         )
     }
 }
@@ -116,11 +137,14 @@ pub fn run(
     config: &CanaryConfig,
     limits: &Limits,
 ) -> Result<Option<CanaryTrip>, CompileError> {
-    let canary_limits = Limits {
-        match_limit: config.match_limit,
-        ..limits.clone()
-    };
-    let re = pcre2::Pcre2Regex::compile(pattern, &canary_limits)?;
+    let match_limit = config.match_limit.unwrap_or(limits.match_limit);
+    let mut sizes: Vec<usize> = config
+        .sizes
+        .iter()
+        .map(|&n| n.min(limits.input_bytes))
+        .collect();
+    sizes.sort_unstable();
+    sizes.dedup();
     let Literals { alphabet, sequence } = literals(pattern);
     let poison = ['!', '~', '\u{1}']
         .into_iter()
@@ -128,50 +152,77 @@ pub fn run(
         .unwrap_or('\u{2}');
     let prefix: String = sequence.into_iter().collect();
 
-    let sizes = config
-        .sizes
-        .iter()
-        .copied()
-        .filter(|&n| n <= limits.input_bytes);
-    for size in sizes {
+    // The work budget is per probe and depends on the input size, so each size gets its
+    // own compile; PCRE2 compiles in microseconds and there are three sizes.
+    for (i, &size) in sizes.iter().enumerate() {
+        let budget =
+            u32::try_from(u64::from(config.work_per_byte) * size as u64).unwrap_or(u32::MAX);
+        let canary_limits = Limits {
+            match_limit,
+            work_limit: Some(budget),
+            ..limits.clone()
+        };
+        let re = pcre2::Pcre2Regex::compile(pattern, &canary_limits)?;
+        // Anchored at every size: catches blow-ups within one start position without paying
+        // for the start loop. Unanchored at the smallest size only: catches a group loop
+        // that restarts at every position, which is quadratic and therefore visible even
+        // on the smallest input.
+        let unanchored_too = i == 0;
         for (input, shape) in inputs_of(size, &alphabet, &prefix, poison) {
-            if let Some(trip) = probe(&re, &input, shape, config.match_limit)? {
+            if let Some(trip) = probe(&re, &input, shape, true, match_limit)? {
                 return Ok(Some(trip));
+            }
+            if unanchored_too {
+                if let Some(trip) = probe(&re, &input, shape, false, match_limit)? {
+                    return Ok(Some(trip));
+                }
             }
         }
     }
     Ok(None)
 }
 
-/// Every adversarial input of one size, in the order they are tried.
-fn inputs_of(
+/// Every adversarial input of one size in bytes, in the order they are tried. Lazy: the
+/// caller stops at the first trip, and a 64 KiB input per shape adds up.
+fn inputs_of<'a>(
     size: usize,
-    alphabet: &[char],
-    prefix: &str,
+    alphabet: &'a [char],
+    prefix: &'a str,
     poison: char,
-) -> Vec<(String, InputShape)> {
-    let mut inputs = Vec::with_capacity(alphabet.len() * 3 + 2);
-    for &c in alphabet {
-        let run_of = |n: usize| std::iter::repeat_n(c, n).collect::<String>();
-        inputs.push((run_of(size), InputShape::Repeated(c)));
-        inputs.push((
-            with_poison(run_of(size), poison),
-            InputShape::RepeatedThenPoison(c),
-        ));
-        inputs.push((
-            with_poison(
-                format!("{prefix}{}", run_of(size.saturating_sub(prefix.len()))),
-                poison,
+) -> impl Iterator<Item = (String, InputShape)> + 'a {
+    let run_of = move |c: char, bytes: usize| -> String {
+        std::iter::repeat_n(c, bytes / c.len_utf8().max(1)).collect()
+    };
+    let per_char = alphabet.iter().flat_map(move |&c| {
+        [
+            (run_of(c, size), InputShape::Repeated(c)),
+            (
+                with_poison(run_of(c, size), poison),
+                InputShape::RepeatedThenPoison(c),
             ),
-            InputShape::LiteralsThenRepeatedThenPoison(c),
-        ));
-    }
-    if alphabet.len() > 1 {
-        let cycled: String = alphabet.iter().cycle().take(size).collect();
-        inputs.push((cycled.clone(), InputShape::Cycled));
-        inputs.push((with_poison(cycled, poison), InputShape::CycledThenPoison));
-    }
-    inputs
+            (
+                with_poison(
+                    format!("{prefix}{}", run_of(c, size.saturating_sub(prefix.len()))),
+                    poison,
+                ),
+                InputShape::LiteralsThenRepeatedThenPoison(c),
+            ),
+        ]
+    });
+    let cycled = (alphabet.len() > 1).then(move || {
+        let mut text = String::with_capacity(size);
+        for &c in alphabet.iter().cycle() {
+            if text.len() + c.len_utf8() > size {
+                break;
+            }
+            text.push(c);
+        }
+        [
+            (text.clone(), InputShape::Cycled),
+            (with_poison(text, poison), InputShape::CycledThenPoison),
+        ]
+    });
+    per_char.chain(cycled.into_iter().flatten())
 }
 
 fn with_poison(mut input: String, poison: char) -> String {
@@ -184,21 +235,30 @@ fn probe(
     re: &pcre2::Pcre2Regex,
     input: &str,
     shape: InputShape,
+    anchored: bool,
     match_limit: u32,
 ) -> Result<Option<CanaryTrip>, CompileError> {
-    match re.captures(input, true) {
+    match re.is_match(input, anchored) {
         Ok(_) => Ok(None),
-        Err(error @ (MatchError::MatchLimit | MatchError::DepthLimit | MatchError::HeapLimit)) => {
-            Ok(Some(CanaryTrip {
-                input_len: input.len(),
-                input_shape: shape,
-                match_limit,
-                error,
-            }))
-        }
+        Err(
+            error @ (MatchError::MatchLimit
+            | MatchError::DepthLimit
+            | MatchError::HeapLimit
+            | MatchError::WorkLimit),
+        ) => Ok(Some(CanaryTrip {
+            input_len: input.len(),
+            input_shape: shape,
+            anchored,
+            match_limit,
+            error,
+        })),
         Err(MatchError::OutOfMemory) => Err(CompileError::OutOfMemory),
         Err(MatchError::Engine { code, message }) => Err(CompileError::Internal { code, message }),
-        Err(MatchError::InputTooLarge { .. }) => Ok(None),
+        // The wrapper never checks `input_bytes`; the facade does, before dispatch.
+        Err(other) => Err(CompileError::Internal {
+            code: 0,
+            message: format!("unexpected canary error: {other}"),
+        }),
     }
 }
 
@@ -221,7 +281,7 @@ fn literals(pattern: &str) -> Literals {
     });
     match parsed {
         Some((hir, _)) => collect_sequence(&hir, &mut sequence),
-        None => sequence = scan::raw_literal_alphabet(pattern),
+        None => sequence = scan::raw_literal_sequence(pattern),
     }
     if sequence.is_empty() {
         sequence.push('a');
