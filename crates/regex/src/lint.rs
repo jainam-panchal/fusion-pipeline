@@ -22,6 +22,12 @@
 //! The lint is a heuristic. It has false positives (`(ab|abc)*` is fine but a shape close to
 //! it is not) and false negatives (it does not model lookaround); [`crate::RedosPolicy::Warn`]
 //! exists for the former and [`crate::canary`] for the latter.
+//!
+//! Rule 1 is deliberately wider than "nested unbounded quantifiers": a bounded but
+//! variable inner repetition such as `(?:[a-z]{2,5})+` is just as ambiguous (`abcdef` splits
+//! many ways) and is exponential on a failing suffix. Rule 3 is deliberately narrower than
+//! "an unbounded quantifier followed by an overlapping suffix": widening it to any suffix
+//! would flag the `\s*(?<Content>.*)$` tail every syslog pattern ends with.
 
 use std::fmt;
 
@@ -43,6 +49,7 @@ macro_rules! char_leaf {
 
 /// One ReDoS shape the lint found. Offsets are byte offsets into the original pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RedosRisk {
     /// An unbounded repetition contains another variable-length repetition, e.g. `(a+)+`.
     NestedQuantifiers {
@@ -107,36 +114,37 @@ pub struct LintReport {
 /// Lints `pattern` for the three textbook ReDoS shapes.
 #[must_use]
 pub fn lint(pattern: &str) -> LintReport {
-    let Some((text, ast, offsets)) = parse(pattern) else {
+    let Some(parsed) = parse(pattern) else {
         return LintReport {
             risks: Vec::new(),
             parsed: false,
         };
     };
     let mut walker = Walker {
-        text: &text,
-        offsets: &offsets,
+        text: &parsed.text.text,
+        offsets: &parsed.text.offsets,
         risks: Vec::new(),
     };
-    walker.walk(&ast);
+    walker.walk(&parsed.ast);
     LintReport {
         risks: walker.risks,
         parsed: true,
     }
 }
 
+/// The AST the lint walks and the text it came from, with its offset map back to the
+/// original pattern.
+struct Parsed {
+    ast: Ast,
+    text: scan::Desugared,
+}
+
 /// Desugars PCRE2-only syntax and parses the result, falling back to the pattern as written.
-/// Returns the text that parsed, its AST, and a map from byte offsets in that text back to
-/// byte offsets in the original pattern.
-fn parse(pattern: &str) -> Option<(String, Ast, Vec<usize>)> {
-    let parser = || ast::parse::ParserBuilder::new().build();
-    let desugared = scan::desugar_for_lint(pattern);
-    if let Ok(ast) = parser().parse(&desugared.text) {
-        return Some((desugared.text, ast, desugared.offsets));
-    }
-    let ast = parser().parse(pattern).ok()?;
-    let identity = (0..=pattern.len()).collect();
-    Some((pattern.to_owned(), ast, identity))
+fn parse(pattern: &str) -> Option<Parsed> {
+    let (ast, text) = scan::parse_with_fallback(pattern, |text| {
+        ast::parse::ParserBuilder::new().build().parse(text).ok()
+    })?;
+    Some(Parsed { ast, text })
 }
 
 struct Walker<'a> {

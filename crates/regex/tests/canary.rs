@@ -1,8 +1,8 @@
 //! Load-time canary through the public API.
 #![allow(clippy::unwrap_used)]
 
-use fusion_regex::canary::{CanaryConfig, run};
-use fusion_regex::{CompileError, Limits, Options, RedosPolicy, Regex};
+use fusion_regex::canary::{CanaryConfig, InputShape, run};
+use fusion_regex::{CompileError, Engine, Limits, Options, RedosPolicy, Regex};
 
 const LINUX_SYSLOG: &str = r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$";
 
@@ -87,26 +87,77 @@ fn canary_reports_syntax_errors_as_compile_errors() {
 
 #[test]
 fn checked_options_reject_and_warn_policy_keeps_the_trip() {
+    // The lookahead keeps the pattern on the backtracking engine, where the canary runs.
     let reject = Options {
         canary: Some(tight()),
         lint: false,
         ..Options::default()
     };
-    let err = Regex::with_options(r"(a+)+$", &reject).unwrap_err();
+    let err = Regex::with_options(r"(?=a)(a+)+$", &reject).unwrap_err();
     assert!(matches!(err, CompileError::CanaryTripped(_)), "{err:?}");
 
     let warn = Options {
         on_redos_risk: RedosPolicy::Warn,
         ..reject
     };
-    let re = Regex::with_options(r"(a+)+$", &warn).unwrap();
+    let re = Regex::with_options(r"(?=a)(a+)+$", &warn).unwrap();
     assert!(re.canary_warning().is_some());
     assert!(
-        Regex::with_options(r"^\d{1,3}$", &warn)
+        Regex::with_options(r"^(?=\d)\d{1,3}$", &warn)
             .unwrap()
             .canary_warning()
             .is_none()
     );
+}
+
+#[test]
+fn canary_is_skipped_for_patterns_on_the_linear_engine() {
+    // `(a+)+$` trips the canary on PCRE2, but it compiles on the linear engine, which cannot
+    // backtrack, so the verdict would describe an engine the pattern never runs on.
+    let options = Options {
+        canary: Some(tight()),
+        lint: false,
+        ..Options::default()
+    };
+    let re = Regex::with_options(r"(a+)+$", &options).unwrap();
+    assert_eq!(re.engine(), Engine::Linear);
+    assert!(re.canary_warning().is_none());
+}
+
+#[test]
+fn canary_rejects_nested_quantifier_under_the_default_limit_too() {
+    let trip = run(r"(a+)+$", &CanaryConfig::default(), &Limits::default())
+        .unwrap()
+        .expect("should trip");
+    assert_eq!(trip.input_len, 1024);
+    assert!(
+        matches!(trip.input_shape, InputShape::RepeatedThenPoison('a')),
+        "{trip:?}"
+    );
+}
+
+#[test]
+fn canary_skips_sizes_above_the_input_limit() {
+    let limits = Limits {
+        input_bytes: 512,
+        ..Limits::default()
+    };
+    assert_eq!(run(r"(a+)+$", &tight(), &limits).unwrap(), None);
+}
+
+#[test]
+fn default_options_run_every_layer_and_reject() {
+    let err = Regex::with_options(r"(a|aa)*b", &Options::default()).unwrap_err();
+    assert!(matches!(err, CompileError::RedosRisk(_)), "{err:?}");
+    let err = Regex::with_options(
+        r"(?=a)(a+)+$",
+        &Options {
+            lint: false,
+            ..Options::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, CompileError::CanaryTripped(_)), "{err:?}");
 }
 
 #[test]

@@ -11,11 +11,14 @@
 //! Matching is anchored. An unanchored run retries from every start position, which is
 //! quadratic for any pattern that has no required literal and would make the 64 KiB input
 //! take seconds for patterns as ordinary as `[a-z]+[0-9]+`. Anchoring loses nothing the
-//! match limit can detect: PCRE2's counter is per call, and the blow-ups it catches happen
-//! within one start position.
+//! match limit can detect: PCRE2 resets its match counter at every start position
+//! (`pcre2_match.c`, bump-along loop), so a limit that never trips within one start
+//! position never trips at all, and the exponential blow-ups it does catch happen within
+//! one start position. The cost of the start loop itself is bounded only by
+//! [`Limits::input_bytes`], which is why input sizes above it are not tried.
 //!
-//! The canary always runs on PCRE2, whichever engine the pattern would normally use, so the
-//! verdict describes the pattern rather than the engine it happens to land on today.
+//! The canary describes PCRE2 behaviour, so [`crate::Regex::with_options`] runs it only for
+//! patterns that will execute on PCRE2. [`run`] itself is engine-agnostic.
 
 use std::fmt;
 
@@ -31,7 +34,8 @@ pub struct CanaryConfig {
     /// `^(?:a|b)*$` needs about 130 000 steps at 64 KiB and must pass. Lower it together
     /// with [`crate::Limits::match_limit`] when records are known to be short.
     pub match_limit: u32,
-    /// Input sizes to generate, in bytes.
+    /// Input sizes to generate, in bytes. Sizes above [`Limits::input_bytes`] are skipped,
+    /// since the runtime would reject such a record before matching it.
     pub sizes: Vec<usize>,
 }
 
@@ -44,13 +48,43 @@ impl Default for CanaryConfig {
     }
 }
 
+/// How a canary input was built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InputShape {
+    /// One alphabet character repeated to the input size.
+    Repeated(char),
+    /// One alphabet character repeated, with the poison character last.
+    RepeatedThenPoison(char),
+    /// The pattern's literal sequence, then one character repeated, then the poison.
+    LiteralsThenRepeatedThenPoison(char),
+    /// The alphabet cycled to the input size.
+    Cycled,
+    /// The alphabet cycled, with the poison character last.
+    CycledThenPoison,
+}
+
+impl fmt::Display for InputShape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Repeated(c) => write!(f, "{c:?} repeated"),
+            Self::RepeatedThenPoison(c) => write!(f, "{c:?} repeated then poison"),
+            Self::LiteralsThenRepeatedThenPoison(c) => {
+                write!(f, "literals then {c:?} repeated then poison")
+            }
+            Self::Cycled => f.write_str("alphabet cycled"),
+            Self::CycledThenPoison => f.write_str("alphabet cycled then poison"),
+        }
+    }
+}
+
 /// The input that tripped the canary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanaryTrip {
     /// Length of the tripping input in bytes.
     pub input_len: usize,
-    /// A short description of the input's shape.
-    pub input_shape: String,
+    /// How the input was built.
+    pub input_shape: InputShape,
     /// The match limit the canary ran under.
     pub match_limit: u32,
     /// Which limit tripped.
@@ -94,46 +128,50 @@ pub fn run(
         .unwrap_or('\u{2}');
     let prefix: String = sequence.into_iter().collect();
 
-    for &size in &config.sizes {
-        for &c in &alphabet {
-            let run_of = |n: usize| std::iter::repeat_n(c, n).collect::<String>();
-            let inputs = [
-                (run_of(size), format!("'{c}' repeated")),
-                (
-                    with_poison(run_of(size), poison),
-                    format!("'{c}' repeated then poison"),
-                ),
-                (
-                    with_poison(
-                        format!("{prefix}{}", run_of(size.saturating_sub(prefix.len()))),
-                        poison,
-                    ),
-                    format!("literals then '{c}' repeated then poison"),
-                ),
-            ];
-            for (input, shape) in inputs {
-                if let Some(trip) = probe(&re, &input, &shape, config.match_limit)? {
-                    return Ok(Some(trip));
-                }
-            }
-        }
-        if alphabet.len() > 1 {
-            let cycled: String = alphabet.iter().cycle().take(size).collect();
-            if let Some(trip) = probe(&re, &cycled, "alphabet cycled", config.match_limit)? {
-                return Ok(Some(trip));
-            }
-            let poisoned = with_poison(cycled, poison);
-            if let Some(trip) = probe(
-                &re,
-                &poisoned,
-                "alphabet cycled then poison",
-                config.match_limit,
-            )? {
+    let sizes = config
+        .sizes
+        .iter()
+        .copied()
+        .filter(|&n| n <= limits.input_bytes);
+    for size in sizes {
+        for (input, shape) in inputs_of(size, &alphabet, &prefix, poison) {
+            if let Some(trip) = probe(&re, &input, shape, config.match_limit)? {
                 return Ok(Some(trip));
             }
         }
     }
     Ok(None)
+}
+
+/// Every adversarial input of one size, in the order they are tried.
+fn inputs_of(
+    size: usize,
+    alphabet: &[char],
+    prefix: &str,
+    poison: char,
+) -> Vec<(String, InputShape)> {
+    let mut inputs = Vec::with_capacity(alphabet.len() * 3 + 2);
+    for &c in alphabet {
+        let run_of = |n: usize| std::iter::repeat_n(c, n).collect::<String>();
+        inputs.push((run_of(size), InputShape::Repeated(c)));
+        inputs.push((
+            with_poison(run_of(size), poison),
+            InputShape::RepeatedThenPoison(c),
+        ));
+        inputs.push((
+            with_poison(
+                format!("{prefix}{}", run_of(size.saturating_sub(prefix.len()))),
+                poison,
+            ),
+            InputShape::LiteralsThenRepeatedThenPoison(c),
+        ));
+    }
+    if alphabet.len() > 1 {
+        let cycled: String = alphabet.iter().cycle().take(size).collect();
+        inputs.push((cycled.clone(), InputShape::Cycled));
+        inputs.push((with_poison(cycled, poison), InputShape::CycledThenPoison));
+    }
+    inputs
 }
 
 fn with_poison(mut input: String, poison: char) -> String {
@@ -145,7 +183,7 @@ fn with_poison(mut input: String, poison: char) -> String {
 fn probe(
     re: &pcre2::Pcre2Regex,
     input: &str,
-    shape: &str,
+    shape: InputShape,
     match_limit: u32,
 ) -> Result<Option<CanaryTrip>, CompileError> {
     match re.captures(input, true) {
@@ -153,7 +191,7 @@ fn probe(
         Err(error @ (MatchError::MatchLimit | MatchError::DepthLimit | MatchError::HeapLimit)) => {
             Ok(Some(CanaryTrip {
                 input_len: input.len(),
-                input_shape: shape.to_owned(),
+                input_shape: shape,
                 match_limit,
                 error,
             }))
@@ -178,10 +216,11 @@ struct Literals {
 
 fn literals(pattern: &str) -> Literals {
     let mut sequence = Vec::new();
-    let desugared = scan::desugar_for_lint(pattern);
-    let parse = |text: &str| regex_syntax::ParserBuilder::new().build().parse(text).ok();
-    match parse(&desugared.text).or_else(|| parse(pattern)) {
-        Some(hir) => collect_sequence(&hir, &mut sequence),
+    let parsed = scan::parse_with_fallback(pattern, |text| {
+        regex_syntax::ParserBuilder::new().build().parse(text).ok()
+    });
+    match parsed {
+        Some((hir, _)) => collect_sequence(&hir, &mut sequence),
         None => sequence = scan::raw_literal_alphabet(pattern),
     }
     if sequence.is_empty() {

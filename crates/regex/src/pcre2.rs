@@ -10,7 +10,10 @@
 //!   character; every offset PCRE2 returns is a `char` boundary of the haystack.
 //! - `PCRE2_DOLLAR_ENDONLY` is set so `$` means end of text, as it does on the `regex` crate.
 //! - JIT is never compiled; matching always runs on the interpreter, where
-//!   `match_limit`, `depth_limit` and `heap_limit` are deterministic.
+//!   `match_limit`, `depth_limit` and `heap_limit` are deterministic. All three are
+//!   per start position: `pcre2_match` resets its counters each time its bump-along loop
+//!   advances, so an unanchored non-match over n start positions may cost up to n times
+//!   the limit. `Limits::input_bytes` is the bound on that.
 //! - Compiled code and the match context are immutable after construction and are shared
 //!   across threads. Match data is created per call and never shared.
 //!
@@ -121,7 +124,10 @@ struct MatchData(NonNull<pcre2_match_data_8>);
 impl MatchData {
     /// A block with room for `pairs` offset pairs. PCRE2 needs at least one.
     fn new(pairs: usize) -> Result<Self, MatchError> {
-        let pairs = u32::try_from(pairs.max(1)).map_err(|_| MatchError::OutOfMemory)?;
+        let pairs = u32::try_from(pairs.max(1)).map_err(|_| MatchError::Engine {
+            code: 0,
+            message: "too many capture groups for a match data block".to_owned(),
+        })?;
         // SAFETY: a null general context selects the default allocator.
         let raw = unsafe { pcre2_match_data_create_8(pairs, ptr::null_mut()) };
         NonNull::new(raw).map(Self).ok_or(MatchError::OutOfMemory)
@@ -157,13 +163,13 @@ impl Pcre2Regex {
         let Some(code) = NonNull::new(raw).map(Code) else {
             return Err(CompileError::Syntax {
                 engine: crate::Engine::Backtracking,
-                code: error_code,
+                code: Some(error_code),
                 message: error_message(error_code),
                 offset: error_offset,
             });
         };
         let match_context = MatchContext::new(limits)?;
-        let capture_count = pattern_info_u32(&code, PCRE2_INFO_CAPTURECOUNT)? as usize;
+        let capture_count = pattern_info_u32(&code, U32Info::CaptureCount)? as usize;
         let names = read_name_table(&code, capture_count)?;
         Ok(Self {
             code,
@@ -254,11 +260,32 @@ impl Pcre2Regex {
     }
 }
 
-fn pattern_info_u32(code: &Code, what: u32) -> Result<u32, CompileError> {
+/// The `PCRE2_INFO_*` items whose result is a `uint32_t`. Restricting the argument to this
+/// enum is what makes `pattern_info_u32` safe: a pointer-valued item would overrun `out`.
+#[derive(Clone, Copy)]
+enum U32Info {
+    CaptureCount,
+    NameCount,
+    NameEntrySize,
+}
+
+impl U32Info {
+    fn code(self) -> u32 {
+        match self {
+            Self::CaptureCount => PCRE2_INFO_CAPTURECOUNT,
+            Self::NameCount => PCRE2_INFO_NAMECOUNT,
+            Self::NameEntrySize => PCRE2_INFO_NAMEENTRYSIZE,
+        }
+    }
+}
+
+fn pattern_info_u32(code: &Code, what: U32Info) -> Result<u32, CompileError> {
     let mut out: u32 = 0;
-    // SAFETY: `code` is a live compiled pattern; `what` is one of the `PCRE2_INFO_*` items
-    // whose result type is `uint32_t`, so `out` is the right size.
-    let rc = unsafe { pcre2_pattern_info_8(code.0.as_ptr(), what, (&mut out as *mut u32).cast()) };
+    // SAFETY: `code` is a live compiled pattern; every `U32Info` item has a `uint32_t`
+    // result, so `out` is the right size for the write.
+    let rc = unsafe {
+        pcre2_pattern_info_8(code.0.as_ptr(), what.code(), (&mut out as *mut u32).cast())
+    };
     if rc != 0 {
         return Err(CompileError::Internal {
             code: rc,
@@ -274,11 +301,11 @@ fn pattern_info_u32(code: &Code, what: u32) -> Result<u32, CompileError> {
 /// number followed by the NUL-terminated name, padded to `entry_size`.
 fn read_name_table(code: &Code, capture_count: usize) -> Result<Vec<Option<String>>, CompileError> {
     let mut names = vec![None; capture_count + 1];
-    let name_count = pattern_info_u32(code, PCRE2_INFO_NAMECOUNT)? as usize;
+    let name_count = pattern_info_u32(code, U32Info::NameCount)? as usize;
     if name_count == 0 {
         return Ok(names);
     }
-    let entry_size = pattern_info_u32(code, PCRE2_INFO_NAMEENTRYSIZE)? as usize;
+    let entry_size = pattern_info_u32(code, U32Info::NameEntrySize)? as usize;
     if entry_size < 3 {
         return Err(CompileError::Internal {
             code: 0,

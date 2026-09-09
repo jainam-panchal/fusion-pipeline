@@ -16,6 +16,7 @@ fn kinds(pattern: &str) -> Vec<&'static str> {
             RedosRisk::NestedQuantifiers { .. } => "nested",
             RedosRisk::OverlappingAlternation { .. } => "alternation",
             RedosRisk::OverlappingSuffix { .. } => "suffix",
+            other => panic!("unexpected risk {other:?}"),
         })
         .collect()
 }

@@ -1,6 +1,9 @@
-//! Byte-level pattern scanner shared by the compile-time guards, the lint's PCRE2-to-`regex`
-//! desugaring and the canary's alphabet extraction. It understands escapes and character
-//! classes well enough to find group parentheses; it is not a parser.
+//! Byte-level pattern scanner shared by the compile-time guards, the PCRE2-to-`regex`
+//! desugaring used by the lint and the canary, and the canary's raw alphabet extraction.
+//! It understands escapes and character classes well enough to find group parentheses; it
+//! is not a parser. It does not know `\Q…\E` or `(?x)` comments, so PCRE2's own
+//! `max_pattern_length` and `parens_nest_limit` stay set on the compile context as the
+//! backstop for parentheses the scanner miscounts.
 
 use crate::{CompileError, Limits};
 
@@ -8,10 +11,14 @@ use crate::{CompileError, Limits};
 /// Both errors carry the byte offset at which the limit was crossed.
 pub(crate) fn check_guards(pattern: &str, limits: &Limits) -> Result<(), CompileError> {
     if pattern.len() > limits.max_pattern_length {
+        let mut offset = limits.max_pattern_length;
+        while !pattern.is_char_boundary(offset) {
+            offset -= 1;
+        }
         return Err(CompileError::PatternTooLong {
             len: pattern.len(),
             limit: limits.max_pattern_length,
-            offset: limits.max_pattern_length,
+            offset,
         });
     }
     let mut depth: u32 = 0;
@@ -83,7 +90,8 @@ impl Desugared {
     }
 }
 
-/// Rewrites PCRE2-only syntax into structurally equivalent `regex` syntax for the lint:
+/// Rewrites PCRE2-only syntax into structurally equivalent `regex` syntax for the lint and
+/// the canary:
 ///
 /// - lookaround `(?=`, `(?!`, `(?<=`, `(?<!` and atomic `(?>` become `(?:`;
 /// - backreferences `\1`..`\9`, `\g{..}`, `\g<..>`, `\k<..>`, `\k'..'`, `\k{..}` and
@@ -92,7 +100,7 @@ impl Desugared {
 ///
 /// Anything else is copied through unchanged; constructs this does not know about are left
 /// for the parser to reject.
-pub(crate) fn desugar_for_lint(pattern: &str) -> Desugared {
+pub(crate) fn desugar_pcre2_syntax(pattern: &str) -> Desugared {
     let bytes = pattern.as_bytes();
     let mut out = Desugared {
         text: String::with_capacity(pattern.len()),
@@ -210,4 +218,22 @@ pub(crate) fn raw_literal_alphabet(pattern: &str) -> Vec<char> {
         }
     }
     out
+}
+
+/// Desugars PCRE2-only syntax and parses the result with `parse`; if that fails, parses the
+/// pattern as written. Returns the parse output and the offset map of the text that parsed.
+pub(crate) fn parse_with_fallback<T>(
+    pattern: &str,
+    mut parse: impl FnMut(&str) -> Option<T>,
+) -> Option<(T, Desugared)> {
+    let desugared = desugar_pcre2_syntax(pattern);
+    if let Some(parsed) = parse(&desugared.text) {
+        return Some((parsed, desugared));
+    }
+    let parsed = parse(pattern)?;
+    let identity = Desugared {
+        text: pattern.to_owned(),
+        offsets: (0..=pattern.len()).collect(),
+    };
+    Some((parsed, identity))
 }

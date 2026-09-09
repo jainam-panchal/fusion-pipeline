@@ -73,6 +73,12 @@ pub struct Limits {
     /// Upper bound on heap PCRE2 may use for backtracking frames, in KiB.
     pub heap_limit_kib: u32,
     /// Largest haystack accepted, in bytes. Longer inputs are [`MatchError::InputTooLarge`].
+    ///
+    /// On the backtracking engine this is the only bound on one class of slow pattern:
+    /// PCRE2 resets its match counter at every start position, so an unanchored pattern
+    /// whose leading loop can start anywhere (`\w+\s+\w+`, `(?:a|b)*(?=c)`) costs
+    /// O(n²) on a non-matching record and never trips `match_limit`. Keep this small enough
+    /// that n² is affordable; the default 64 KiB is the largest input the canary tries.
     pub input_bytes: usize,
     /// Longest pattern accepted, in bytes.
     pub max_pattern_length: usize,
@@ -86,7 +92,7 @@ impl Default for Limits {
             match_limit: 1_000_000,
             depth_limit: 1_000_000,
             heap_limit_kib: 20_000,
-            input_bytes: 1024 * 1024,
+            input_bytes: 64 * 1024,
             max_pattern_length: 8192,
             parens_nest_limit: 250,
         }
@@ -104,7 +110,11 @@ pub enum RedosPolicy {
 }
 
 /// Everything [`Regex::with_options`] needs beyond the pattern.
-#[derive(Debug, Clone, Default)]
+///
+/// `Default` is [`Options::checked`]: lint and canary on, rejecting on any finding, as the
+/// spec requires of a stage at config load. [`Regex::new`] opts out with
+/// [`Options::unchecked`].
+#[derive(Debug, Clone)]
 pub struct Options {
     /// Runtime and compile-time limits.
     pub limits: Limits,
@@ -118,6 +128,12 @@ pub struct Options {
     pub canary: Option<canary::CanaryConfig>,
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Self::checked()
+    }
+}
+
 impl Options {
     /// Limits only: no lint, no canary. What [`Regex::new`] uses.
     #[must_use]
@@ -125,17 +141,19 @@ impl Options {
         Self {
             lint: false,
             canary: None,
-            ..Self::default()
+            ..Self::checked()
         }
     }
 
-    /// All three load-time checks on, rejecting on any finding.
+    /// All three load-time checks on, rejecting on any finding. The `Default`.
     #[must_use]
     pub fn checked() -> Self {
         Self {
+            limits: Limits::default(),
+            engine: EngineChoice::default(),
+            on_redos_risk: RedosPolicy::default(),
             lint: true,
             canary: Some(canary::CanaryConfig::default()),
-            ..Self::default()
         }
     }
 }
@@ -149,8 +167,8 @@ pub enum CompileError {
     Syntax {
         /// Engine that produced the error.
         engine: Engine,
-        /// The engine's own error code (0 for the linear engine).
-        code: i32,
+        /// PCRE2's error code; `None` for the linear engine, which has no numeric codes.
+        code: Option<i32>,
         /// The engine's message, verbatim.
         message: String,
         /// Byte offset into the pattern.
@@ -306,8 +324,12 @@ impl Regex {
             }
         }
 
+        // The canary describes PCRE2 behaviour, so it only runs for patterns that will
+        // execute on PCRE2. A linear pattern cannot backtrack, and syntax the `regex` crate
+        // accepts but PCRE2 reads differently (class set operations) would make the verdict
+        // about a different pattern.
         let mut canary_warning = None;
-        if let Some(config) = &options.canary {
+        if let (Some(config), Inner::Backtracking(_)) = (&options.canary, &inner) {
             if let Some(trip) = canary::run(pattern, config, limits)? {
                 match options.on_redos_risk {
                     RedosPolicy::Reject => return Err(CompileError::CanaryTripped(trip)),
@@ -332,11 +354,13 @@ impl Regex {
     }
 
     /// The pattern as given.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.pattern
     }
 
     /// Which engine this pattern runs on.
+    #[must_use]
     pub fn engine(&self) -> Engine {
         match self.inner {
             Inner::Linear(_) => Engine::Linear,
@@ -345,11 +369,14 @@ impl Regex {
     }
 
     /// Lint findings kept under [`RedosPolicy::Warn`]. Empty otherwise.
+    #[must_use]
     pub fn redos_warnings(&self) -> &[RedosRisk] {
         &self.warnings
     }
 
-    /// The canary trip kept under [`RedosPolicy::Warn`], if any.
+    /// The canary trip kept under [`RedosPolicy::Warn`], if any. Only a backtracking-engine
+    /// pattern can carry one; the canary is skipped for linear patterns.
+    #[must_use]
     pub fn canary_warning(&self) -> Option<&canary::CanaryTrip> {
         self.canary_warning.as_ref()
     }
@@ -417,13 +444,13 @@ fn compile_linear(pattern: &str) -> Result<regex::Regex, CompileError> {
         .map_err(|e| match e {
             regex::Error::Syntax(msg) => CompileError::Syntax {
                 engine: Engine::Linear,
-                code: 0,
+                code: None,
                 offset: linear_error_offset(pattern),
                 message: msg,
             },
             other => CompileError::Syntax {
                 engine: Engine::Linear,
-                code: 0,
+                code: None,
                 offset: 0,
                 message: other.to_string(),
             },

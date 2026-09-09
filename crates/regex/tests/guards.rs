@@ -71,6 +71,28 @@ fn deeply_nested_parens_are_rejected_with_offset_on_both_engines() {
 }
 
 #[test]
+fn oversize_pattern_offset_lands_on_a_char_boundary() {
+    // Byte 8 is inside the three-byte `€`, so the offset backs up to byte 7.
+    let pattern = "abcdefg€hij";
+    let err = with_limits(
+        pattern,
+        EngineChoice::Auto,
+        Limits {
+            max_pattern_length: 8,
+            ..Limits::default()
+        },
+    )
+    .unwrap_err();
+    match err {
+        CompileError::PatternTooLong { offset, .. } => {
+            assert_eq!(offset, 7);
+            assert!(pattern.is_char_boundary(offset));
+        }
+        other => panic!("expected PatternTooLong, got {other:?}"),
+    }
+}
+
+#[test]
 fn linear_only_choice_rejects_backtracking_syntax() {
     let err = with_limits(r"(?<=x)y", EngineChoice::Linear, Limits::default()).unwrap_err();
     assert!(matches!(err, CompileError::Syntax { .. }), "{err:?}");
