@@ -8,6 +8,36 @@
 
 use crate::{CompileError, Limits};
 
+/// Bracketed-class state shared by the scanners. Inside `[...]` only the closing `]` means
+/// anything, and `]` as the first member (`[]a]`, `[^]a]`) is a literal.
+#[derive(Default)]
+struct ClassState {
+    in_class: bool,
+    class_start: bool,
+}
+
+impl ClassState {
+    /// Feeds the unescaped byte at `i`. Returns how many bytes belong to class syntax (the
+    /// opening `[` with an optional `^`, or one member byte), or `None` when `i` is outside
+    /// a class.
+    fn step(&mut self, bytes: &[u8], i: usize) -> Option<usize> {
+        if self.in_class {
+            if bytes[i] == b']' && !self.class_start {
+                self.in_class = false;
+            }
+            self.class_start = false;
+            return Some(1);
+        }
+        if bytes[i] == b'[' {
+            self.in_class = true;
+            self.class_start = true;
+            let caret = usize::from(bytes.get(i + 1) == Some(&b'^'));
+            return Some(1 + caret);
+        }
+        None
+    }
+}
+
 /// Rejects patterns longer than the length limit or nested deeper than the parens limit.
 /// Both errors carry the byte offset at which the limit was crossed.
 pub(crate) fn check_guards(pattern: &str, limits: &Limits) -> Result<(), CompileError> {
@@ -23,44 +53,30 @@ pub(crate) fn check_guards(pattern: &str, limits: &Limits) -> Result<(), Compile
         });
     }
     let mut depth: u32 = 0;
-    let mut in_class = false;
-    let mut class_start = false;
+    let mut class = ClassState::default();
     let bytes = pattern.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\\' {
+        if bytes[i] == b'\\' {
             i += 2;
             continue;
         }
-        if in_class {
-            // `]` as the first class member is a literal.
-            if b == b']' && !class_start {
-                in_class = false;
-            }
-            class_start = false;
-        } else {
-            match b {
-                b'[' => {
-                    in_class = true;
-                    // `[^]...]` and `[]...]` both start with a literal `]`.
-                    class_start = true;
-                    if bytes.get(i + 1) == Some(&b'^') {
-                        i += 1;
-                    }
+        if let Some(n) = class.step(bytes, i) {
+            i += n;
+            continue;
+        }
+        match bytes[i] {
+            b'(' => {
+                depth += 1;
+                if depth > limits.parens_nest_limit {
+                    return Err(CompileError::ParensTooDeep {
+                        limit: limits.parens_nest_limit,
+                        offset: i,
+                    });
                 }
-                b'(' => {
-                    depth += 1;
-                    if depth > limits.parens_nest_limit {
-                        return Err(CompileError::ParensTooDeep {
-                            limit: limits.parens_nest_limit,
-                            offset: i,
-                        });
-                    }
-                }
-                b')' => depth = depth.saturating_sub(1),
-                _ => {}
             }
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
         }
         i += 1;
     }
@@ -77,16 +93,13 @@ pub(crate) struct Desugared {
 impl Desugared {
     fn push_range(&mut self, pattern: &str, start: usize, end: usize) {
         let end = end.min(pattern.len());
-        for i in start..end {
-            self.offsets.push(i);
-        }
+        self.offsets.extend(start..end);
         self.text.push_str(&pattern[start..end]);
     }
 
     fn push_replacement(&mut self, replacement: &str, at: usize) {
-        for _ in 0..replacement.len() {
-            self.offsets.push(at);
-        }
+        self.offsets
+            .extend(std::iter::repeat_n(at, replacement.len()));
         self.text.push_str(replacement);
     }
 }
@@ -105,26 +118,22 @@ pub(crate) fn desugar_pcre2_syntax(pattern: &str) -> Desugared {
     let bytes = pattern.as_bytes();
     let mut out = Desugared {
         text: String::with_capacity(pattern.len()),
-        offsets: Vec::new(),
+        offsets: Vec::with_capacity(pattern.len() + 1),
     };
-    let mut in_class = false;
-    let mut class_start = false;
+    let mut class = ClassState::default();
     let mut after_quantifier = false;
     let mut i = 0;
     'outer: while i < bytes.len() {
         let b = bytes[i];
-        if in_class {
-            if b == b'\\' {
-                out.push_range(pattern, i, i + 2);
-                i += 2;
-                continue;
-            }
-            if b == b']' && !class_start {
-                in_class = false;
-            }
-            class_start = false;
-            out.push_range(pattern, i, i + 1);
-            i += 1;
+        if b == b'\\' && class.in_class {
+            out.push_range(pattern, i, i + 2);
+            i += 2;
+            continue;
+        }
+        if let Some(n) = class.step(bytes, i) {
+            out.push_range(pattern, i, i + n);
+            i += n;
+            after_quantifier = false;
             continue;
         }
         if b == b'\\' {
@@ -150,36 +159,22 @@ pub(crate) fn desugar_pcre2_syntax(pattern: &str) -> Desugared {
             continue;
         }
         after_quantifier = matches!(b, b'*' | b'+' | b'?' | b'}');
-        match b {
-            b'[' => {
-                in_class = true;
-                class_start = true;
-                out.push_range(pattern, i, i + 1);
-                i += 1;
-                if bytes.get(i) == Some(&b'^') {
-                    out.push_range(pattern, i, i + 1);
-                    i += 1;
-                }
-                continue;
-            }
-            b'(' => {
-                let rest = &bytes[i..];
-                for prefix in [&b"(?<="[..], b"(?<!", b"(?=", b"(?!", b"(?>"] {
-                    if rest.starts_with(prefix) {
-                        out.push_replacement("(?:", i);
-                        i += prefix.len();
-                        continue 'outer;
-                    }
-                }
-                if rest.starts_with(b"(?P=") {
-                    if let Some(end) = rest.iter().position(|&c| c == b')') {
-                        out.push_replacement("(?:)", i);
-                        i += end + 1;
-                        continue;
-                    }
+        if b == b'(' {
+            let rest = &bytes[i..];
+            for prefix in [&b"(?<="[..], b"(?<!", b"(?=", b"(?!", b"(?>"] {
+                if rest.starts_with(prefix) {
+                    out.push_replacement("(?:", i);
+                    i += prefix.len();
+                    continue 'outer;
                 }
             }
-            _ => {}
+            if rest.starts_with(b"(?P=") {
+                if let Some(end) = rest.iter().position(|&c| c == b')') {
+                    out.push_replacement("(?:)", i);
+                    i += end + 1;
+                    continue;
+                }
+            }
         }
         out.push_range(pattern, i, i + 1);
         i += 1;

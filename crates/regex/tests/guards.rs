@@ -3,23 +3,13 @@
 
 mod common;
 
-use fusion_regex::{CompileError, EngineChoice, Limits, Options, Regex};
-
-fn with_limits(pattern: &str, engine: EngineChoice, limits: Limits) -> Result<Regex, CompileError> {
-    Regex::with_options(
-        pattern,
-        &Options {
-            limits,
-            engine,
-            ..Options::unchecked()
-        },
-    )
-}
+use common::{BOTH_ENGINES, try_compile as with_limits};
+use fusion_regex::{CompileError, EngineChoice, Limits, Regex};
 
 #[test]
 fn oversize_pattern_is_rejected_with_offset_on_both_engines() {
     let pattern = "a".repeat(100);
-    for engine in [EngineChoice::Linear, EngineChoice::Backtracking] {
+    for engine in BOTH_ENGINES {
         let err = with_limits(
             &pattern,
             engine,
@@ -42,7 +32,7 @@ fn oversize_pattern_is_rejected_with_offset_on_both_engines() {
 fn deeply_nested_parens_are_rejected_with_offset_on_both_engines() {
     // Depth 4 opens at byte 3; classes and escapes do not count.
     let pattern = r"(((([\(]\(a))))";
-    for engine in [EngineChoice::Linear, EngineChoice::Backtracking] {
+    for engine in BOTH_ENGINES {
         let err = with_limits(
             pattern,
             engine,
@@ -134,13 +124,7 @@ fn linear_pattern_too_big_to_compile_has_its_own_variant() {
     // exceeds the crate's default size limit; PCRE2 compiles it without complaint.
     let err = with_limits(r"\pL{1000}", EngineChoice::Linear, Limits::default()).unwrap_err();
     assert!(
-        matches!(
-            err,
-            CompileError::CompiledTooBig {
-                engine: fusion_regex::Engine::Linear,
-                ..
-            }
-        ),
+        matches!(err, CompileError::CompiledTooBig { .. }),
         "{err:?}"
     );
     assert!(with_limits(r"\pL{1000}", EngineChoice::Auto, Limits::default()).is_ok());

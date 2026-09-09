@@ -5,8 +5,8 @@ mod common;
 
 use std::num::NonZeroU32;
 
-use common::{NESTED_BACKTRACKING as NESTED, compile};
-use fusion_regex::{Engine, EngineChoice, Limits, MatchError, Options, Regex};
+use common::{BOTH_ENGINES, NESTED_BACKTRACKING as NESTED, compile};
+use fusion_regex::{Engine, EngineChoice, Limits, MatchError, Regex};
 
 fn backtracking(pattern: &str, limits: Limits) -> Regex {
     let re = compile(pattern, EngineChoice::Auto, limits);
@@ -109,19 +109,15 @@ fn limits_are_generous_enough_for_an_ordinary_line() {
 
 #[test]
 fn input_size_limit_applies_on_both_engines() {
-    for engine in [EngineChoice::Linear, EngineChoice::Backtracking] {
-        let re = Regex::with_options(
+    for engine in BOTH_ENGINES {
+        let re = compile(
             r"\w+",
-            &Options {
-                limits: Limits {
-                    input_bytes: 8,
-                    ..Limits::default()
-                },
-                engine,
-                ..Options::unchecked()
+            engine,
+            Limits {
+                input_bytes: 8,
+                ..Limits::default()
             },
-        )
-        .unwrap();
+        );
         assert!(re.is_match("12345678").unwrap(), "{engine:?}");
         assert_eq!(
             re.is_match("123456789").unwrap_err(),

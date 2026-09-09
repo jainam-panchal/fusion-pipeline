@@ -30,18 +30,12 @@ use regex_syntax::hir::{self, Hir, HirKind};
 
 use crate::{CompileError, Limits, MatchError, pcre2, scan};
 
-/// Canary configuration.
+/// Canary configuration. Probes run under the runtime `match_limit` of the [`Limits`]
+/// passed to [`run`]: the canary asks "would this pattern trip at runtime on its worst
+/// input?", and a lower value would reject patterns the runtime accepts (`^(?:a|b)*$`
+/// needs about 130 000 steps at 64 KiB). What makes the canary tight is `work_per_byte`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanaryConfig {
-    /// Match limit for the canary runs, or `None` for the runtime `match_limit` in the
-    /// [`Limits`] passed to [`run`].
-    ///
-    /// The canary asks "would this pattern trip at runtime on its worst input?", so the
-    /// runtime limit is the honest answer: a lower value rejects patterns the runtime would
-    /// accept (`^(?:a|b)*$` needs about 130 000 steps at 64 KiB). What makes the canary
-    /// tight is `work_per_byte`, which bounds the whole call at a fraction of the runtime
-    /// `work_limit`.
-    pub match_limit: Option<u32>,
     /// Work budget for one probe, per byte of input, counted across start positions.
     /// The default 64 lets a linear scan of the input pass with margin (`^(?:a|b)*$` needs
     /// about 2 items per byte) and trips a group loop that restarts at every position
@@ -57,7 +51,6 @@ pub struct CanaryConfig {
 impl Default for CanaryConfig {
     fn default() -> Self {
         Self {
-            match_limit: None,
             work_per_byte: const { NonZeroU32::new(64).unwrap() },
             sizes: vec![1024, 8192, 65536],
         }
@@ -146,7 +139,6 @@ pub fn run(
     config: &CanaryConfig,
     limits: &Limits,
 ) -> Result<Option<CanaryTrip>, CompileError> {
-    let match_limit = config.match_limit.unwrap_or(limits.match_limit);
     let mut sizes: Vec<usize> = config
         .sizes
         .iter()
@@ -161,31 +153,28 @@ pub fn run(
         .unwrap_or('\u{2}');
     let prefix: String = sequence.into_iter().collect();
 
-    // The work budget is per probe and depends on the input size, so each size gets its
-    // own compile; PCRE2 compiles in microseconds and there are three sizes.
-    let smallest = sizes.first().copied();
-    for &size in &sizes {
+    // The budget varies per probe; compiling with any `work_limit` set is what compiles the
+    // callouts in, and the actual budget is passed to each probe.
+    let re = pcre2::Pcre2Regex::compile(
+        pattern,
+        &Limits {
+            work_limit: Some(NonZeroU32::MAX),
+            ..limits.clone()
+        },
+    )?;
+    for (i, &size) in sizes.iter().enumerate() {
         let budget = u64::from(config.work_per_byte.get())
             .saturating_mul(u64::try_from(size).unwrap_or(u64::MAX));
         let work_limit = NonZeroU32::new(u32::try_from(budget).unwrap_or(u32::MAX));
-        let canary_limits = Limits {
-            match_limit,
-            work_limit,
-            ..limits.clone()
-        };
-        let re = pcre2::Pcre2Regex::compile(pattern, &canary_limits)?;
         // Anchored at every size: catches blow-ups within one start position without paying
         // for the start loop. Unanchored at the smallest size only: catches a group loop
         // that restarts at every position, which is quadratic and therefore visible even
         // on the smallest input.
-        let modes: &[bool] = if Some(size) == smallest {
-            &[true, false]
-        } else {
-            &[true]
-        };
+        let modes: &[bool] = if i == 0 { &[true, false] } else { &[true] };
         for (input, shape) in inputs_of(size, &alphabet, &prefix, poison) {
             for &anchored in modes {
-                if let Some(trip) = probe(&re, &input, shape, anchored, &canary_limits)? {
+                let verdict = probe(&re, &input, shape, anchored, limits.match_limit, work_limit)?;
+                if let Some(trip) = verdict {
                     return Ok(Some(trip));
                 }
             }
@@ -248,9 +237,10 @@ fn probe(
     input: &str,
     shape: InputShape,
     anchored: bool,
-    limits: &Limits,
+    match_limit: u32,
+    work_limit: Option<NonZeroU32>,
 ) -> Result<Option<CanaryTrip>, CompileError> {
-    match re.is_match(input, anchored) {
+    match re.probe(input, anchored, work_limit) {
         Ok(_) => Ok(None),
         Err(
             error @ (MatchError::MatchLimit
@@ -261,8 +251,8 @@ fn probe(
             input_len: input.len(),
             input_shape: shape,
             anchored,
-            match_limit: limits.match_limit,
-            work_limit: limits.work_limit,
+            match_limit,
+            work_limit,
             error,
         })),
         Err(MatchError::OutOfMemory) => Err(CompileError::OutOfMemory),

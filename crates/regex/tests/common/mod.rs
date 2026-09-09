@@ -1,7 +1,10 @@
 //! Fixtures and helpers shared by the integration tests.
 #![allow(dead_code, clippy::unwrap_used)]
 
-use fusion_regex::{EngineChoice, Limits, Options, Regex};
+use fusion_regex::canary::CanaryConfig;
+use fusion_regex::{CompileError, EngineChoice, Limits, Options, Regex};
+
+pub const BOTH_ENGINES: [EngineChoice; 2] = [EngineChoice::Linear, EngineChoice::Backtracking];
 
 /// The loghub Linux syslog pattern from the spec: lifts `Month, Date, Time, Level,
 /// Component, PID, Content` and must pass every load-time check.
@@ -14,7 +17,11 @@ pub const LINUX_LINE: &str =
 pub const NESTED_BACKTRACKING: &str = r"^(?=a)(a+)+$";
 
 /// Compiles with the given engine choice and limits, no lint, no canary.
-pub fn compile(pattern: &str, engine: EngineChoice, limits: Limits) -> Regex {
+pub fn try_compile(
+    pattern: &str,
+    engine: EngineChoice,
+    limits: Limits,
+) -> Result<Regex, CompileError> {
     Regex::with_options(
         pattern,
         &Options {
@@ -23,7 +30,29 @@ pub fn compile(pattern: &str, engine: EngineChoice, limits: Limits) -> Regex {
             ..Options::unchecked()
         },
     )
-    .unwrap()
+}
+
+/// [`try_compile`], unwrapped.
+pub fn compile(pattern: &str, engine: EngineChoice, limits: Limits) -> Regex {
+    try_compile(pattern, engine, limits).unwrap()
+}
+
+/// Default options with the lint on and the canary off.
+pub fn lint_only() -> Options {
+    Options {
+        lint: true,
+        canary: None,
+        ..Options::default()
+    }
+}
+
+/// Default options with the canary on (as `config`) and the lint off.
+pub fn canary_only(config: CanaryConfig) -> Options {
+    Options {
+        lint: false,
+        canary: Some(config),
+        ..Options::default()
+    }
 }
 
 /// Compiles on the given engine with default limits, no lint, no canary.

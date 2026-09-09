@@ -134,21 +134,6 @@ pub enum RedosPolicy {
     Warn,
 }
 
-impl RedosPolicy {
-    /// Applies the policy to one finding: `Reject` turns it into the error `reject` builds,
-    /// `Warn` hands it back to be kept.
-    fn apply<T>(
-        self,
-        finding: T,
-        reject: impl FnOnce(T) -> CompileError,
-    ) -> Result<Option<T>, CompileError> {
-        match self {
-            Self::Reject => Err(reject(finding)),
-            Self::Warn => Ok(Some(finding)),
-        }
-    }
-}
-
 /// Everything [`Regex::with_options`] needs beyond the pattern.
 ///
 /// `Default` is [`Options::checked`]: lint and canary on, rejecting on any finding, as the
@@ -226,10 +211,8 @@ pub enum CompileError {
     },
     /// The linear engine's compiled program exceeded its size limit. Only the linear engine
     /// has this limit; PCRE2 bounds pattern size through `max_pattern_length`.
-    #[error("{engine} engine: compiled program larger than {limit} bytes")]
+    #[error("linear engine: compiled program larger than {limit} bytes")]
     CompiledTooBig {
-        /// Engine that produced the error.
-        engine: Engine,
         /// The engine's size limit in bytes.
         limit: usize,
     },
@@ -355,15 +338,16 @@ impl Regex {
         let limits = &options.limits;
         scan::check_guards(pattern, limits)?;
 
-        let mut inner = match options.engine {
-            EngineChoice::Auto => match compile_linear(pattern) {
+        let backtracking = || pcre2::Pcre2Regex::compile(pattern, limits).map(Inner::Backtracking);
+        let inner = match options.engine {
+            EngineChoice::Auto => match regex::Regex::new(pattern) {
                 Ok(re) => Inner::Linear(re),
-                Err(_) => Inner::Backtracking(pcre2::Pcre2Regex::compile(pattern, limits)?),
+                Err(_) => backtracking()?,
             },
-            EngineChoice::Linear => Inner::Linear(compile_linear(pattern)?),
-            EngineChoice::Backtracking => {
-                Inner::Backtracking(pcre2::Pcre2Regex::compile(pattern, limits)?)
+            EngineChoice::Linear => {
+                Inner::Linear(regex::Regex::new(pattern).map_err(|e| linear_error(pattern, e))?)
             }
+            EngineChoice::Backtracking => backtracking()?,
         };
 
         // The lint runs whichever engine was chosen: it describes the pattern's shape, which
@@ -371,19 +355,19 @@ impl Regex {
         // regardless of classification. The canary below is different: it measures PCRE2.
         let mut warnings = Vec::new();
         if options.lint {
-            let report = lint::lint(pattern);
-            let mut risks = report.risks;
             // A pattern the lint cannot parse is only ever PCRE2-only syntax, so the canary
             // covers it when configured. With the canary off, nothing has looked at it,
             // and silence would read as "clean".
-            if !report.parsed && options.canary.is_none() {
-                risks.push(RedosRisk::NotParsed);
-            }
-            if !risks.is_empty() {
-                warnings = options
-                    .on_redos_risk
-                    .apply(risks, CompileError::RedosRisk)?
-                    .unwrap_or_default();
+            let risks = match lint::lint(pattern) {
+                Some(risks) => risks,
+                None if options.canary.is_none() => vec![RedosRisk::NotParsed],
+                None => Vec::new(),
+            };
+            match options.on_redos_risk {
+                RedosPolicy::Reject if !risks.is_empty() => {
+                    return Err(CompileError::RedosRisk(risks));
+                }
+                RedosPolicy::Reject | RedosPolicy::Warn => warnings = risks,
             }
         }
 
@@ -394,15 +378,16 @@ impl Regex {
         let mut canary_warning = None;
         if let (Some(config), Inner::Backtracking(_)) = (&options.canary, &inner) {
             if let Some(trip) = canary::run(pattern, config, limits)? {
-                canary_warning = options
-                    .on_redos_risk
-                    .apply(trip, CompileError::CanaryTripped)?;
+                match options.on_redos_risk {
+                    RedosPolicy::Reject => return Err(CompileError::CanaryTripped(trip)),
+                    RedosPolicy::Warn => canary_warning = Some(trip),
+                }
             }
         }
 
-        let names = match &mut inner {
+        let names = match &inner {
             Inner::Linear(re) => re.capture_names().map(|n| n.map(str::to_owned)).collect(),
-            Inner::Backtracking(re) => re.take_names(),
+            Inner::Backtracking(re) => re.capture_names()?,
         };
 
         Ok(Self {
@@ -458,7 +443,7 @@ impl Regex {
         self.check_input(haystack)?;
         match &self.inner {
             Inner::Linear(re) => Ok(re.is_match(haystack)),
-            Inner::Backtracking(re) => re.is_match(haystack, false),
+            Inner::Backtracking(re) => re.is_match(haystack),
         }
     }
 
@@ -470,17 +455,8 @@ impl Regex {
     pub fn captures<'h>(&self, haystack: &'h str) -> Result<Option<Captures<'_, 'h>>, MatchError> {
         self.check_input(haystack)?;
         let spans = match &self.inner {
-            Inner::Linear(re) => re.captures(haystack).map(|caps| {
-                (0..caps.len())
-                    .map(|i| {
-                        caps.get(i).map(|m| Span {
-                            start: m.start(),
-                            end: m.end(),
-                        })
-                    })
-                    .collect()
-            }),
-            Inner::Backtracking(re) => re.captures(haystack, false)?,
+            Inner::Linear(re) => re.captures(haystack).map(Spans::Linear),
+            Inner::Backtracking(re) => re.captures(haystack)?.map(Spans::Backtracking),
         };
         Ok(spans.map(|spans| Captures {
             haystack,
@@ -500,46 +476,50 @@ impl Regex {
     }
 }
 
-fn compile_linear(pattern: &str) -> Result<regex::Regex, CompileError> {
-    regex::RegexBuilder::new(pattern)
-        .build()
-        .map_err(|e| match e {
-            regex::Error::Syntax(msg) => CompileError::Syntax {
-                engine: Engine::Linear,
-                code: None,
-                offset: linear_error_offset(pattern),
-                message: msg,
-            },
-            regex::Error::CompiledTooBig(limit) => CompileError::CompiledTooBig {
-                engine: Engine::Linear,
-                limit,
-            },
-            other => CompileError::Syntax {
-                engine: Engine::Linear,
-                code: None,
-                offset: 0,
-                message: other.to_string(),
-            },
-        })
+/// Maps a `regex` crate error onto [`CompileError`]. Only called when the linear engine was
+/// selected explicitly: under [`EngineChoice::Auto`] a linear failure means PCRE2, and the
+/// offset below would be computed for nothing.
+fn linear_error(pattern: &str, error: regex::Error) -> CompileError {
+    match error {
+        regex::Error::Syntax(message) => CompileError::Syntax {
+            engine: Engine::Linear,
+            code: None,
+            offset: linear_error_offset(pattern),
+            message,
+        },
+        regex::Error::CompiledTooBig(limit) => CompileError::CompiledTooBig { limit },
+        other => CompileError::Syntax {
+            engine: Engine::Linear,
+            code: None,
+            offset: 0,
+            message: other.to_string(),
+        },
+    }
 }
 
 /// The `regex` crate's error type carries its span only in the message; re-parse with
 /// `regex-syntax` to recover the byte offset.
 fn linear_error_offset(pattern: &str) -> usize {
-    match regex_syntax::ast::parse::Parser::new().parse(pattern) {
-        Err(e) => e.span().start.offset,
-        Ok(_) => match regex_syntax::Parser::new().parse(pattern) {
-            Err(regex_syntax::Error::Translate(e)) => e.span().start.offset,
-            _ => 0,
-        },
+    match regex_syntax::Parser::new().parse(pattern) {
+        Err(regex_syntax::Error::Parse(e)) => e.span().start.offset,
+        Err(regex_syntax::Error::Translate(e)) => e.span().start.offset,
+        _ => 0,
     }
+}
+
+/// Group spans as the engine reports them. The linear engine's own capture block is kept
+/// rather than copied into a `Vec` on every match.
+#[derive(Debug)]
+enum Spans<'h> {
+    Linear(regex::Captures<'h>),
+    Backtracking(Vec<Option<Span>>),
 }
 
 /// Capture groups of one match. Borrows the haystack and the pattern's names.
 #[derive(Debug)]
 pub struct Captures<'r, 'h> {
     haystack: &'h str,
-    spans: Vec<Option<Span>>,
+    spans: Spans<'h>,
     names: &'r [Option<String>],
 }
 
@@ -547,14 +527,20 @@ impl<'r, 'h> Captures<'r, 'h> {
     /// Text of group `index`, or `None` if the group did not participate.
     #[must_use]
     pub fn get(&self, index: usize) -> Option<&'h str> {
-        let span = (*self.spans.get(index)?)?;
+        let span = self.span(index)?;
         self.haystack.get(span.start..span.end)
     }
 
     /// Byte span of group `index`, or `None` if the group did not participate.
     #[must_use]
     pub fn span(&self, index: usize) -> Option<Span> {
-        *self.spans.get(index)?
+        match &self.spans {
+            Spans::Linear(caps) => caps.get(index).map(|m| Span {
+                start: m.start(),
+                end: m.end(),
+            }),
+            Spans::Backtracking(spans) => *spans.get(index)?,
+        }
     }
 
     /// Text of the group called `name`, or `None` if there is no such group or it did not
@@ -573,16 +559,13 @@ impl<'r, 'h> Captures<'r, 'h> {
         })
     }
 
-    /// Number of groups, counting group 0.
+    /// Number of groups, counting group 0. Never zero: a match always has group 0.
     #[must_use]
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
-        self.spans.len()
-    }
-
-    /// Whether there are no groups. Never true for a match, which always has group 0; the
-    /// method exists to pair with [`Captures::len`].
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.spans.is_empty()
+        match &self.spans {
+            Spans::Linear(caps) => caps.len(),
+            Spans::Backtracking(spans) => spans.len(),
+        }
     }
 }

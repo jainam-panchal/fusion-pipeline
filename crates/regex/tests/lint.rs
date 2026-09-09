@@ -3,15 +3,13 @@
 
 mod common;
 
-use common::LINUX_SYSLOG;
+use common::{LINUX_SYSLOG, lint_only};
 use fusion_regex::lint::{RedosRisk, lint};
 use fusion_regex::{CompileError, Options, RedosPolicy, Regex};
 
 fn kinds(pattern: &str) -> Vec<&'static str> {
-    let report = lint(pattern);
-    assert!(report.parsed, "{pattern} should parse");
-    report
-        .risks
+    lint(pattern)
+        .unwrap_or_else(|| panic!("{pattern} should parse"))
         .iter()
         .map(|r| match r {
             RedosRisk::NestedQuantifiers { .. } => "nested",
@@ -62,43 +60,30 @@ fn benign_patterns_pass() {
 
 #[test]
 fn findings_carry_the_offset_of_the_outer_repetition() {
-    let report = lint(r"xy(a+)+$");
     assert_eq!(
-        report.risks,
-        vec![RedosRisk::NestedQuantifiers { offset: 2 }]
+        lint(r"xy(a+)+$"),
+        Some(vec![RedosRisk::NestedQuantifiers { offset: 2 }])
     );
 }
 
 #[test]
 fn pcre2_only_syntax_is_desugared_before_linting() {
     // Lookahead, atomic group and a backreference are stripped; the nested loop remains.
-    let report = lint(r"(?=a)(?>x)(b)\1(a+)+$");
-    assert!(report.parsed);
-    assert_eq!(report.risks.len(), 1);
-    assert!(matches!(
-        report.risks[0],
-        RedosRisk::NestedQuantifiers { .. }
-    ));
+    let risks = lint(r"(?=a)(?>x)(b)\1(a+)+$").unwrap();
+    assert_eq!(risks.len(), 1);
+    assert!(matches!(risks[0], RedosRisk::NestedQuantifiers { .. }));
     // A possessive quantifier is not a nested repetition.
-    let report = lint(r"(a++)$");
-    assert!(report.parsed);
-    assert!(report.risks.is_empty());
+    assert_eq!(lint(r"(a++)$"), Some(Vec::new()));
 }
 
 #[test]
 fn unparseable_pattern_reports_not_parsed_rather_than_clean() {
-    let report = lint(r"(?R)(?(1)a|b)");
-    assert!(!report.parsed);
-    assert!(report.risks.is_empty());
+    assert_eq!(lint(r"(?R)(?(1)a|b)"), None);
 }
 
 #[test]
 fn reject_policy_fails_compilation_and_warn_policy_keeps_findings() {
-    let options = Options {
-        lint: true,
-        canary: None,
-        ..Options::default()
-    };
+    let options = lint_only();
     let err = Regex::with_options(r"(a+)+$", &options).unwrap_err();
     assert!(
         matches!(err, CompileError::RedosRisk(ref risks) if risks.len() == 1),
@@ -124,11 +109,7 @@ fn unparseable_pattern_is_a_finding_when_no_canary_can_check_it() {
     // A PCRE2 conditional never parses on regex-syntax (`(?R)` would: it is the CRLF flag
     // there). With the canary off nothing else looks at it, so silence must not read as
     // clean; with the canary on, the canary is the check.
-    let no_canary = Options {
-        lint: true,
-        canary: None,
-        ..Options::default()
-    };
+    let no_canary = lint_only();
     let err = Regex::with_options(r"(a)?(?(1)b|c)", &no_canary).unwrap_err();
     assert!(
         matches!(err, CompileError::RedosRisk(ref r) if r == &[RedosRisk::NotParsed]),

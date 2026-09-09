@@ -15,9 +15,8 @@
 //!
 //! PCRE2-only syntax the `regex-syntax` parser rejects is desugared first (lookaround and
 //! atomic groups become non-capturing groups, backreferences become empty groups, possessive
-//! quantifiers lose their `+`). Patterns that still do not parse yield
-//! [`LintReport::parsed`] `== false` and no findings; the canary is the remaining check for
-//! those.
+//! quantifiers lose their `+`). Patterns that still do not parse yield `None` from [`lint`];
+//! the canary is the remaining check for those.
 //!
 //! The lint is a heuristic. It has false positives (`(ab|abc)*` is fine but a shape close to
 //! it is not) and false negatives (it does not model lookaround); [`crate::RedosPolicy::Warn`]
@@ -69,21 +68,8 @@ pub enum RedosRisk {
     },
     /// The lint could not parse the pattern even after desugaring, and no canary was
     /// configured to check it instead. Raised by [`crate::Regex::with_options`], never by
-    /// [`lint`] itself, which reports this through [`LintReport::parsed`].
+    /// [`lint`] itself, which reports this by returning `None`.
     NotParsed,
-}
-
-impl RedosRisk {
-    /// Byte offset into the pattern.
-    #[must_use]
-    pub fn offset(&self) -> usize {
-        match self {
-            Self::NestedQuantifiers { offset }
-            | Self::OverlappingAlternation { offset }
-            | Self::OverlappingSuffix { offset } => *offset,
-            Self::NotParsed => 0,
-        }
-    }
 }
 
 impl fmt::Display for RedosRisk {
@@ -109,49 +95,20 @@ impl fmt::Display for RedosRisk {
     }
 }
 
-/// What the lint concluded about a pattern.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LintReport {
-    /// Findings, empty when the pattern is clean.
-    pub risks: Vec<RedosRisk>,
-    /// False when the pattern could not be parsed even after desugaring PCRE2-only syntax,
-    /// in which case `risks` is empty and says nothing.
-    pub parsed: bool,
-}
-
-/// Lints `pattern` for the three textbook ReDoS shapes.
+/// Lints `pattern` for the three textbook ReDoS shapes. The findings are empty when the
+/// pattern is clean; `None` means the pattern could not be parsed even after desugaring
+/// PCRE2-only syntax, so the lint says nothing about it.
 #[must_use]
-pub fn lint(pattern: &str) -> LintReport {
-    let Some(parsed) = parse(pattern) else {
-        return LintReport {
-            risks: Vec::new(),
-            parsed: false,
-        };
-    };
-    let mut walker = Walker {
-        source: &parsed.text,
-        risks: Vec::new(),
-    };
-    walker.walk(&parsed.ast);
-    LintReport {
-        risks: walker.risks,
-        parsed: true,
-    }
-}
-
-/// The AST the lint walks and the text it came from, with its offset map back to the
-/// original pattern.
-struct Parsed {
-    ast: Ast,
-    text: scan::Desugared,
-}
-
-/// Desugars PCRE2-only syntax and parses the result, falling back to the pattern as written.
-fn parse(pattern: &str) -> Option<Parsed> {
-    let (ast, text) = scan::parse_with_fallback(pattern, |text| {
+pub fn lint(pattern: &str) -> Option<Vec<RedosRisk>> {
+    let (ast, source) = scan::parse_with_fallback(pattern, |text| {
         ast::parse::ParserBuilder::new().build().parse(text).ok()
     })?;
-    Some(Parsed { ast, text })
+    let mut walker = Walker {
+        source: &source,
+        risks: Vec::new(),
+    };
+    walker.walk(&ast);
+    Some(walker.risks)
 }
 
 struct Walker<'a> {
@@ -218,14 +175,18 @@ impl Walker<'_> {
 
     /// Rule 3 over the items of one concatenation.
     fn check_overlapping_suffixes(&mut self, items: &[Ast]) {
-        for (i, item) in items.iter().enumerate() {
-            let Some(class) = self.single_class_unbounded(item) else {
+        let classes: Vec<Option<hir::ClassUnicode>> = items
+            .iter()
+            .map(|item| self.single_class_unbounded(item))
+            .collect();
+        for (i, class) in classes.iter().enumerate() {
+            let Some(class) = class else {
                 continue;
             };
-            for next in &items[i + 1..] {
-                if let Some(next_class) = self.single_class_unbounded(next) {
-                    if !intersection_is_empty(&class, &next_class) {
-                        let offset = self.original_offset(item.span().start.offset);
+            for (next, next_class) in items[i + 1..].iter().zip(&classes[i + 1..]) {
+                if let Some(next_class) = next_class {
+                    if !intersection_is_empty(class, next_class) {
+                        let offset = self.original_offset(items[i].span().start.offset);
                         self.risks.push(RedosRisk::OverlappingSuffix { offset });
                     }
                     break;

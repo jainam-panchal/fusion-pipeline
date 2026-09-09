@@ -16,14 +16,10 @@
 //!   the limit. `Limits::input_bytes` is the bound on that.
 //! - Compiled code and the match context are immutable after construction and are shared
 //!   across threads. Match data is created per call and never shared.
-//!
 //! - When `Limits::work_limit` is set the pattern is compiled with `PCRE2_AUTO_CALLOUT` and
 //!   a callout counts every pattern item PCRE2 visits, across all start positions, aborting
-//!   the call with `MatchError::WorkLimit` when the budget runs out. This is the only limit
-//!   that bounds an unanchored non-match whose leading group loop restarts at every
-//!   position (`(?:a|b)*(?=c)`); it costs 1.5–1.8× on the PCRE2 path. Single-character
-//!   repeats loop inside one item and stay invisible to it, but their worst case is a
-//!   character scan per start, seconds rather than minutes at 64 KiB.
+//!   the call with `MatchError::WorkLimit` when the budget runs out. What that does and
+//!   does not bound is documented on [`Limits::work_limit`].
 //!
 //! Every PCRE2 allocation is owned by an RAII newtype (`Code`, `CompileContext`,
 //! `MatchContext`, `MatchData`) so no error path can leak.
@@ -38,13 +34,13 @@ use std::ptr::{self, NonNull};
 use pcre2_sys::{
     PCRE2_ANCHORED, PCRE2_AUTO_CALLOUT, PCRE2_DOLLAR_ENDONLY, PCRE2_ERROR_CALLOUT,
     PCRE2_ERROR_DEPTHLIMIT, PCRE2_ERROR_HEAPLIMIT, PCRE2_ERROR_MATCHLIMIT, PCRE2_ERROR_NOMATCH,
-    PCRE2_INFO_CAPTURECOUNT, PCRE2_INFO_NAMECOUNT, PCRE2_INFO_NAMEENTRYSIZE, PCRE2_INFO_NAMETABLE,
-    PCRE2_NEVER_BACKSLASH_C, PCRE2_NO_UTF_CHECK, PCRE2_UCP, PCRE2_UNSET, PCRE2_UTF, pcre2_code_8,
-    pcre2_code_free_8, pcre2_compile_8, pcre2_compile_context_8, pcre2_compile_context_create_8,
-    pcre2_compile_context_free_8, pcre2_get_error_message_8, pcre2_get_ovector_count_8,
-    pcre2_get_ovector_pointer_8, pcre2_match_8, pcre2_match_context_8,
-    pcre2_match_context_create_8, pcre2_match_context_free_8, pcre2_match_data_8,
-    pcre2_match_data_create_8, pcre2_match_data_free_8, pcre2_pattern_info_8,
+    PCRE2_ERROR_PARENTHESES_NEST_TOO_DEEP, PCRE2_INFO_CAPTURECOUNT, PCRE2_INFO_NAMECOUNT,
+    PCRE2_INFO_NAMEENTRYSIZE, PCRE2_INFO_NAMETABLE, PCRE2_NEVER_BACKSLASH_C, PCRE2_NO_UTF_CHECK,
+    PCRE2_UCP, PCRE2_UNSET, PCRE2_UTF, pcre2_code_8, pcre2_code_free_8, pcre2_compile_8,
+    pcre2_compile_context_8, pcre2_compile_context_create_8, pcre2_compile_context_free_8,
+    pcre2_get_error_message_8, pcre2_get_ovector_count_8, pcre2_get_ovector_pointer_8,
+    pcre2_match_8, pcre2_match_context_8, pcre2_match_context_create_8, pcre2_match_context_free_8,
+    pcre2_match_data_8, pcre2_match_data_create_8, pcre2_match_data_free_8, pcre2_pattern_info_8,
     pcre2_set_depth_limit_8, pcre2_set_heap_limit_8, pcre2_set_match_limit_8,
     pcre2_set_parens_nest_limit_8,
 };
@@ -97,8 +93,6 @@ pub(crate) struct Pcre2Regex {
     capture_count: usize,
     /// Total pattern items one match call may visit, when callouts are compiled in.
     work_limit: Option<NonZeroU32>,
-    /// Group name by group index (index 0 is the whole match and has no name).
-    names: Vec<Option<String>>,
 }
 
 // SAFETY: PCRE2 documents that a compiled pattern is never modified by matching and can be
@@ -222,6 +216,15 @@ impl Pcre2Regex {
             )
         };
         let Some(code) = NonNull::new(raw).map(Code) else {
+            // The scanner in `scan::check_guards` undercounts parentheses inside `\Q…\E` and
+            // `(?x)` comments; when PCRE2's exact count trips instead, report the same
+            // variant so callers see one shape for one limit.
+            if error_code == PCRE2_ERROR_PARENTHESES_NEST_TOO_DEEP as c_int {
+                return Err(CompileError::ParensTooDeep {
+                    limit: limits.parens_nest_limit,
+                    offset: error_offset,
+                });
+            }
             return Err(CompileError::Syntax {
                 engine: crate::Engine::Backtracking,
                 code: Some(error_code),
@@ -231,13 +234,11 @@ impl Pcre2Regex {
         };
         let match_context = MatchContext::new(limits)?;
         let capture_count = pattern_info_u32(&code, U32Info::CaptureCount)? as usize;
-        let names = read_name_table(&code, capture_count)?;
         Ok(Self {
             code,
             match_context,
             capture_count,
             work_limit: limits.work_limit,
-            names,
         })
     }
 
@@ -255,47 +256,42 @@ impl Pcre2Regex {
             )
         };
         if rc != 0 {
-            return Err(CompileError::Internal {
-                code: rc,
-                message: error_message(rc),
-            });
+            return Err(internal(rc));
         }
         Ok(out)
     }
 
-    /// Hands the group names to the facade, which owns them from then on.
-    pub(crate) fn take_names(&mut self) -> Vec<Option<String>> {
-        std::mem::take(&mut self.names)
+    /// Group name by group index, read from PCRE2's name table. Index 0 is the whole match
+    /// and has no name.
+    pub(crate) fn capture_names(&self) -> Result<Vec<Option<String>>, CompileError> {
+        read_name_table(&self.code, self.capture_count)
     }
 
     /// Whether the pattern matches, without recording group spans.
-    pub(crate) fn is_match(&self, haystack: &str, anchored: bool) -> Result<bool, MatchError> {
-        let match_data = MatchData::new(1)?;
-        let rc = self.run(&match_data, haystack, anchored);
-        if rc == PCRE2_ERROR_NOMATCH {
-            return Ok(false);
-        }
-        if rc < 0 {
-            return Err(match_error(rc));
-        }
-        Ok(true)
+    pub(crate) fn is_match(&self, haystack: &str) -> Result<bool, MatchError> {
+        self.probe(haystack, false, self.work_limit)
+    }
+
+    /// [`Pcre2Regex::is_match`] for the canary: optionally anchored at the start of the
+    /// input, under its own work budget. The budget only counts when the pattern was
+    /// compiled with `work_limit` set, which is what compiles the callouts in.
+    pub(crate) fn probe(
+        &self,
+        haystack: &str,
+        anchored: bool,
+        work_limit: Option<NonZeroU32>,
+    ) -> Result<bool, MatchError> {
+        Ok(self.exec(haystack, anchored, work_limit, 1)?.is_some())
     }
 
     /// Runs the interpreter over `haystack`. Returns the group spans on a match, `None` on
     /// no match, and a typed error when a limit trips.
-    pub(crate) fn captures(
-        &self,
-        haystack: &str,
-        anchored: bool,
-    ) -> Result<Option<Vec<Option<Span>>>, MatchError> {
-        let match_data = MatchData::new(self.capture_count + 1)?;
-        let rc = self.run(&match_data, haystack, anchored);
-        if rc == PCRE2_ERROR_NOMATCH {
+    pub(crate) fn captures(&self, haystack: &str) -> Result<Option<Vec<Option<Span>>>, MatchError> {
+        let Some((match_data, rc)) =
+            self.exec(haystack, false, self.work_limit, self.capture_count + 1)?
+        else {
             return Ok(None);
-        }
-        if rc < 0 {
-            return Err(match_error(rc));
-        }
+        };
         // SAFETY: the match data block is live; the ovector pointer PCRE2 returns is valid
         // for `2 * ovector_count` `usize`s for as long as the block lives, and the slice is
         // dropped before `match_data` is.
@@ -330,19 +326,29 @@ impl Pcre2Regex {
         Ok(Some(spans))
     }
 
-    fn run(&self, match_data: &MatchData, haystack: &str, anchored: bool) -> c_int {
+    /// One `pcre2_match` call with a match data block of `pairs` offset pairs. `None` on no
+    /// match; on a match, the block and PCRE2's return code (the highest group number that
+    /// matched plus one).
+    fn exec(
+        &self,
+        haystack: &str,
+        anchored: bool,
+        work_limit: Option<NonZeroU32>,
+        pairs: usize,
+    ) -> Result<Option<(MatchData, c_int)>, MatchError> {
+        let match_data = MatchData::new(pairs)?;
         let mut options = PCRE2_NO_UTF_CHECK;
         if anchored {
             options |= PCRE2_ANCHORED;
         }
-        if let Some(budget) = self.work_limit {
+        if let Some(budget) = work_limit {
             WORK_REMAINING.with(|remaining| remaining.set(u64::from(budget.get())));
         }
         // SAFETY: `haystack` is valid UTF-8 (it is a `&str`), which is what
         // `PCRE2_NO_UTF_CHECK` requires; it is valid for `haystack.len()` bytes for the
         // duration of the call; `code` and `match_context` are live and immutable; the match
-        // data block is live and exclusively owned by the caller for this call.
-        unsafe {
+        // data block is live and exclusively owned by this call.
+        let rc = unsafe {
             pcre2_match_8(
                 self.code.0.as_ptr(),
                 haystack.as_ptr(),
@@ -352,7 +358,14 @@ impl Pcre2Regex {
                 match_data.0.as_ptr(),
                 self.match_context.0.as_ptr(),
             )
+        };
+        if rc == PCRE2_ERROR_NOMATCH {
+            return Ok(None);
         }
+        if rc < 0 {
+            return Err(match_error(rc));
+        }
+        Ok(Some((match_data, rc)))
     }
 }
 
@@ -383,10 +396,7 @@ fn pattern_info_u32(code: &Code, what: U32Info) -> Result<u32, CompileError> {
         pcre2_pattern_info_8(code.0.as_ptr(), what.code(), (&mut out as *mut u32).cast())
     };
     if rc != 0 {
-        return Err(CompileError::Internal {
-            code: rc,
-            message: error_message(rc),
-        });
+        return Err(internal(rc));
     }
     Ok(out)
 }
@@ -420,10 +430,7 @@ fn read_name_table(code: &Code, capture_count: usize) -> Result<Vec<Option<Strin
         )
     };
     if rc != 0 || table.is_null() {
-        return Err(CompileError::Internal {
-            code: rc,
-            message: error_message(rc),
-        });
+        return Err(internal(rc));
     }
     // SAFETY: PCRE2 guarantees the table is `name_count * entry_size` bytes and lives as
     // long as the compiled pattern, which outlives this function.
@@ -456,8 +463,16 @@ fn match_error(rc: c_int) -> MatchError {
     }
 }
 
+/// A PCRE2 error outside its documented syntax and limit errors.
+fn internal(code: c_int) -> CompileError {
+    CompileError::Internal {
+        code,
+        message: error_message(code),
+    }
+}
+
 /// Renders a PCRE2 error code through `pcre2_get_error_message`.
-pub(crate) fn error_message(code: c_int) -> String {
+fn error_message(code: c_int) -> String {
     let mut buf = [0u8; 256];
     // SAFETY: `buf` is valid for writes of `buf.len()` bytes, which is the length passed.
     let n = unsafe { pcre2_get_error_message_8(code, buf.as_mut_ptr(), buf.len()) };
