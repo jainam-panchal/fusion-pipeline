@@ -9,7 +9,11 @@ const NESTED: &str = r"^(?=a)(a+)+$";
 fn backtracking(pattern: &str, limits: Limits) -> Regex {
     let re = Regex::with_options(
         pattern,
-        &Options { limits, engine: EngineChoice::Auto, ..Options::unchecked() },
+        &Options {
+            limits,
+            engine: EngineChoice::Auto,
+            ..Options::unchecked()
+        },
     )
     .unwrap();
     assert_eq!(re.engine(), Engine::Backtracking);
@@ -24,22 +28,49 @@ fn adversarial() -> String {
 
 #[test]
 fn match_limit_trips_with_its_own_variant() {
-    let re = backtracking(NESTED, Limits { match_limit: 1000, ..Limits::default() });
-    assert_eq!(re.captures(&adversarial()).unwrap_err(), MatchError::MatchLimit);
-    assert_eq!(re.is_match(&adversarial()).unwrap_err(), MatchError::MatchLimit);
+    let re = backtracking(
+        NESTED,
+        Limits {
+            match_limit: 1000,
+            ..Limits::default()
+        },
+    );
+    assert_eq!(
+        re.captures(&adversarial()).unwrap_err(),
+        MatchError::MatchLimit
+    );
+    assert_eq!(
+        re.is_match(&adversarial()).unwrap_err(),
+        MatchError::MatchLimit
+    );
 }
 
 #[test]
 fn depth_limit_trips_with_its_own_variant() {
-    let re = backtracking(NESTED, Limits { depth_limit: 5, ..Limits::default() });
-    assert_eq!(re.captures(&adversarial()).unwrap_err(), MatchError::DepthLimit);
+    let re = backtracking(
+        NESTED,
+        Limits {
+            depth_limit: 5,
+            ..Limits::default()
+        },
+    );
+    assert_eq!(
+        re.captures(&adversarial()).unwrap_err(),
+        MatchError::DepthLimit
+    );
 }
 
 #[test]
 fn heap_limit_trips_with_its_own_variant() {
     // Each iteration of a repeated group pushes a backtracking frame; ten thousand of them
     // need more than 64 KiB of frame heap.
-    let re = backtracking(r"^(?=a)(?:a|b)*$", Limits { heap_limit_kib: 64, ..Limits::default() });
+    let re = backtracking(
+        r"^(?=a)(?:a|b)*$",
+        Limits {
+            heap_limit_kib: 64,
+            ..Limits::default()
+        },
+    );
     let mut hay = "ab".repeat(5000);
     hay.push('!');
     assert_eq!(re.captures(&hay).unwrap_err(), MatchError::HeapLimit);
@@ -57,7 +88,10 @@ fn input_size_limit_applies_on_both_engines() {
         let re = Regex::with_options(
             r"\w+",
             &Options {
-                limits: Limits { input_bytes: 8, ..Limits::default() },
+                limits: Limits {
+                    input_bytes: 8,
+                    ..Limits::default()
+                },
                 engine,
                 ..Options::unchecked()
             },

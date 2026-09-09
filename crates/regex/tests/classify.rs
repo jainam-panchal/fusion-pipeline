@@ -1,7 +1,6 @@
 //! Engine classification and compile-error reporting through the public API.
 #![allow(clippy::unwrap_used)]
 
-
 use fusion_regex::{CompileError, Engine, Regex};
 
 #[test]
@@ -26,7 +25,9 @@ fn backreference_falls_back_to_the_backtracking_engine() {
 fn syntax_error_carries_pcre2_message_and_offset() {
     let err = Regex::new(r"ab(").unwrap_err();
     match err {
-        CompileError::Syntax { offset, message, .. } => {
+        CompileError::Syntax {
+            offset, message, ..
+        } => {
             assert_eq!(offset, 3);
             assert!(message.contains("missing closing parenthesis"), "{message}");
         }

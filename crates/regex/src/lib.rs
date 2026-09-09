@@ -120,12 +120,20 @@ pub struct Options {
 impl Options {
     /// Limits only: no lint, no canary. What [`Regex::new`] uses.
     pub fn unchecked() -> Self {
-        Self { lint: false, canary: None, ..Self::default() }
+        Self {
+            lint: false,
+            canary: None,
+            ..Self::default()
+        }
     }
 
     /// All three load-time checks on, rejecting on any finding.
     pub fn checked() -> Self {
-        Self { lint: true, canary: Some(canary::CanaryConfig::default()), ..Self::default() }
+        Self {
+            lint: true,
+            canary: Some(canary::CanaryConfig::default()),
+            ..Self::default()
+        }
     }
 }
 
@@ -295,9 +303,7 @@ impl Regex {
         }
 
         let names = match &inner {
-            Inner::Linear(re) => {
-                re.capture_names().map(|n| n.map(str::to_owned)).collect()
-            }
+            Inner::Linear(re) => re.capture_names().map(|n| n.map(str::to_owned)).collect(),
             Inner::Backtracking(re) => re.capture_names().to_vec(),
         };
 
@@ -354,37 +360,51 @@ impl Regex {
         let spans = match &self.inner {
             Inner::Linear(re) => re.captures(haystack).map(|caps| {
                 (0..caps.len())
-                    .map(|i| caps.get(i).map(|m| Span { start: m.start(), end: m.end() }))
+                    .map(|i| {
+                        caps.get(i).map(|m| Span {
+                            start: m.start(),
+                            end: m.end(),
+                        })
+                    })
                     .collect()
             }),
             Inner::Backtracking(re) => re.captures(haystack, false)?,
         };
-        Ok(spans.map(|spans| Captures { haystack, spans, names: &self.names }))
+        Ok(spans.map(|spans| Captures {
+            haystack,
+            spans,
+            names: &self.names,
+        }))
     }
 
     fn check_input(&self, haystack: &str) -> Result<(), MatchError> {
         if haystack.len() > self.input_bytes {
-            return Err(MatchError::InputTooLarge { len: haystack.len(), limit: self.input_bytes });
+            return Err(MatchError::InputTooLarge {
+                len: haystack.len(),
+                limit: self.input_bytes,
+            });
         }
         Ok(())
     }
 }
 
 fn compile_linear(pattern: &str) -> Result<regex::Regex, CompileError> {
-    regex::RegexBuilder::new(pattern).build().map_err(|e| match e {
-        regex::Error::Syntax(msg) => CompileError::Syntax {
-            engine: Engine::Linear,
-            code: 0,
-            offset: linear_error_offset(pattern),
-            message: msg,
-        },
-        other => CompileError::Syntax {
-            engine: Engine::Linear,
-            code: 0,
-            offset: 0,
-            message: other.to_string(),
-        },
-    })
+    regex::RegexBuilder::new(pattern)
+        .build()
+        .map_err(|e| match e {
+            regex::Error::Syntax(msg) => CompileError::Syntax {
+                engine: Engine::Linear,
+                code: 0,
+                offset: linear_error_offset(pattern),
+                message: msg,
+            },
+            other => CompileError::Syntax {
+                engine: Engine::Linear,
+                code: 0,
+                offset: 0,
+                message: other.to_string(),
+            },
+        })
 }
 
 /// The `regex` crate's error type carries its span only in the message; re-parse with

@@ -94,7 +94,10 @@ impl Desugared {
 /// for the parser to reject.
 pub(crate) fn desugar_for_lint(pattern: &str) -> Desugared {
     let bytes = pattern.as_bytes();
-    let mut out = Desugared { text: String::with_capacity(pattern.len()), offsets: Vec::new() };
+    let mut out = Desugared {
+        text: String::with_capacity(pattern.len()),
+        offsets: Vec::new(),
+    };
     let mut in_class = false;
     let mut class_start = false;
     let mut after_quantifier = false;

@@ -8,12 +8,21 @@ const LINUX_LINE: &str =
     "Jun 14 15:16:01 combo sshd(pam_unix)[19939]: authentication failure; logname= uid=0";
 
 fn on(engine: EngineChoice, pattern: &str) -> Regex {
-    Regex::with_options(pattern, &Options { engine, ..Options::unchecked() }).unwrap()
+    Regex::with_options(
+        pattern,
+        &Options {
+            engine,
+            ..Options::unchecked()
+        },
+    )
+    .unwrap()
 }
 
 fn named(re: &Regex, hay: &str) -> Vec<(String, String)> {
     let caps = re.captures(hay).unwrap().expect("should match");
-    caps.named().map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
+    caps.named()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
 }
 
 #[test]
@@ -49,7 +58,10 @@ fn optional_group_that_did_not_participate_is_absent_on_both_engines() {
         assert_eq!(caps.name("Date"), Some("9"), "{engine:?}");
         assert_eq!(caps.name("PID"), None, "{engine:?}");
         assert_eq!(caps.name("Component"), Some("syslogd 1.4.1"), "{engine:?}");
-        assert!(!named(&re, line).iter().any(|(k, _)| k == "PID"), "{engine:?}");
+        assert!(
+            !named(&re, line).iter().any(|(k, _)| k == "PID"),
+            "{engine:?}"
+        );
     }
 }
 
@@ -60,7 +72,10 @@ fn unicode_classes_agree_on_both_engines() {
         let caps = re.captures("naïve\u{2003}٣٤").unwrap().unwrap();
         assert_eq!(caps.name("w"), Some("naïve"), "{engine:?}");
         assert_eq!(caps.name("d"), Some("٣٤"), "{engine:?}");
-        assert!(!re.is_match("x 1\n").unwrap(), "{engine:?}: $ must mean end of text");
+        assert!(
+            !re.is_match("x 1\n").unwrap(),
+            "{engine:?}: $ must mean end of text"
+        );
     }
 }
 

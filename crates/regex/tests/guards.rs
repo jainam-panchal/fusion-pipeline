@@ -4,15 +4,29 @@
 use fusion_regex::{CompileError, EngineChoice, Limits, Options, Regex};
 
 fn with_limits(pattern: &str, engine: EngineChoice, limits: Limits) -> Result<Regex, CompileError> {
-    Regex::with_options(pattern, &Options { limits, engine, ..Options::unchecked() })
+    Regex::with_options(
+        pattern,
+        &Options {
+            limits,
+            engine,
+            ..Options::unchecked()
+        },
+    )
 }
 
 #[test]
 fn oversize_pattern_is_rejected_with_offset_on_both_engines() {
     let pattern = "a".repeat(100);
     for engine in [EngineChoice::Linear, EngineChoice::Backtracking] {
-        let err = with_limits(&pattern, engine, Limits { max_pattern_length: 64, ..Limits::default() })
-            .unwrap_err();
+        let err = with_limits(
+            &pattern,
+            engine,
+            Limits {
+                max_pattern_length: 64,
+                ..Limits::default()
+            },
+        )
+        .unwrap_err();
         match err {
             CompileError::PatternTooLong { len, limit, offset } => {
                 assert_eq!((len, limit, offset), (100, 64, 64), "{engine:?}");
@@ -27,15 +41,32 @@ fn deeply_nested_parens_are_rejected_with_offset_on_both_engines() {
     // Depth 4 opens at byte 3; classes and escapes do not count.
     let pattern = r"(((([\(]\(a))))";
     for engine in [EngineChoice::Linear, EngineChoice::Backtracking] {
-        let err = with_limits(pattern, engine, Limits { parens_nest_limit: 3, ..Limits::default() })
-            .unwrap_err();
+        let err = with_limits(
+            pattern,
+            engine,
+            Limits {
+                parens_nest_limit: 3,
+                ..Limits::default()
+            },
+        )
+        .unwrap_err();
         match err {
             CompileError::ParensTooDeep { limit, offset } => {
                 assert_eq!((limit, offset), (3, 3), "{engine:?}");
             }
             other => panic!("{engine:?}: expected ParensTooDeep, got {other:?}"),
         }
-        assert!(with_limits(pattern, engine, Limits { parens_nest_limit: 4, ..Limits::default() }).is_ok());
+        assert!(
+            with_limits(
+                pattern,
+                engine,
+                Limits {
+                    parens_nest_limit: 4,
+                    ..Limits::default()
+                }
+            )
+            .is_ok()
+        );
     }
 }
 
@@ -59,7 +90,12 @@ fn compiled_pattern_is_usable_from_several_threads() {
             let re = std::sync::Arc::clone(&re);
             std::thread::spawn(move || {
                 let hay = format!("x{i}");
-                re.captures(&hay).unwrap().unwrap().name("n").unwrap().to_owned()
+                re.captures(&hay)
+                    .unwrap()
+                    .unwrap()
+                    .name("n")
+                    .unwrap()
+                    .to_owned()
             })
         })
         .collect();
@@ -76,7 +112,11 @@ fn jit_is_never_referenced_by_the_wrapper() {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|e| e == "rs") {
             let text = std::fs::read_to_string(&path).unwrap();
-            assert!(!text.contains("pcre2_jit"), "{} references the JIT", path.display());
+            assert!(
+                !text.contains("pcre2_jit"),
+                "{} references the JIT",
+                path.display()
+            );
             seen += 1;
         }
     }

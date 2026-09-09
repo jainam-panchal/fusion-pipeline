@@ -50,14 +50,20 @@ fn benign_patterns_pass() {
     assert!(kinds(r"^\d{1,3}$").is_empty());
     assert!(kinds(LINUX_SYSLOG).is_empty());
     assert!(kinds(r"(?<ip>\d{1,3}(?:\.\d{1,3}){3})").is_empty());
-    assert!(kinds(r"(a{2})+").is_empty(), "fixed-width inner repetition is unambiguous");
+    assert!(
+        kinds(r"(a{2})+").is_empty(),
+        "fixed-width inner repetition is unambiguous"
+    );
     assert!(kinds(r"\w+@\w+\.\w+").is_empty());
 }
 
 #[test]
 fn findings_carry_the_offset_of_the_outer_repetition() {
     let report = lint(r"xy(a+)+$");
-    assert_eq!(report.risks, vec![RedosRisk::NestedQuantifiers { offset: 2 }]);
+    assert_eq!(
+        report.risks,
+        vec![RedosRisk::NestedQuantifiers { offset: 2 }]
+    );
 }
 
 #[test]
@@ -66,7 +72,10 @@ fn pcre2_only_syntax_is_desugared_before_linting() {
     let report = lint(r"(?=a)(?>x)(b)\1(a+)+$");
     assert!(report.parsed);
     assert_eq!(report.risks.len(), 1);
-    assert!(matches!(report.risks[0], RedosRisk::NestedQuantifiers { .. }));
+    assert!(matches!(
+        report.risks[0],
+        RedosRisk::NestedQuantifiers { .. }
+    ));
     // A possessive quantifier is not a nested repetition.
     let report = lint(r"(a++)$");
     assert!(report.parsed);
@@ -82,12 +91,27 @@ fn unparseable_pattern_reports_not_parsed_rather_than_clean() {
 
 #[test]
 fn reject_policy_fails_compilation_and_warn_policy_keeps_findings() {
-    let options = Options { lint: true, canary: None, ..Options::default() };
+    let options = Options {
+        lint: true,
+        canary: None,
+        ..Options::default()
+    };
     let err = Regex::with_options(r"(a+)+$", &options).unwrap_err();
-    assert!(matches!(err, CompileError::RedosRisk(ref risks) if risks.len() == 1), "{err:?}");
+    assert!(
+        matches!(err, CompileError::RedosRisk(ref risks) if risks.len() == 1),
+        "{err:?}"
+    );
 
-    let warn = Options { on_redos_risk: RedosPolicy::Warn, ..options };
+    let warn = Options {
+        on_redos_risk: RedosPolicy::Warn,
+        ..options
+    };
     let re = Regex::with_options(r"(a+)+$", &warn).unwrap();
     assert_eq!(re.redos_warnings().len(), 1);
-    assert!(Regex::with_options(LINUX_SYSLOG, &warn).unwrap().redos_warnings().is_empty());
+    assert!(
+        Regex::with_options(LINUX_SYSLOG, &warn)
+            .unwrap()
+            .redos_warnings()
+            .is_empty()
+    );
 }

@@ -34,7 +34,10 @@ pub struct CanaryConfig {
 
 impl Default for CanaryConfig {
     fn default() -> Self {
-        Self { match_limit: 1_000_000, sizes: vec![1024, 8192, 65536] }
+        Self {
+            match_limit: 1_000_000,
+            sizes: vec![1024, 8192, 65536],
+        }
     }
 }
 
@@ -70,7 +73,10 @@ pub fn run(
     config: &CanaryConfig,
     limits: &Limits,
 ) -> Result<Option<CanaryTrip>, CompileError> {
-    let canary_limits = Limits { match_limit: config.match_limit, ..limits.clone() };
+    let canary_limits = Limits {
+        match_limit: config.match_limit,
+        ..limits.clone()
+    };
     let re = pcre2::Pcre2Regex::compile(pattern, &canary_limits)?;
     let alphabet = alphabet(pattern);
     let poison = ['!', '~', '\u{1}']
@@ -84,9 +90,15 @@ pub fn run(
             let run_of = |n: usize| std::iter::repeat_n(c, n).collect::<String>();
             let inputs = [
                 (run_of(size), format!("'{c}' repeated")),
-                (with_poison(run_of(size), poison), format!("'{c}' repeated then poison")),
                 (
-                    with_poison(format!("{prefix}{}", run_of(size.saturating_sub(prefix.len()))), poison),
+                    with_poison(run_of(size), poison),
+                    format!("'{c}' repeated then poison"),
+                ),
+                (
+                    with_poison(
+                        format!("{prefix}{}", run_of(size.saturating_sub(prefix.len()))),
+                        poison,
+                    ),
                     format!("alphabet then '{c}' repeated then poison"),
                 ),
             ];
@@ -102,9 +114,12 @@ pub fn run(
                 return Ok(Some(trip));
             }
             let poisoned = with_poison(cycled, poison);
-            if let Some(trip) =
-                probe(&re, &poisoned, "alphabet cycled then poison", config.match_limit)?
-            {
+            if let Some(trip) = probe(
+                &re,
+                &poisoned,
+                "alphabet cycled then poison",
+                config.match_limit,
+            )? {
                 return Ok(Some(trip));
             }
         }

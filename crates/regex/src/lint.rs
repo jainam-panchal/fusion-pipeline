@@ -69,7 +69,10 @@ impl fmt::Display for RedosRisk {
                 write!(f, "nested unbounded quantifiers at offset {offset}")
             }
             Self::OverlappingAlternation { offset } => {
-                write!(f, "overlapping alternation under repetition at offset {offset}")
+                write!(
+                    f,
+                    "overlapping alternation under repetition at offset {offset}"
+                )
             }
             Self::OverlappingSuffix { offset } => write!(
                 f,
@@ -92,11 +95,21 @@ pub struct LintReport {
 /// Lints `pattern` for the three textbook ReDoS shapes.
 pub fn lint(pattern: &str) -> LintReport {
     let Some((text, ast, offsets)) = parse(pattern) else {
-        return LintReport { risks: Vec::new(), parsed: false };
+        return LintReport {
+            risks: Vec::new(),
+            parsed: false,
+        };
     };
-    let mut walker = Walker { text: &text, offsets: &offsets, risks: Vec::new() };
+    let mut walker = Walker {
+        text: &text,
+        offsets: &offsets,
+        risks: Vec::new(),
+    };
     walker.walk(&ast);
-    LintReport { risks: walker.risks, parsed: true }
+    LintReport {
+        risks: walker.risks,
+        parsed: true,
+    }
 }
 
 /// Desugars PCRE2-only syntax and parses the result, falling back to the pattern as written.
@@ -133,7 +146,8 @@ impl Walker<'_> {
                         self.risks.push(RedosRisk::NestedQuantifiers { offset });
                     }
                     if self.has_overlapping_alternation(&rep.ast) {
-                        self.risks.push(RedosRisk::OverlappingAlternation { offset });
+                        self.risks
+                            .push(RedosRisk::OverlappingAlternation { offset });
                     }
                 }
                 self.walk(&rep.ast);
@@ -152,7 +166,9 @@ impl Walker<'_> {
     fn has_overlapping_alternation(&self, body: &Ast) -> bool {
         let mut alternations = Vec::new();
         collect_alternations(body, &mut alternations);
-        alternations.iter().any(|alt| self.alternation_overlaps(alt))
+        alternations
+            .iter()
+            .any(|alt| self.alternation_overlaps(alt))
     }
 
     fn alternation_overlaps(&self, alt: &ast::Alternation) -> bool {
@@ -171,7 +187,9 @@ impl Walker<'_> {
     /// Rule 3 over the items of one concatenation.
     fn check_overlapping_suffixes(&mut self, items: &[Ast]) {
         for (i, item) in items.iter().enumerate() {
-            let Some(class) = self.single_class_unbounded(item) else { continue };
+            let Some(class) = self.single_class_unbounded(item) else {
+                continue;
+            };
             for next in &items[i + 1..] {
                 if let Some(next_class) = self.single_class_unbounded(next) {
                     if !intersection_is_empty(&class, &next_class) {
@@ -226,9 +244,11 @@ impl Walker<'_> {
             | Ast::Dot(_)
             | Ast::ClassUnicode(_)
             | Ast::ClassPerl(_)
-            | Ast::ClassBracketed(_) => {
-                self.leaf_classes(ast).into_iter().next().unwrap_or_else(hir::ClassUnicode::empty)
-            }
+            | Ast::ClassBracketed(_) => self
+                .leaf_classes(ast)
+                .into_iter()
+                .next()
+                .unwrap_or_else(hir::ClassUnicode::empty),
             Ast::Group(g) => self.first_set(&g.ast),
             Ast::Repetition(rep) => self.first_set(&rep.ast),
             Ast::Alternation(alt) => {
@@ -273,7 +293,10 @@ impl Walker<'_> {
                 }
                 out
             }
-            Ast::Alternation(_) => Shape { prefix: Vec::new(), exact: false },
+            Ast::Alternation(_) => Shape {
+                prefix: Vec::new(),
+                exact: false,
+            },
             Ast::Repetition(rep) => {
                 let inner = self.shape(&rep.ast);
                 let (min, max) = (min_of(&rep.op.kind), max_of(&rep.op.kind));
@@ -317,7 +340,10 @@ struct Shape {
 
 impl Shape {
     fn exact(prefix: Vec<hir::ClassUnicode>) -> Self {
-        Self { prefix, exact: true }
+        Self {
+            prefix,
+            exact: true,
+        }
     }
 }
 
@@ -390,9 +416,7 @@ fn collect_alternations<'a>(ast: &'a Ast, out: &mut Vec<&'a ast::Alternation>) {
 /// one iteration, which is what makes it ambiguous inside an outer loop.
 fn contains_variable_repetition(ast: &Ast) -> bool {
     match ast {
-        Ast::Repetition(rep) => {
-            is_variable(&rep.op.kind) || contains_variable_repetition(&rep.ast)
-        }
+        Ast::Repetition(rep) => is_variable(&rep.op.kind) || contains_variable_repetition(&rep.ast),
         Ast::Group(g) => contains_variable_repetition(&g.ast),
         Ast::Alternation(alt) => alt.asts.iter().any(contains_variable_repetition),
         Ast::Concat(c) => c.asts.iter().any(contains_variable_repetition),

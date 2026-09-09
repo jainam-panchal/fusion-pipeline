@@ -14,6 +14,7 @@ Cargo workspace under `crates/`:
 |---|---|
 | `core` | record model, config loader, DAG validation, engine, `Source`/`Sink`/`AckHandle` traits, in-memory fakes, condition grammar |
 | `stages` | built-in stages (`filter` so far) |
+| `regex` | two-engine regex facade: linear `regex` first, PCRE2 fallback with configurable limits, load-time ReDoS lint and canary; the only crate with `unsafe` |
 | `nats` | NATS JetStream source and sink (placeholder) |
 | `state` | state store implementations (placeholder) |
 | `otel` | OTLP telemetry wiring (placeholder) |
@@ -22,6 +23,13 @@ Cargo workspace under `crates/`:
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
+```
+
+The regex crate wraps C (PCRE2 10.46, bundled by `pcre2-sys`), so Miri cannot run its
+tests. Leak-check it with AddressSanitizer on nightly instead:
+
+```sh
+RUSTFLAGS=-Zsanitizer=address cargo +nightly test -p fusion-regex --target x86_64-unknown-linux-gnu
 ```
 
 A minimal config:
