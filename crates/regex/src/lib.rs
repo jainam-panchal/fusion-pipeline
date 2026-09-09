@@ -32,6 +32,7 @@ pub enum Engine {
 
 impl Engine {
     /// The label used in metrics and logs.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Linear => "linear",
@@ -83,7 +84,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             match_limit: 1_000_000,
-            depth_limit: 100_000,
+            depth_limit: 1_000_000,
             heap_limit_kib: 20_000,
             input_bytes: 1024 * 1024,
             max_pattern_length: 8192,
@@ -119,6 +120,7 @@ pub struct Options {
 
 impl Options {
     /// Limits only: no lint, no canary. What [`Regex::new`] uses.
+    #[must_use]
     pub fn unchecked() -> Self {
         Self {
             lint: false,
@@ -128,6 +130,7 @@ impl Options {
     }
 
     /// All three load-time checks on, rejecting on any finding.
+    #[must_use]
     pub fn checked() -> Self {
         Self {
             lint: true,
@@ -139,6 +142,7 @@ impl Options {
 
 /// Why a pattern failed to compile.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CompileError {
     /// The engine rejected the pattern's syntax. `offset` is a byte offset into the pattern.
     #[error("{engine} engine: {message} at offset {offset}")]
@@ -191,6 +195,7 @@ pub enum CompileError {
 
 /// Why a match call failed. Each PCRE2 limit has its own variant.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum MatchError {
     /// [`Limits::match_limit`] tripped.
     #[error("match limit exceeded")]
@@ -257,12 +262,24 @@ impl fmt::Debug for Regex {
 
 impl Regex {
     /// Compiles `pattern` with default [`Limits`] and no lint or canary.
+    ///
+    /// # Errors
+    ///
+    /// See [`Regex::with_options`].
     pub fn new(pattern: &str) -> Result<Self, CompileError> {
         Self::with_options(pattern, &Options::unchecked())
     }
 
     /// Compiles `pattern` under `options`: guards, engine selection, then lint and canary
     /// as configured.
+    ///
+    /// # Errors
+    ///
+    /// [`CompileError::PatternTooLong`] and [`CompileError::ParensTooDeep`] from the guards;
+    /// [`CompileError::Syntax`] when the selected engine rejects the pattern;
+    /// [`CompileError::RedosRisk`] and [`CompileError::CanaryTripped`] under
+    /// [`RedosPolicy::Reject`]; [`CompileError::OutOfMemory`] and [`CompileError::Internal`]
+    /// when PCRE2 fails outside its documented syntax errors.
     pub fn with_options(pattern: &str, options: &Options) -> Result<Self, CompileError> {
         let limits = &options.limits;
         scan::check_guards(pattern, limits)?;
@@ -343,15 +360,24 @@ impl Regex {
     }
 
     /// Whether the pattern matches anywhere in `haystack`.
+    ///
+    /// # Errors
+    ///
+    /// [`MatchError::InputTooLarge`] on either engine; a tripped PCRE2 limit as its own
+    /// variant on the backtracking engine.
     pub fn is_match(&self, haystack: &str) -> Result<bool, MatchError> {
         self.check_input(haystack)?;
         match &self.inner {
             Inner::Linear(re) => Ok(re.is_match(haystack)),
-            Inner::Backtracking(re) => Ok(re.captures(haystack, false)?.is_some()),
+            Inner::Backtracking(re) => re.is_match(haystack, false),
         }
     }
 
     /// The leftmost match with all capture groups, or `None` when there is no match.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Regex::is_match`].
     pub fn captures<'h>(&self, haystack: &'h str) -> Result<Option<Captures<'_, 'h>>, MatchError> {
         self.check_input(haystack)?;
         let spans = match &self.inner {
@@ -426,18 +452,21 @@ pub struct Captures<'r, 'h> {
 
 impl<'r, 'h> Captures<'r, 'h> {
     /// Text of group `index`, or `None` if the group did not participate.
+    #[must_use]
     pub fn get(&self, index: usize) -> Option<&'h str> {
         let span = (*self.spans.get(index)?)?;
         self.haystack.get(span.start..span.end)
     }
 
     /// Byte span of group `index`, or `None` if the group did not participate.
+    #[must_use]
     pub fn span(&self, index: usize) -> Option<Span> {
         *self.spans.get(index)?
     }
 
     /// Text of the group called `name`, or `None` if there is no such group or it did not
     /// participate.
+    #[must_use]
     pub fn name(&self, name: &str) -> Option<&'h str> {
         let index = self.names.iter().position(|n| n.as_deref() == Some(name))?;
         self.get(index)
@@ -452,11 +481,14 @@ impl<'r, 'h> Captures<'r, 'h> {
     }
 
     /// Number of groups, counting group 0.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.spans.len()
     }
 
-    /// Always false: group 0 is always present.
+    /// Whether there are no groups. Never true for a match, which always has group 0; the
+    /// method exists to pair with [`Captures::len`].
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.spans.is_empty()
     }

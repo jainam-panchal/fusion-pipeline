@@ -30,6 +30,17 @@ use regex_syntax::hir::{self, Hir, HirKind};
 
 use crate::scan;
 
+/// Pattern for a node that matches exactly one character: a literal, `.`, or a class.
+macro_rules! char_leaf {
+    () => {
+        Ast::Literal(_)
+            | Ast::Dot(_)
+            | Ast::ClassUnicode(_)
+            | Ast::ClassPerl(_)
+            | Ast::ClassBracketed(_)
+    };
+}
+
 /// One ReDoS shape the lint found. Offsets are byte offsets into the original pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedosRisk {
@@ -53,6 +64,7 @@ pub enum RedosRisk {
 
 impl RedosRisk {
     /// Byte offset into the pattern.
+    #[must_use]
     pub fn offset(&self) -> usize {
         match self {
             Self::NestedQuantifiers { offset }
@@ -93,6 +105,7 @@ pub struct LintReport {
 }
 
 /// Lints `pattern` for the three textbook ReDoS shapes.
+#[must_use]
 pub fn lint(pattern: &str) -> LintReport {
     let Some((text, ast, offsets)) = parse(pattern) else {
         return LintReport {
@@ -172,7 +185,7 @@ impl Walker<'_> {
     }
 
     fn alternation_overlaps(&self, alt: &ast::Alternation) -> bool {
-        let restart = self.first_set(&Ast::Alternation(Box::new(alt.clone())));
+        let restart = self.first_set_of_alternation(alt);
         let shapes: Vec<Shape> = alt.asts.iter().map(|a| self.shape(a)).collect();
         for (i, a) in shapes.iter().enumerate() {
             for b in shapes.iter().skip(i + 1) {
@@ -193,7 +206,7 @@ impl Walker<'_> {
             for next in &items[i + 1..] {
                 if let Some(next_class) = self.single_class_unbounded(next) {
                     if !intersection_is_empty(&class, &next_class) {
-                        let offset = self.original_offset(span_of(item).start.offset);
+                        let offset = self.original_offset(item.span().start.offset);
                         self.risks.push(RedosRisk::OverlappingSuffix { offset });
                     }
                     break;
@@ -224,11 +237,7 @@ impl Walker<'_> {
     fn nullable(&self, ast: &Ast) -> bool {
         match ast {
             Ast::Empty(_) | Ast::Flags(_) | Ast::Assertion(_) => true,
-            Ast::Literal(_)
-            | Ast::Dot(_)
-            | Ast::ClassUnicode(_)
-            | Ast::ClassPerl(_)
-            | Ast::ClassBracketed(_) => false,
+            char_leaf!() => false,
             Ast::Group(g) => self.nullable(&g.ast),
             Ast::Alternation(alt) => alt.asts.iter().any(|a| self.nullable(a)),
             Ast::Concat(c) => c.asts.iter().all(|a| self.nullable(a)),
@@ -240,24 +249,14 @@ impl Walker<'_> {
     fn first_set(&self, ast: &Ast) -> hir::ClassUnicode {
         match ast {
             Ast::Empty(_) | Ast::Flags(_) | Ast::Assertion(_) => hir::ClassUnicode::empty(),
-            Ast::Literal(_)
-            | Ast::Dot(_)
-            | Ast::ClassUnicode(_)
-            | Ast::ClassPerl(_)
-            | Ast::ClassBracketed(_) => self
+            char_leaf!() => self
                 .leaf_classes(ast)
                 .into_iter()
                 .next()
                 .unwrap_or_else(hir::ClassUnicode::empty),
             Ast::Group(g) => self.first_set(&g.ast),
             Ast::Repetition(rep) => self.first_set(&rep.ast),
-            Ast::Alternation(alt) => {
-                let mut acc = hir::ClassUnicode::empty();
-                for a in &alt.asts {
-                    acc.union(&self.first_set(a));
-                }
-                acc
-            }
+            Ast::Alternation(alt) => self.first_set_of_alternation(alt),
             Ast::Concat(c) => {
                 let mut acc = hir::ClassUnicode::empty();
                 for a in &c.asts {
@@ -271,15 +270,19 @@ impl Walker<'_> {
         }
     }
 
+    fn first_set_of_alternation(&self, alt: &ast::Alternation) -> hir::ClassUnicode {
+        let mut acc = hir::ClassUnicode::empty();
+        for a in &alt.asts {
+            acc.union(&self.first_set(a));
+        }
+        acc
+    }
+
     /// The sequence of character classes `ast` matches, as far as it is fixed.
     fn shape(&self, ast: &Ast) -> Shape {
         match ast {
             Ast::Empty(_) | Ast::Flags(_) | Ast::Assertion(_) => Shape::exact(Vec::new()),
-            Ast::Literal(_)
-            | Ast::Dot(_)
-            | Ast::ClassUnicode(_)
-            | Ast::ClassPerl(_)
-            | Ast::ClassBracketed(_) => Shape::exact(self.leaf_classes(ast)),
+            char_leaf!() => Shape::exact(self.leaf_classes(ast)),
             Ast::Group(g) => self.shape(&g.ast),
             Ast::Concat(c) => {
                 let mut out = Shape::exact(Vec::new());
@@ -461,8 +464,4 @@ fn max_of(kind: &RepetitionKind) -> Option<u32> {
         RepetitionKind::Range(RepetitionRange::AtLeast(_)) => None,
         RepetitionKind::Range(RepetitionRange::Bounded(_, n)) => Some(*n),
     }
-}
-
-fn span_of(ast: &Ast) -> &ast::Span {
-    ast.span()
 }

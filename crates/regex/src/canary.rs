@@ -3,9 +3,10 @@
 //!
 //! Inputs are built from the pattern's literal alphabet (literal characters plus one
 //! representative of every character class) at each configured size: every alphabet
-//! character repeated on its own, the alphabet cycled, and each of those with the alphabet
-//! as a prefix and with a "poison" character the pattern never mentions appended, since
-//! catastrophic backtracking needs a near-miss rather than a match.
+//! character repeated on its own, the alphabet cycled, and each of those with the pattern's
+//! literal sequence as a prefix (so `ERROR: (a+)+$` sees `ERROR: aaaa…`) and with a "poison"
+//! character the pattern never mentions appended, since catastrophic backtracking needs a
+//! near-miss rather than a match.
 //!
 //! Matching is anchored. An unanchored run retries from every start position, which is
 //! quadratic for any pattern that has no required literal and would make the 64 KiB input
@@ -25,8 +26,10 @@ use crate::{CompileError, Limits, MatchError, pcre2, scan};
 /// Canary configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanaryConfig {
-    /// Match limit for the canary runs. Tighter than the runtime limit so a pattern that is
-    /// merely slow at 64 KiB does not slip through.
+    /// Match limit for the canary runs. The default equals the default runtime limit: an
+    /// exponential shape trips it inside the 1 KiB input, while a benign group loop such as
+    /// `^(?:a|b)*$` needs about 130 000 steps at 64 KiB and must pass. Lower it together
+    /// with [`crate::Limits::match_limit`] when records are known to be short.
     pub match_limit: u32,
     /// Input sizes to generate, in bytes.
     pub sizes: Vec<usize>,
@@ -68,6 +71,12 @@ impl fmt::Display for CanaryTrip {
 const MAX_ALPHABET: usize = 16;
 
 /// Runs the canary. `Ok(None)` means no input tripped a limit.
+///
+/// # Errors
+///
+/// [`CompileError::Syntax`] when PCRE2 rejects the pattern, [`CompileError::Internal`] or
+/// [`CompileError::OutOfMemory`] when PCRE2 fails for another reason. A tripped limit is
+/// not an error; it is the `Some` result.
 pub fn run(
     pattern: &str,
     config: &CanaryConfig,
@@ -78,12 +87,12 @@ pub fn run(
         ..limits.clone()
     };
     let re = pcre2::Pcre2Regex::compile(pattern, &canary_limits)?;
-    let alphabet = alphabet(pattern);
+    let Literals { alphabet, sequence } = literals(pattern);
     let poison = ['!', '~', '\u{1}']
         .into_iter()
         .find(|c| !alphabet.contains(c))
         .unwrap_or('\u{2}');
-    let prefix: String = alphabet.iter().collect();
+    let prefix: String = sequence.into_iter().collect();
 
     for &size in &config.sizes {
         for &c in &alphabet {
@@ -99,7 +108,7 @@ pub fn run(
                         format!("{prefix}{}", run_of(size.saturating_sub(prefix.len()))),
                         poison,
                     ),
-                    format!("alphabet then '{c}' repeated then poison"),
+                    format!("literals then '{c}' repeated then poison"),
                 ),
             ];
             for (input, shape) in inputs {
@@ -155,44 +164,51 @@ fn probe(
     }
 }
 
-/// Literal characters plus one representative per character class, in first-seen order.
-fn alphabet(pattern: &str) -> Vec<char> {
-    let mut chars = Vec::new();
+/// Longest literal sequence used as an input prefix.
+const MAX_SEQUENCE: usize = 64;
+
+/// What the generator knows about a pattern's literals.
+struct Literals {
+    /// Distinct literal characters plus one representative per class, in first-seen order.
+    alphabet: Vec<char>,
+    /// The same characters in pattern order with repeats kept, so required literals such
+    /// as `ERROR: ` appear verbatim when used as a prefix.
+    sequence: Vec<char>,
+}
+
+fn literals(pattern: &str) -> Literals {
+    let mut sequence = Vec::new();
     let desugared = scan::desugar_for_lint(pattern);
     let parse = |text: &str| regex_syntax::ParserBuilder::new().build().parse(text).ok();
     match parse(&desugared.text).or_else(|| parse(pattern)) {
-        Some(hir) => collect_alphabet(&hir, &mut chars),
-        None => chars = scan::raw_literal_alphabet(pattern),
+        Some(hir) => collect_sequence(&hir, &mut sequence),
+        None => sequence = scan::raw_literal_alphabet(pattern),
     }
-    if chars.is_empty() {
-        chars.push('a');
+    if sequence.is_empty() {
+        sequence.push('a');
     }
-    chars.truncate(MAX_ALPHABET);
-    chars
+    let mut alphabet: Vec<char> = Vec::new();
+    for &c in &sequence {
+        if !alphabet.contains(&c) {
+            alphabet.push(c);
+        }
+    }
+    alphabet.truncate(MAX_ALPHABET);
+    sequence.truncate(MAX_SEQUENCE);
+    Literals { alphabet, sequence }
 }
 
-fn collect_alphabet(hir: &Hir, out: &mut Vec<char>) {
-    let mut push = |c: char| {
-        if !out.contains(&c) {
-            out.push(c);
-        }
-    };
+fn collect_sequence(hir: &Hir, out: &mut Vec<char>) {
     match hir.kind() {
-        HirKind::Literal(lit) => String::from_utf8_lossy(&lit.0).chars().for_each(&mut push),
-        HirKind::Class(hir::Class::Unicode(class)) => {
-            if let Some(c) = representative(class) {
-                push(c);
-            }
-        }
+        HirKind::Literal(lit) => out.extend(String::from_utf8_lossy(&lit.0).chars()),
+        HirKind::Class(hir::Class::Unicode(class)) => out.extend(representative(class)),
         HirKind::Class(hir::Class::Bytes(class)) => {
-            if let Some(r) = class.ranges().first() {
-                push(char::from(r.start()));
-            }
+            out.extend(class.ranges().first().map(|r| char::from(r.start())));
         }
-        HirKind::Repetition(rep) => collect_alphabet(&rep.sub, out),
-        HirKind::Capture(cap) => collect_alphabet(&cap.sub, out),
+        HirKind::Repetition(rep) => collect_sequence(&rep.sub, out),
+        HirKind::Capture(cap) => collect_sequence(&cap.sub, out),
         HirKind::Concat(subs) | HirKind::Alternation(subs) => {
-            subs.iter().for_each(|h| collect_alphabet(h, out));
+            subs.iter().for_each(|h| collect_sequence(h, out));
         }
         HirKind::Empty | HirKind::Look(_) => {}
     }

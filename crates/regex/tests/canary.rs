@@ -56,6 +56,30 @@ fn canary_covers_backtracking_only_syntax_and_a_literal_prefix() {
 }
 
 #[test]
+fn canary_uses_the_literal_sequence_as_a_prefix() {
+    // The required literal has a repeated character, so a de-duplicated alphabet would
+    // never satisfy it and the nested loop would never be reached.
+    let trip = run(r"ERROR: (a+)+$", &tight(), &Limits::default()).unwrap();
+    assert!(trip.is_some());
+}
+
+#[test]
+fn canary_default_limit_passes_group_loops_at_64_kib() {
+    for pattern in [
+        r"^(?:ab)*$",
+        r"^(?:a|b)*$",
+        r"^(?:\w\s)*$",
+        r"^([a-z]{2,5}-)*$",
+    ] {
+        assert_eq!(
+            run(pattern, &CanaryConfig::default(), &Limits::default()).unwrap(),
+            None,
+            "{pattern}"
+        );
+    }
+}
+
+#[test]
 fn canary_reports_syntax_errors_as_compile_errors() {
     let err = run(r"a(", &tight(), &Limits::default()).unwrap_err();
     assert!(matches!(err, CompileError::Syntax { .. }));
