@@ -78,9 +78,9 @@ pub struct Limits {
     /// positions may spend up to n times this; see `work_limit` for the bound on the whole
     /// call.
     pub match_limit: u32,
-    /// Upper bound on nested backtracking frames per match call.
+    /// Upper bound on nested backtracking frames at any moment within a match call.
     pub depth_limit: u32,
-    /// Upper bound on heap PCRE2 may use for backtracking frames, in KiB.
+    /// Upper bound on heap PCRE2 may hold for backtracking frames at any moment, in KiB.
     pub heap_limit_kib: u32,
     /// Upper bound on pattern items PCRE2 may visit in one match call, counted across every
     /// start position, or `None` to skip the count.
@@ -225,7 +225,8 @@ pub enum CompileError {
     /// The lint found a ReDoS shape and the policy is [`RedosPolicy::Reject`].
     #[error("ReDoS risk: {}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))]
     RedosRisk(Vec<RedosRisk>),
-    /// The canary tripped its match limit and the policy is [`RedosPolicy::Reject`].
+    /// The canary tripped a limit (usually its work budget) and the policy is
+    /// [`RedosPolicy::Reject`].
     #[error("canary tripped: {0}")]
     CanaryTripped(canary::CanaryTrip),
     /// PCRE2 could not allocate.

@@ -15,11 +15,14 @@ fn tight() -> CanaryConfig {
 }
 
 #[test]
-fn canary_rejects_nested_quantifier_under_a_tight_match_limit() {
+fn canary_rejects_nested_quantifier_by_match_limit_when_it_is_tight() {
+    // With the match limit far below the work budget it is the match limit that trips,
+    // which is the acceptance criterion as written; under defaults the work budget wins.
     let trip = run(r"(a+)+$", &tight(), &Limits::default())
         .unwrap()
         .expect("should trip");
     assert_eq!(trip.match_limit, 10_000);
+    assert_eq!(trip.error, MatchError::MatchLimit);
     assert!(trip.input_len >= 1024, "{trip:?}");
 }
 

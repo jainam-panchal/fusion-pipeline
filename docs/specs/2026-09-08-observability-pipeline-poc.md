@@ -192,7 +192,7 @@ Sink publishes await `PubAck`. (assumed) The sink stream is pre-created by the c
 
 Metrics, logs and traces all go over OTLP to one collector. The collector fans out to Prometheus, Loki and Tempo. Grafana reads all three.
 
-The spine metric is `records_dropped_total{tenant, stage, reason}`. Reasons are a closed set: `filter`, `route_default_drop`, `sample`, `dedupe`, `lua_drop`, `lua_error`, `regex_limit`, `state_error`, `invalid_record`, `missing_id`. `regex_limit` covers every tripped regex limit: match, depth, heap, work and input size.
+The spine metric is `records_dropped_total{tenant, stage, reason}`. Reasons are a closed set: `filter`, `route_default_drop`, `sample`, `dedupe`, `lua_drop`, `lua_error`, `regex_limit`, `state_error`, `invalid_record`, `missing_id`. `regex_limit` covers every tripped regex limit: match, depth, heap, work and input size. An engine error that is not a limit (allocation failure, an unexpected PCRE2 code) is a stage error and counts in `records_errored_total`, not as a drop reason.
 
 Other metrics: per-stage `records_in_total`, `records_out_total`, `records_errored_total`, `stage_duration_seconds`; `state_ops_total`, `state_op_duration_seconds`, `state_errors_total`; `lua_errors_total{kind}`; `source_naks_total`, `source_redeliveries_total`, `dlq_total`; `sink_publish_duration_seconds`, `sink_publish_errors_total`; `pipeline_end_to_end_seconds`.
 
