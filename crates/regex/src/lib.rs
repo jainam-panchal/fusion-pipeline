@@ -18,6 +18,7 @@ mod pcre2;
 mod scan;
 
 use std::fmt;
+use std::num::NonZeroU32;
 
 use lint::RedosRisk;
 
@@ -83,11 +84,11 @@ pub struct Limits {
     ///
     /// PCRE2 resets `match_limit` at each start position, so an unanchored non-match whose
     /// leading group loop restarts everywhere (`(?:a|b)*(?=c)`) is O(n²) and trips nothing
-    /// else: about two minutes on a 64 KiB record. This limit is what bounds it, at roughly
-    /// 1.8× the matching cost on the PCRE2 path. Single-character repeats loop inside one
-    /// item and are not counted; their worst case is one character scan per start position,
-    /// seconds at 64 KiB, bounded by `input_bytes`.
-    pub work_limit: Option<u32>,
+    /// else: about two minutes on a 64 KiB record. This limit is what bounds it, at
+    /// 1.5–1.8× the matching cost on the PCRE2 path. Single-character repeats loop inside
+    /// one item and are not counted; their worst case is one character scan per start
+    /// position, seconds at 64 KiB, bounded by `input_bytes`.
+    pub work_limit: Option<NonZeroU32>,
     /// Largest haystack accepted, in bytes. Longer inputs are [`MatchError::InputTooLarge`].
     ///
     /// On the backtracking engine this is the only bound on unanchored patterns made of
@@ -108,7 +109,7 @@ impl Default for Limits {
             match_limit: 1_000_000,
             depth_limit: 1_000_000,
             heap_limit_kib: 20_000,
-            work_limit: Some(10_000_000),
+            work_limit: NonZeroU32::new(10_000_000),
             input_bytes: 64 * 1024,
             max_pattern_length: 8192,
             parens_nest_limit: 250,

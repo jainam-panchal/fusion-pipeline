@@ -2,8 +2,9 @@
 //! desugaring used by the lint and the canary, and the canary's raw alphabet extraction.
 //! It understands escapes and character classes well enough to find group parentheses; it
 //! is not a parser. It does not know `\Q…\E` or `(?x)` comments, so PCRE2's own
-//! `max_pattern_length` and `parens_nest_limit` stay set on the compile context as the
-//! backstop for parentheses the scanner miscounts.
+//! `parens_nest_limit` stays set on the compile context as the backstop for parentheses the
+//! scanner miscounts. The length guard needs no backstop: it runs on the byte length before
+//! either engine sees the pattern.
 
 use crate::{CompileError, Limits};
 

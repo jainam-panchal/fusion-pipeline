@@ -1,4 +1,4 @@
-//! Compile-time guards, thread-safety and the no-JIT invariant.
+//! Compile-time guards and thread-safety. The no-JIT invariant is a unit test in `src/pcre2.rs`.
 #![allow(clippy::unwrap_used)]
 
 mod common;

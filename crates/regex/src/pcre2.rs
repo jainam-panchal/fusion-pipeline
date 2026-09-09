@@ -21,7 +21,7 @@
 //!   a callout counts every pattern item PCRE2 visits, across all start positions, aborting
 //!   the call with `MatchError::WorkLimit` when the budget runs out. This is the only limit
 //!   that bounds an unanchored non-match whose leading group loop restarts at every
-//!   position (`(?:a|b)*(?=c)`); it costs about 1.8× on the PCRE2 path. Single-character
+//!   position (`(?:a|b)*(?=c)`); it costs 1.5–1.8× on the PCRE2 path. Single-character
 //!   repeats loop inside one item and stay invisible to it, but their worst case is a
 //!   character scan per start, seconds rather than minutes at 64 KiB.
 //!
@@ -32,6 +32,7 @@
 
 use std::cell::Cell;
 use std::ffi::{c_int, c_void};
+use std::num::NonZeroU32;
 use std::ptr::{self, NonNull};
 
 use pcre2_sys::{
@@ -48,13 +49,15 @@ use pcre2_sys::{
     pcre2_set_parens_nest_limit_8,
 };
 
+use crate::{CompileError, Limits, MatchError, Span};
+
 // `pcre2-sys` does not bind the callout API; the symbol is in the bundled static library.
 // The first parameter is really `pcre2_callout_block_8 *`; the wrapper never reads it, so an
 // opaque pointer has the same ABI and avoids redeclaring the struct.
 unsafe extern "C" {
     fn pcre2_set_callout_8(
         ctx: *mut pcre2_match_context_8,
-        callout: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int>,
+        callout: Option<extern "C" fn(*mut c_void, *mut c_void) -> c_int>,
         data: *mut c_void,
     ) -> c_int;
 }
@@ -69,18 +72,22 @@ thread_local! {
 
 /// Auto-callout hook: one call per pattern item PCRE2 visits. Returning a negative value
 /// aborts the match with that value; `PCRE2_ERROR_CALLOUT` is the one reserved for callers.
-unsafe extern "C" fn count_work(_block: *mut c_void, _data: *mut c_void) -> c_int {
-    WORK_REMAINING.with(|remaining| {
-        let left = remaining.get();
-        if left == 0 {
-            return PCRE2_ERROR_CALLOUT;
-        }
-        remaining.set(left - 1);
-        0
-    })
+///
+/// Nothing in here can unwind into C: the thread-local is const-initialised and has no
+/// destructor, so `try_with` only fails during thread teardown, and that case aborts the
+/// match rather than panicking.
+extern "C" fn count_work(_block: *mut c_void, _data: *mut c_void) -> c_int {
+    WORK_REMAINING
+        .try_with(|remaining| {
+            let left = remaining.get();
+            if left == 0 {
+                return PCRE2_ERROR_CALLOUT;
+            }
+            remaining.set(left - 1);
+            0
+        })
+        .unwrap_or(PCRE2_ERROR_CALLOUT)
 }
-
-use crate::{CompileError, Limits, MatchError, Span};
 
 /// A compiled PCRE2 pattern plus the match context carrying its runtime limits.
 pub(crate) struct Pcre2Regex {
@@ -89,7 +96,7 @@ pub(crate) struct Pcre2Regex {
     /// Number of capture groups, not counting group 0.
     capture_count: usize,
     /// Total pattern items one match call may visit, when callouts are compiled in.
-    work_limit: Option<u32>,
+    work_limit: Option<NonZeroU32>,
     /// Group name by group index (index 0 is the whole match and has no name).
     names: Vec<Option<String>>,
 }
@@ -320,7 +327,7 @@ impl Pcre2Regex {
             options |= PCRE2_ANCHORED;
         }
         if let Some(budget) = self.work_limit {
-            WORK_REMAINING.with(|remaining| remaining.set(u64::from(budget)));
+            WORK_REMAINING.with(|remaining| remaining.set(u64::from(budget.get())));
         }
         // SAFETY: `haystack` is valid UTF-8 (it is a `&str`), which is what
         // `PCRE2_NO_UTF_CHECK` requires; it is valid for `haystack.len()` bytes for the
@@ -460,17 +467,5 @@ mod tests {
     fn compiled_pattern_carries_no_jit_code() {
         let re = Pcre2Regex::compile(r"(?<=x)(?<n>\d+)", &Limits::default()).unwrap();
         assert_eq!(re.jit_size().unwrap(), 0);
-    }
-
-    #[test]
-    fn work_limit_bounds_the_start_loop() {
-        let limits = Limits {
-            work_limit: Some(50_000),
-            ..Limits::default()
-        };
-        let re = Pcre2Regex::compile(r"(?:a|b)*(?=c)", &limits).unwrap();
-        let hay = "a".repeat(2048);
-        assert_eq!(re.is_match(&hay, false).unwrap_err(), MatchError::WorkLimit);
-        assert!(!re.is_match(&hay[..64], false).unwrap());
     }
 }

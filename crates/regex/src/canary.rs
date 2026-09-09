@@ -21,6 +21,7 @@
 //! patterns that will execute on PCRE2. [`run`] itself is engine-agnostic.
 
 use std::fmt;
+use std::num::NonZeroU32;
 
 use regex_syntax::hir::{self, Hir, HirKind};
 
@@ -41,8 +42,9 @@ pub struct CanaryConfig {
     /// Work budget for one probe, per byte of input, counted across start positions.
     /// The default 64 lets a linear scan of the input pass with margin (`^(?:a|b)*$` needs
     /// about 2 items per byte) and trips a group loop that restarts at every position
-    /// (`(?:a|b)*(?=c)` needs about 2 500 per byte at 1 KiB).
-    pub work_per_byte: u32,
+    /// (`(?:a|b)*(?=c)` needs about 2 500 per byte at 1 KiB). A zero-byte input (from
+    /// `input_bytes: 0`) gets no budget rather than a budget of zero.
+    pub work_per_byte: NonZeroU32,
     /// Input sizes to generate, in bytes. Each is clamped to [`Limits::input_bytes`] and
     /// duplicates are dropped, so a node with short records still gets its worst case
     /// probed at the largest size it will accept.
@@ -53,7 +55,7 @@ impl Default for CanaryConfig {
     fn default() -> Self {
         Self {
             match_limit: None,
-            work_per_byte: 64,
+            work_per_byte: NonZeroU32::new(64).unwrap_or(NonZeroU32::MIN),
             sizes: vec![1024, 8192, 65536],
         }
     }
@@ -100,6 +102,8 @@ pub struct CanaryTrip {
     pub anchored: bool,
     /// The match limit the canary ran under.
     pub match_limit: u32,
+    /// The work budget the canary ran under, if any.
+    pub work_limit: Option<NonZeroU32>,
     /// Which limit tripped.
     pub error: MatchError,
 }
@@ -108,7 +112,7 @@ impl fmt::Display for CanaryTrip {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} on {} {} input of {} bytes (match limit {})",
+            "{} on {} {} input of {} bytes (match limit {}, work limit {})",
             self.error,
             if self.anchored {
                 "anchored"
@@ -117,7 +121,8 @@ impl fmt::Display for CanaryTrip {
             },
             self.input_shape,
             self.input_len,
-            self.match_limit
+            self.match_limit,
+            self.work_limit.map_or(0, NonZeroU32::get)
         )
     }
 }
@@ -154,12 +159,14 @@ pub fn run(
 
     // The work budget is per probe and depends on the input size, so each size gets its
     // own compile; PCRE2 compiles in microseconds and there are three sizes.
-    for (i, &size) in sizes.iter().enumerate() {
-        let budget =
-            u32::try_from(u64::from(config.work_per_byte) * size as u64).unwrap_or(u32::MAX);
+    let smallest = sizes.first().copied();
+    for &size in &sizes {
+        let budget = u64::from(config.work_per_byte.get())
+            .saturating_mul(u64::try_from(size).unwrap_or(u64::MAX));
+        let work_limit = NonZeroU32::new(u32::try_from(budget).unwrap_or(u32::MAX));
         let canary_limits = Limits {
             match_limit,
-            work_limit: Some(budget),
+            work_limit,
             ..limits.clone()
         };
         let re = pcre2::Pcre2Regex::compile(pattern, &canary_limits)?;
@@ -167,13 +174,14 @@ pub fn run(
         // for the start loop. Unanchored at the smallest size only: catches a group loop
         // that restarts at every position, which is quadratic and therefore visible even
         // on the smallest input.
-        let unanchored_too = i == 0;
+        let modes: &[bool] = if Some(size) == smallest {
+            &[true, false]
+        } else {
+            &[true]
+        };
         for (input, shape) in inputs_of(size, &alphabet, &prefix, poison) {
-            if let Some(trip) = probe(&re, &input, shape, true, match_limit)? {
-                return Ok(Some(trip));
-            }
-            if unanchored_too {
-                if let Some(trip) = probe(&re, &input, shape, false, match_limit)? {
+            for &anchored in modes {
+                if let Some(trip) = probe(&re, &input, shape, anchored, &canary_limits)? {
                     return Ok(Some(trip));
                 }
             }
@@ -191,7 +199,7 @@ fn inputs_of<'a>(
     poison: char,
 ) -> impl Iterator<Item = (String, InputShape)> + 'a {
     let run_of = move |c: char, bytes: usize| -> String {
-        std::iter::repeat_n(c, bytes / c.len_utf8().max(1)).collect()
+        std::iter::repeat_n(c, bytes / c.len_utf8()).collect()
     };
     let per_char = alphabet.iter().flat_map(move |&c| {
         [
@@ -236,7 +244,7 @@ fn probe(
     input: &str,
     shape: InputShape,
     anchored: bool,
-    match_limit: u32,
+    limits: &Limits,
 ) -> Result<Option<CanaryTrip>, CompileError> {
     match re.is_match(input, anchored) {
         Ok(_) => Ok(None),
@@ -249,7 +257,8 @@ fn probe(
             input_len: input.len(),
             input_shape: shape,
             anchored,
-            match_limit,
+            match_limit: limits.match_limit,
+            work_limit: limits.work_limit,
             error,
         })),
         Err(MatchError::OutOfMemory) => Err(CompileError::OutOfMemory),

@@ -149,6 +149,15 @@ fn canary_clamps_sizes_to_the_input_limit_rather_than_skipping() {
 }
 
 #[test]
+fn zero_input_limit_gives_no_budget_rather_than_rejecting_everything() {
+    let limits = Limits {
+        input_bytes: 0,
+        ..Limits::default()
+    };
+    assert_eq!(run(LINUX_SYSLOG, &CanaryConfig::default(), &limits).unwrap(), None);
+}
+
+#[test]
 fn canary_catches_a_group_loop_that_restarts_at_every_position() {
     // `match_limit` resets per start position, so only the unanchored probe under the
     // work budget sees the O(n²) of this pattern on a record that never matches.

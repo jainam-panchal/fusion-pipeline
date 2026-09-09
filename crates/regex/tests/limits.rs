@@ -3,6 +3,8 @@
 
 mod common;
 
+use std::num::NonZeroU32;
+
 use common::{NESTED_BACKTRACKING as NESTED, compile};
 use fusion_regex::{Engine, EngineChoice, Limits, MatchError, Options, Regex};
 
@@ -75,7 +77,7 @@ fn work_limit_trips_with_its_own_variant_on_a_start_loop_quadratic() {
     let re = backtracking(
         r"(?:a|b)*(?=c)",
         Limits {
-            work_limit: Some(100_000),
+            work_limit: NonZeroU32::new(100_000),
             ..Limits::default()
         },
     );
