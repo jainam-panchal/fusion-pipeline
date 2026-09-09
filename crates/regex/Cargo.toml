@@ -1,0 +1,17 @@
+[package]
+name = "fusion-regex"
+description = "Two-engine regex facade: linear `regex` first, bounded PCRE2 fallback, load-time ReDoS checks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pcre2-sys.workspace = true
+regex.workspace = true
+regex-syntax.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
