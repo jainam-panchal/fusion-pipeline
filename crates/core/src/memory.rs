@@ -1,0 +1,188 @@
+//! In-memory source and sinks for tests and local runs.
+//!
+//! [`MemorySource`] forwards records pushed through a [`MemoryInput`]; every push returns an
+//! [`AckProbe`] that observes how the engine settled the record. [`MemorySinks`] is a
+//! [`SinkFactory`] whose sinks collect records per node id for later inspection.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use crate::config::{ConfigError, NodeConfig};
+use crate::io::{AckHandle, Envelope, Intake, Sink, SinkError, Source, SourceError};
+use crate::record::Record;
+use crate::registry::SinkFactory;
+
+/// How the engine settled a record's source message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckOutcome {
+    /// Acknowledged.
+    Ack,
+    /// Negatively acknowledged, with the requested redelivery delay.
+    Nak(Option<Duration>),
+}
+
+#[derive(Default)]
+struct AckState {
+    outcome: Mutex<Option<AckOutcome>>,
+    settled: Condvar,
+}
+
+/// Observes the ack outcome of one pushed record.
+#[derive(Clone)]
+pub struct AckProbe {
+    state: Arc<AckState>,
+}
+
+impl AckProbe {
+    /// Wait up to `timeout` for the record to be settled.
+    ///
+    /// Returns `None` if the engine has not settled it in time.
+    #[must_use]
+    pub fn wait(&self, timeout: Duration) -> Option<AckOutcome> {
+        let deadline = Instant::now() + timeout;
+        let mut outcome = lock_unpoisoned(&self.state.outcome);
+        while outcome.is_none() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (guard, _) = self
+                .state
+                .settled
+                .wait_timeout(outcome, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            outcome = guard;
+        }
+        *outcome
+    }
+
+    /// The outcome if already settled, without waiting.
+    #[must_use]
+    pub fn outcome(&self) -> Option<AckOutcome> {
+        *lock_unpoisoned(&self.state.outcome)
+    }
+}
+
+struct MemoryAck {
+    state: Arc<AckState>,
+}
+
+impl MemoryAck {
+    fn settle(&self, outcome: AckOutcome) {
+        *lock_unpoisoned(&self.state.outcome) = Some(outcome);
+        self.state.settled.notify_all();
+    }
+}
+
+impl AckHandle for MemoryAck {
+    fn ack(self: Box<Self>) {
+        self.settle(AckOutcome::Ack);
+    }
+
+    fn nak(self: Box<Self>, delay: Option<Duration>) {
+        self.settle(AckOutcome::Nak(delay));
+    }
+}
+
+/// Producer side of a [`MemorySource`]. Clone freely; drop every clone to end the source.
+#[derive(Debug, Clone)]
+pub struct MemoryInput {
+    tx: crossbeam_channel::Sender<Envelope>,
+}
+
+impl MemoryInput {
+    /// Queue a record for the engine and return a probe on its ack outcome.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the source has already finished, which only happens after the engine that
+    /// owns it was joined.
+    pub fn push(&self, record: Record) -> AckProbe {
+        let state = Arc::new(AckState::default());
+        let ack = Box::new(MemoryAck {
+            state: Arc::clone(&state),
+        });
+        self.tx
+            .send(Envelope { record, ack })
+            .expect("memory source is running while its input is alive");
+        AckProbe { state }
+    }
+}
+
+/// A [`Source`] fed from a [`MemoryInput`].
+#[derive(Debug)]
+pub struct MemorySource {
+    rx: crossbeam_channel::Receiver<Envelope>,
+}
+
+impl MemorySource {
+    /// Create a source and its input handle.
+    #[must_use]
+    pub fn new() -> (Self, MemoryInput) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        (Self { rx }, MemoryInput { tx })
+    }
+}
+
+impl Source for MemorySource {
+    fn run(self: Box<Self>, intake: Intake) -> Result<(), SourceError> {
+        for envelope in self.rx {
+            intake.send(envelope)?;
+        }
+        Ok(())
+    }
+}
+
+/// Collects records per sink node id. Register it under a `sink.*` type name.
+#[derive(Debug, Clone, Default)]
+pub struct MemorySinks {
+    records: Arc<Mutex<BTreeMap<String, Vec<Record>>>>,
+}
+
+impl MemorySinks {
+    /// An empty collector.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records written to the sink node `node_id`, in arrival order.
+    #[must_use]
+    pub fn records(&self, node_id: &str) -> Vec<Record> {
+        lock_unpoisoned(&self.records)
+            .get(node_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+impl SinkFactory for MemorySinks {
+    fn build(&self, node: &NodeConfig) -> Result<Box<dyn Sink>, ConfigError> {
+        Ok(Box::new(MemorySink {
+            node_id: node.id.clone(),
+            records: Arc::clone(&self.records),
+        }))
+    }
+}
+
+struct MemorySink {
+    node_id: String,
+    records: Arc<Mutex<BTreeMap<String, Vec<Record>>>>,
+}
+
+impl Sink for MemorySink {
+    fn write(&self, records: &[Record]) -> Result<(), SinkError> {
+        lock_unpoisoned(&self.records)
+            .entry(self.node_id.clone())
+            .or_default()
+            .extend_from_slice(records);
+        Ok(())
+    }
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}

@@ -1,0 +1,55 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/stages",
+    "crates/nats",
+    "crates/state",
+    "crates/otel",
+    "crates/pipeline",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+fusion-core = { path = "crates/core" }
+fusion-stages = { path = "crates/stages" }
+fusion-nats = { path = "crates/nats" }
+fusion-state = { path = "crates/state" }
+fusion-otel = { path = "crates/otel" }
+
+anyhow = "1"
+crossbeam-channel = "0.5"
+mimalloc = { version = "0.1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+unexpected_cfgs = "warn"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 3
