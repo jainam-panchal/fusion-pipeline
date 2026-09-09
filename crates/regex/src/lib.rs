@@ -176,9 +176,6 @@ pub enum CompileError {
     /// The canary tripped its match limit and the policy is [`RedosPolicy::Reject`].
     #[error("canary tripped: {0}")]
     CanaryTripped(canary::CanaryTrip),
-    /// [`EngineChoice::Linear`] was requested for syntax only PCRE2 accepts.
-    #[error("pattern needs the backtracking engine but only the linear engine was allowed: {0}")]
-    LinearOnly(String),
     /// PCRE2 could not allocate.
     #[error("PCRE2 allocation failed")]
     OutOfMemory,
