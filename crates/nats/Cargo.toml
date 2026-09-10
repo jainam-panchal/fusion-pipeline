@@ -7,6 +7,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+fusion-core.workspace = true
+async-nats.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
