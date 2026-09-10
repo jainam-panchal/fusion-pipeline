@@ -1,0 +1,16 @@
+# The one-node pipeline the smoke test runs: LOGS in, PROCESSED out.
+#
+#   pipelined --config deploy/pipeline.yaml
+#
+# `url` here and on the sink is overridden by NATS_URL when set.
+source:
+  type: nats
+  url: nats://127.0.0.1:4222
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: out
+    type: sink.nats
+    url: nats://127.0.0.1:4222
+    stream: PROCESSED
+    subject: processed.logs

@@ -12,6 +12,9 @@
 //! the record carries none, and handed to the engine with an ack handle that acks or naks the
 //! JetStream message. A payload that is not a record cannot succeed on redelivery, so it is
 //! terminated instead of nak'd and reported on stderr.
+//!
+//! A nak without a delay from the engine is sent with [`DEFAULT_NAK_DELAY`], so a sink that
+//! is down does not burn through `max_deliver` in milliseconds.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +28,9 @@ use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
 use crate::subject::{stamp_tenant, tenant_from_subject};
+
+/// Redelivery delay used when the engine naks without one.
+pub const DEFAULT_NAK_DELAY: Duration = Duration::from_secs(1);
 
 /// A JetStream source. Build one through [`crate::Nats::source`].
 #[derive(Debug)]
@@ -131,6 +137,6 @@ impl AckHandle for NatsAck {
     }
 
     fn nak(self: Box<Self>, delay: Option<Duration>) {
-        self.settle(AckKind::Nak(delay));
+        self.settle(AckKind::Nak(Some(delay.unwrap_or(DEFAULT_NAK_DELAY))));
     }
 }

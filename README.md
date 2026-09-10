@@ -15,14 +15,43 @@ Cargo workspace under `crates/`:
 | `core` | record model, config loader, DAG validation, engine, `Source`/`Sink`/`AckHandle` traits, in-memory fakes, condition grammar |
 | `stages` | built-in stages (`filter` so far) |
 | `regex` | two-engine regex facade: linear `regex` first, PCRE2 fallback with configurable limits, load-time ReDoS lint and canary; the only crate with `unsafe` |
-| `nats` | NATS JetStream source and sink (placeholder) |
+| `nats` | NATS JetStream source (pull consumer, explicit ack) and sink (returns after `PubAck`); tenant stamped from the subject; `NATS_URL` overrides configured URLs |
 | `state` | state store implementations (placeholder) |
 | `otel` | OTLP telemetry wiring (placeholder) |
-| `pipeline` | the binary and the default stage registry |
+| `pipeline` | the `pipelined` binary and the default stage registry |
 
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
+```
+
+## Running against NATS
+
+`deploy/compose.yaml` brings up JetStream plus a one-shot `nats-init` that creates the
+`LOGS` (`logs.>`) and `PROCESSED` (`processed.>`) streams and the `pipeline` pull consumer
+(explicit ack, `ack_wait` 30s, `max_deliver` 5). The pipeline never creates streams itself
+and fails fast at startup when the server, stream or consumer is missing.
+
+```sh
+docker compose -f deploy/compose.yaml up -d
+cargo run -p fusion-pipeline -- --config deploy/pipeline.yaml
+
+# in another shell
+nats sub processed.logs --count 1 &
+nats pub logs.acme.syslog '{"id": 1, "body": "disk full"}'
+nats consumer info LOGS pipeline        # 0 pending, 0 redelivered
+```
+
+The record arrives with `resource["tenant.id"]` set to `acme`, read from the subject. A sink
+that cannot get its `PubAck` (delete `PROCESSED` to see it) makes the engine nak the source
+message and JetStream redeliver it. `NATS_URL` overrides the `url` of the source and every
+sink. `deploy/nats-smoke.sh` runs these checks end to end and exits non-zero on any failure.
+
+The live tests are ignored by default and need the compose stack:
+
+```sh
+cargo test -p fusion-nats --test jetstream -- --ignored
+cargo test -p fusion-pipeline --test cli -- --ignored
 ```
 
 The regex crate wraps C (PCRE2 10.46, bundled by `pcre2-sys`), so Miri cannot run its
@@ -36,11 +65,17 @@ A minimal config:
 
 ```yaml
 workers: 4          # optional, defaults to one per core
+source:             # optional in tests, required by the binary
+  type: nats
+  stream: LOGS
+  consumer: pipeline
 nodes:
   - id: keep_errors
     type: filter    # reads from `source` because it is first
     condition: severity_text == "ERROR"
     action: keep
   - id: out
-    type: sink.memory   # reads from keep_errors, the previous node
+    type: sink.nats     # reads from keep_errors, the previous node
+    stream: PROCESSED
+    subject: processed.logs
 ```
