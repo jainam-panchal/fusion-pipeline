@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/core",
     "crates/stages",
+    "crates/regex",
     "crates/nats",
     "crates/state",
     "crates/otel",
@@ -19,6 +20,7 @@ publish = false
 [workspace.dependencies]
 fusion-core = { path = "crates/core" }
 fusion-stages = { path = "crates/stages" }
+fusion-regex = { path = "crates/regex" }
 fusion-nats = { path = "crates/nats" }
 fusion-state = { path = "crates/state" }
 fusion-otel = { path = "crates/otel" }
@@ -26,6 +28,9 @@ fusion-otel = { path = "crates/otel" }
 anyhow = "1"
 crossbeam-channel = "0.5"
 mimalloc = { version = "0.1", default-features = false }
+pcre2-sys = "0.2"
+regex = "1"
+regex-syntax = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
@@ -43,6 +48,7 @@ style = { level = "warn", priority = -1 }
 complexity = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 unwrap_used = "warn"
+undocumented_unsafe_blocks = "warn"
 
 [profile.release]
 opt-level = 3

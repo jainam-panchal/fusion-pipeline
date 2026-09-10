@@ -35,7 +35,7 @@ A working proof of concept that:
 10. As a pipeline operator, I want a `sample` node with `random`, `every_nth` and `consistent` modes, so that I can choose between cheap, exact and key-stable sampling.
 11. As a pipeline operator, I want a `dedupe` node keyed on chosen fields with a time window, so that repeated records within the window are suppressed.
 12. As a pipeline operator, I want a `lua` node that runs a script I provide, so that logic the declarative nodes cannot express still lives in the pipeline.
-13. As a pipeline operator, I want to set per-node limits on regex matching (match, depth, heap, input size), so that a bad pattern cannot pin a worker.
+13. As a pipeline operator, I want to set per-node limits on regex matching (match, depth, heap, work, input size), so that a bad pattern cannot pin a worker (bounded, not eliminated, for one class of pattern: see the amendment under the regex facade).
 14. As a pipeline operator, I want to set per-node Lua limits (instruction budget, memory cap), so that a bad script cannot pin or exhaust a worker.
 15. As a pipeline operator, I want to choose what happens when a Lua stage errors (`drop`, `pass`, `nak`), so that I control whether bad scripts lose data, pass it untouched, or hold it for retry.
 16. As a pipeline operator, I want to choose what happens when the state store is unreachable for a stateful node (`pass` or `nak`), so that I control whether the pipeline degrades or blocks.
@@ -112,7 +112,9 @@ Lua 5.4 via `mlua` with the `lua54` and `vendored` features. No LuaJIT.
 
 Regex is a two-engine facade in our own wrapper crate. Every pattern is first compiled with the Rust `regex` crate, which is linear-time by construction and cannot backtrack. If `regex` rejects the syntax (backreferences, lookaround, atomic or possessive groups, recursion), the pattern falls back to PCRE2 through `pcre2-sys` directly (PCRE2 10.46, bundled). All `unsafe` code lives in the PCRE2 half. JIT is never invoked, so `match_limit` and `depth_limit` behave deterministically on the interpreter path.
 
-Catastrophic-pattern detection happens at config load, in three layers. First, classification: a pattern that compiles on `regex` is `engine=linear` and cannot backtrack; one that needs PCRE2 is `engine=backtracking` and is labelled as such in metrics and logs. Second, a structural lint on the `regex-syntax` AST for nested unbounded quantifiers, overlapping alternation under repetition, and an unbounded quantifier followed by an overlapping suffix, with per-node `on_redos_risk: reject|warn`. Third, a canary: the PCRE2 path is run with a tight `match_limit` against generated adversarial inputs (repetitions of the pattern's literal alphabet at 1 KiB, 8 KiB and 64 KiB) and the node is rejected if the limit trips. Runtime limits still apply per record regardless of classification.
+Catastrophic-pattern detection happens at config load, in three layers. First, classification: a pattern that compiles on `regex` is `engine=linear` and cannot backtrack; one that needs PCRE2 is `engine=backtracking` and is labelled as such in metrics and logs. Second, a structural lint on the `regex-syntax` AST for nested unbounded quantifiers, overlapping alternation under repetition, and an unbounded quantifier followed by an overlapping suffix, with per-node `on_redos_risk: reject|warn`. Third, a canary, run only for patterns that land on PCRE2: the pattern is run against generated adversarial inputs (repetitions of the pattern's literal alphabet at 1 KiB, 8 KiB and 64 KiB, clamped to `input_bytes`). Every probe runs under the runtime `match_limit` and a work budget of 64 pattern items per byte, anchored at every size and unanchored at the smallest; the node is rejected if either trips. The canary's work budget applies even when the node's runtime `work` limit is off. Runtime limits still apply per record regardless of classification.
+
+Amended 2026-09-09 (issue #2): PCRE2 resets `match_limit` at every start position, so an unanchored non-match whose leading group loop restarts everywhere (`(?:a|b)*(?=c)`) is O(n²) and trips no limit: 1.9 s at 8 KiB, minutes at 64 KiB. A fifth limit, `work`, compiles the pattern with `PCRE2_AUTO_CALLOUT` and counts pattern items across the whole call, tripping its own error variant; it costs 1.5–1.8× on the PCRE2 path and is on by default. Single-character repeats loop inside one item and are not counted; an unanchored PCRE2-only pattern built from them (`(?<=:)\w+\s+\w+`; the plain `\w+\s+\w+` compiles on the linear engine and is unaffected) still costs one scan per start position, about 5 s on a 64 KiB non-matching record, bounded only by `input_bytes` (default 64 KiB). That residual class is a known gap against story 13 and is recorded here rather than solved.
 
 ### Record model
 
@@ -158,7 +160,7 @@ Every stage implements one function: record in, and one of `Pass(record)`, `Drop
 
 `route` takes ordered labelled conditions; first match wins, default applies otherwise.
 
-`pcre2_extract` takes `field`, `pattern`, `limits {match, depth, heap_kib, input_bytes}` and `on_redos_risk: reject|warn` (default `reject`). Named groups become attributes. The engine is chosen per the facade rules above; `limits.match`, `depth` and `heap_kib` apply only on the PCRE2 path, `input_bytes` on both. (assumed) A non-match is `Pass` unchanged rather than an error.
+`pcre2_extract` takes `field`, `pattern`, `limits {match, depth, heap_kib, work, input_bytes}` and `on_redos_risk: reject|warn` (default `reject`). Named groups become attributes. The engine is chosen per the facade rules above; `limits.match`, `depth`, `heap_kib` and `work` apply only on the PCRE2 path, `input_bytes` on both. An absent `work` takes the default (10 000 000); `work: 0` turns the count off. (assumed) A non-match is `Pass` unchanged rather than an error.
 
 `redact` takes `fields`, `pattern`, `replace` and the same limits. Replacement is in place.
 
@@ -190,7 +192,7 @@ Sink publishes await `PubAck`. (assumed) The sink stream is pre-created by the c
 
 Metrics, logs and traces all go over OTLP to one collector. The collector fans out to Prometheus, Loki and Tempo. Grafana reads all three.
 
-The spine metric is `records_dropped_total{tenant, stage, reason}`. Reasons are a closed set: `filter`, `route_default_drop`, `sample`, `dedupe`, `lua_drop`, `lua_error`, `regex_limit`, `state_error`, `invalid_record`, `missing_id`.
+The spine metric is `records_dropped_total{tenant, stage, reason}`. Reasons are a closed set: `filter`, `route_default_drop`, `sample`, `dedupe`, `lua_drop`, `lua_error`, `regex_limit`, `state_error`, `invalid_record`, `missing_id`. `regex_limit` covers every tripped regex limit: match, depth, heap, work and input size. An engine error that is not a limit (allocation failure, an unexpected PCRE2 code) is a stage error and counts in `records_errored_total`, not as a drop reason.
 
 Other metrics: per-stage `records_in_total`, `records_out_total`, `records_errored_total`, `stage_duration_seconds`; `state_ops_total`, `state_op_duration_seconds`, `state_errors_total`; `lua_errors_total{kind}`; `source_naks_total`, `source_redeliveries_total`, `dlq_total`; `sink_publish_duration_seconds`, `sink_publish_errors_total`; `pipeline_end_to_end_seconds`.
 
@@ -247,7 +249,7 @@ Tests are written before implementation for each stage and for the engine's ack 
 
 ## Further notes
 
-Verified before writing this spec: `async-nats 0.50` has `AckKind::Nak(Option<Duration>)` and `Term`, pull-consumer `max_deliver`, `ack_wait` and `backoff`, and `PublishAckFuture`. `mlua 0.12` has `set_memory_limit`, `HookTriggers::every_nth_instruction`, and `lua54` and `lua55` features; its `sandbox()` is Luau-only, hence the manual global stripping. `redis 1.7` has `SetOptions` with NX and EX. `pcre2-sys 0.2.10` exports `pcre2_set_match_limit_8`, `pcre2_set_depth_limit_8`, `pcre2_set_heap_limit_8`, `pcre2_set_max_pattern_length_8` and `pcre2_set_parens_nest_limit_8`. Dragonfly serves Prometheus metrics at `:6379/metrics`. `opentelemetry-otlp 0.32`, `opentelemetry 0.32` and `tracing-opentelemetry 0.33` resolve together. Toolchain present: cargo 1.96.1, docker 29.5, compose v5.1, gcc 13, `nats` CLI.
+Verified before writing this spec: `async-nats 0.50` has `AckKind::Nak(Option<Duration>)` and `Term`, pull-consumer `max_deliver`, `ack_wait` and `backoff`, and `PublishAckFuture`. `mlua 0.12` has `set_memory_limit`, `HookTriggers::every_nth_instruction`, and `lua54` and `lua55` features; its `sandbox()` is Luau-only, hence the manual global stripping. `redis 1.7` has `SetOptions` with NX and EX. `pcre2-sys 0.2.10` exports `pcre2_set_match_limit_8`, `pcre2_set_depth_limit_8`, `pcre2_set_heap_limit_8`, `pcre2_set_max_pattern_length_8` and `pcre2_set_parens_nest_limit_8`; it does not bind `pcre2_set_callout_8`, which the wrapper declares by hand against the bundled static library. Dragonfly serves Prometheus metrics at `:6379/metrics`. `opentelemetry-otlp 0.32`, `opentelemetry 0.32` and `tracing-opentelemetry 0.33` resolve together. Toolchain present: cargo 1.96.1, docker 29.5, compose v5.1, gcc 13, `nats` CLI.
 
 Not yet verified: the `prometheus-nats-exporter` flags for JetStream consumer metrics. To be confirmed at build time.
 

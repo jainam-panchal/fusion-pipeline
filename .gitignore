@@ -6,3 +6,15 @@
 .env
 *.log
 !testdata/**/*.log
+
+# Editors and IDEs
+.idea/
+.vscode/
+.fleet/
+.zed/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
