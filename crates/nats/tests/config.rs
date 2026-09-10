@@ -13,12 +13,18 @@ fn env_url_overrides_yaml_url() {
 
 #[test]
 fn yaml_url_is_used_without_env() {
-    assert_eq!(resolve_url(Some("nats://yaml:4222"), None), "nats://yaml:4222");
+    assert_eq!(
+        resolve_url(Some("nats://yaml:4222"), None),
+        "nats://yaml:4222"
+    );
 }
 
 #[test]
 fn empty_env_does_not_override() {
-    assert_eq!(resolve_url(Some("nats://yaml:4222"), Some("")), "nats://yaml:4222");
+    assert_eq!(
+        resolve_url(Some("nats://yaml:4222"), Some("")),
+        "nats://yaml:4222"
+    );
 }
 
 #[test]

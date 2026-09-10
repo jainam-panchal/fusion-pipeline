@@ -13,7 +13,10 @@ pub const TENANT_KEY: &str = "tenant.id";
 /// token.
 #[must_use]
 pub fn tenant_from_subject(subject: &str) -> Option<&str> {
-    subject.split('.').nth(1).filter(|tenant| !tenant.is_empty())
+    subject
+        .split('.')
+        .nth(1)
+        .filter(|tenant| !tenant.is_empty())
 }
 
 /// Set `resource["tenant.id"]` to `tenant` unless the record already carries one.
