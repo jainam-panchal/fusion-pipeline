@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "fusion-pipeline"
+name = "pipelined"
 path = "src/main.rs"
 
 [dependencies]
@@ -16,8 +16,8 @@ fusion-stages.workspace = true
 fusion-nats.workspace = true
 fusion-state.workspace = true
 fusion-otel.workspace = true
-anyhow.workspace = true
 mimalloc.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

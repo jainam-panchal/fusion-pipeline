@@ -146,6 +146,20 @@ impl Nats {
         self.shutdown.send_replace(true);
     }
 
+    /// Call [`Nats::shutdown`] when the process receives Ctrl-C (SIGINT).
+    pub fn shutdown_on_ctrl_c(&self) {
+        let shutdown = self.shutdown.clone();
+        self.runtime.spawn(async move {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => {
+                    eprintln!("nats source: stopping on Ctrl-C");
+                    shutdown.send_replace(true);
+                }
+                Err(err) => eprintln!("nats source: cannot listen for Ctrl-C: {err}"),
+            }
+        });
+    }
+
     /// Build the source for `params`, failing if the server, stream or consumer is missing.
     ///
     /// # Errors

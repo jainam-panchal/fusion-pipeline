@@ -23,9 +23,8 @@ fn load(yaml: &str) -> fusion_core::config::SourceConfig {
 fn registered_source_type_builds_from_the_source_block() {
     let mut registry = Registry::new();
     registry.register_source("nats", |source: &fusion_core::config::SourceConfig| {
-        let url: String = source.parse_params::<std::collections::BTreeMap<String, String>>()?
-            ["url"]
-            .clone();
+        let url: String =
+            source.parse_params::<std::collections::BTreeMap<String, String>>()?["url"].clone();
         assert_eq!(url, "nats://localhost:4222");
         Ok(Box::new(NoopSource) as Box<dyn Source>)
     });

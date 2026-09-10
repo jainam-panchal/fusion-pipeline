@@ -25,7 +25,6 @@ fusion-nats = { path = "crates/nats" }
 fusion-state = { path = "crates/state" }
 fusion-otel = { path = "crates/otel" }
 
-anyhow = "1"
 async-nats = "0.50"
 crossbeam-channel = "0.5"
 mimalloc = { version = "0.1", default-features = false }
