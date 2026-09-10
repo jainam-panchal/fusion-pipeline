@@ -100,17 +100,13 @@ impl SourceConfig {
     /// Returns [`ConfigError::InvalidParams`] naming `source` when the parameters do not
     /// match `T`.
     pub fn parse_params<T: DeserializeOwned>(&self) -> Result<T, ConfigError> {
-        serde_yaml_ng::from_value(self.params.clone())
-            .map_err(|e| self.invalid_params(e.to_string()))
+        parse_params(SOURCE_ID, &self.params)
     }
 
     /// An [`ConfigError::InvalidParams`] naming `source`.
     #[must_use]
     pub fn invalid_params(&self, message: impl Into<String>) -> ConfigError {
-        ConfigError::InvalidParams {
-            node: SOURCE_ID.to_owned(),
-            message: message.into(),
-        }
+        invalid_params(SOURCE_ID, message)
     }
 }
 
@@ -141,17 +137,27 @@ impl NodeConfig {
     /// Returns [`ConfigError::InvalidParams`] naming this node when the parameters do not
     /// match `T`.
     pub fn parse_params<T: DeserializeOwned>(&self) -> Result<T, ConfigError> {
-        serde_yaml_ng::from_value(self.params.clone())
-            .map_err(|e| self.invalid_params(e.to_string()))
+        parse_params(&self.id, &self.params)
     }
 
     /// An [`ConfigError::InvalidParams`] naming this node.
     #[must_use]
     pub fn invalid_params(&self, message: impl Into<String>) -> ConfigError {
-        ConfigError::InvalidParams {
-            node: self.id.clone(),
-            message: message.into(),
-        }
+        invalid_params(&self.id, message)
+    }
+}
+
+fn parse_params<T: DeserializeOwned>(
+    node: &str,
+    params: &serde_yaml_ng::Value,
+) -> Result<T, ConfigError> {
+    serde_yaml_ng::from_value(params.clone()).map_err(|e| invalid_params(node, e.to_string()))
+}
+
+fn invalid_params(node: &str, message: impl Into<String>) -> ConfigError {
+    ConfigError::InvalidParams {
+        node: node.to_owned(),
+        message: message.into(),
     }
 }
 

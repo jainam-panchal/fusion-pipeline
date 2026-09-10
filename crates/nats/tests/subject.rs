@@ -34,3 +34,30 @@ fn an_existing_tenant_is_left_alone() {
 
     assert_eq!(record.tenant(), Some("globex"));
 }
+
+mod capture {
+    use fusion_nats::subject::captures;
+
+    #[test]
+    fn literal_subjects_match_only_themselves() {
+        assert!(captures("processed.logs", "processed.logs"));
+        assert!(!captures("processed.logs", "processed.log"));
+        assert!(!captures("processed.logs", "processed.logs.x"));
+    }
+
+    #[test]
+    fn star_matches_exactly_one_token() {
+        assert!(captures("processed.*", "processed.logs"));
+        assert!(!captures("processed.*", "processed"));
+        assert!(!captures("processed.*", "processed.logs.x"));
+        assert!(captures("*.logs", "processed.logs"));
+    }
+
+    #[test]
+    fn full_wildcard_matches_one_or_more_trailing_tokens() {
+        assert!(captures("processed.>", "processed.logs"));
+        assert!(captures("processed.>", "processed.logs.acme"));
+        assert!(!captures("processed.>", "processed"));
+        assert!(!captures("logs.>", "processed.logs"));
+    }
+}

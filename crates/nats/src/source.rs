@@ -75,10 +75,6 @@ impl NatsSource {
                 None => return Ok(()),
             };
             let (message, acker) = message.split();
-            let ack = Box::new(NatsAck {
-                runtime: Arc::clone(&self.runtime),
-                acker,
-            });
             let record = match decode(&message.subject, &message.payload) {
                 Ok(record) => record,
                 Err(err) => {
@@ -86,10 +82,18 @@ impl NatsSource {
                         "nats source: terminating undecodable message on `{}`: {err}",
                         message.subject
                     );
-                    ack.terminate();
+                    // Settled here, on the runtime: `NatsAck` blocks on the runtime and
+                    // cannot be used from inside it.
+                    if let Err(err) = acker.ack_with(AckKind::Term).await {
+                        eprintln!("nats source: could not terminate message: {err}");
+                    }
                     continue;
                 }
             };
+            let ack = Box::new(NatsAck {
+                runtime: Arc::clone(&self.runtime),
+                acker,
+            });
             // On a closed intake the envelope, and its ack handle, are dropped unsettled; the
             // message redelivers after `ack_wait`.
             intake.send(Envelope { record, ack })?;
@@ -112,7 +116,9 @@ impl Source for NatsSource {
     }
 }
 
-/// Settles one JetStream message from whichever engine thread finishes the record.
+/// Settles one JetStream message from whichever engine thread finishes the record. Engine
+/// threads are not runtime threads, so blocking on the runtime here is safe; the source
+/// loop itself must never use this type.
 struct NatsAck {
     runtime: Arc<Runtime>,
     acker: Acker,
@@ -124,10 +130,6 @@ impl NatsAck {
             // A lost ack redelivers after `ack_wait`; a lost nak redelivers the same way.
             eprintln!("nats source: could not settle message: {err}");
         }
-    }
-
-    fn terminate(self: Box<Self>) {
-        self.settle(AckKind::Term);
     }
 }
 

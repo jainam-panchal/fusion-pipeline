@@ -76,6 +76,21 @@ pub enum NatsError {
         /// The server it was looked up on.
         url: String,
     },
+    /// The sink's subject is outside the subjects its stream captures, so publishes would
+    /// never get a `PubAck`.
+    #[error(
+        "stream `{stream}` at {url} does not capture subject `{subject}` (its subjects are {subjects:?})"
+    )]
+    SubjectNotCaptured {
+        /// The sink's stream.
+        stream: String,
+        /// The sink's subject.
+        subject: String,
+        /// What the stream captures instead.
+        subjects: Vec<String>,
+        /// The server the stream lives on.
+        url: String,
+    },
     /// Any other JetStream API failure while setting up.
     #[error("JetStream request failed at {url}: {message}")]
     Request {
@@ -146,16 +161,19 @@ impl Nats {
         self.shutdown.send_replace(true);
     }
 
-    /// Call [`Nats::shutdown`] when the process receives Ctrl-C (SIGINT).
+    /// Call [`Nats::shutdown`] on the first Ctrl-C (SIGINT). A second Ctrl-C exits the
+    /// process at once, since the drain can stall behind a sink that is not answering.
     pub fn shutdown_on_ctrl_c(&self) {
         let shutdown = self.shutdown.clone();
         self.runtime.spawn(async move {
-            match tokio::signal::ctrl_c().await {
-                Ok(()) => {
-                    eprintln!("nats source: stopping on Ctrl-C");
-                    shutdown.send_replace(true);
-                }
-                Err(err) => eprintln!("nats source: cannot listen for Ctrl-C: {err}"),
+            if let Err(err) = tokio::signal::ctrl_c().await {
+                eprintln!("nats source: cannot listen for Ctrl-C: {err}");
+                return;
+            }
+            eprintln!("nats source: stopping on Ctrl-C; press again to exit without draining");
+            shutdown.send_replace(true);
+            if tokio::signal::ctrl_c().await.is_ok() {
+                std::process::exit(130);
             }
         });
     }
@@ -169,10 +187,7 @@ impl Nats {
         let url = config::url_from_env(params.url.as_deref());
         let context = self.connect(&url)?;
         let consumer: PullConsumer = self.runtime.block_on(async {
-            let stream = context
-                .get_stream(&params.stream)
-                .await
-                .map_err(|e| stream_error(e.kind(), &e.to_string(), &params.stream, &url))?;
+            let stream = get_stream(&context, &params.stream, &url).await?;
             // `consumer_info` reports "not found" as a typed kind; `get_consumer` does not.
             stream.consumer_info(&params.consumer).await.map_err(|e| {
                 if matches!(e.kind(), ConsumerInfoErrorKind::NotFound) {
@@ -197,20 +212,31 @@ impl Nats {
         ))
     }
 
-    /// Build the sink for `params`, failing if the server or stream is missing.
+    /// Build the sink for `params`, failing if the server or stream is missing or the stream
+    /// does not capture the subject.
     ///
     /// # Errors
     ///
-    /// [`NatsError::Connect`] or [`NatsError::StreamMissing`].
+    /// [`NatsError::Connect`], [`NatsError::StreamMissing`] or
+    /// [`NatsError::SubjectNotCaptured`].
     pub fn sink(&self, params: &SinkParams) -> Result<NatsSink, NatsError> {
         let url = config::url_from_env(params.url.as_deref());
         let context = self.connect(&url)?;
-        self.runtime.block_on(async {
-            context
-                .get_stream(&params.stream)
-                .await
-                .map_err(|e| stream_error(e.kind(), &e.to_string(), &params.stream, &url))
-        })?;
+        let stream = self
+            .runtime
+            .block_on(get_stream(&context, &params.stream, &url))?;
+        let subjects = &stream.cached_info().config.subjects;
+        if !subjects
+            .iter()
+            .any(|s| subject::captures(s, &params.subject))
+        {
+            return Err(NatsError::SubjectNotCaptured {
+                stream: params.stream.clone(),
+                subject: params.subject.clone(),
+                subjects: subjects.clone(),
+                url,
+            });
+        }
         Ok(NatsSink::new(
             Arc::clone(&self.runtime),
             context,
@@ -249,19 +275,26 @@ impl Nats {
     }
 }
 
-fn stream_error(kind: GetStreamErrorKind, message: &str, stream: &str, url: &str) -> NatsError {
-    match kind {
-        GetStreamErrorKind::JetStream(err) if err.error_code() == ErrorCode::STREAM_NOT_FOUND => {
-            NatsError::StreamMissing {
-                stream: stream.to_owned(),
-                url: url.to_owned(),
+/// Look up `stream`, mapping "not found" to [`NatsError::StreamMissing`].
+async fn get_stream(
+    context: &jetstream::Context,
+    stream: &str,
+    url: &str,
+) -> Result<jetstream::stream::Stream, NatsError> {
+    context
+        .get_stream(stream)
+        .await
+        .map_err(|e| match e.kind() {
+            GetStreamErrorKind::JetStream(err)
+                if err.error_code() == ErrorCode::STREAM_NOT_FOUND =>
+            {
+                NatsError::StreamMissing {
+                    stream: stream.to_owned(),
+                    url: url.to_owned(),
+                }
             }
-        }
-        _ => NatsError::Request {
-            url: url.to_owned(),
-            message: message.to_owned(),
-        },
-    }
+            _ => request_error(url, &e),
+        })
 }
 
 fn request_error(url: &str, err: &dyn std::fmt::Display) -> NatsError {

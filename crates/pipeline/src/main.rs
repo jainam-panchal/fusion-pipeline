@@ -10,22 +10,16 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 const USAGE: &str = "usage: pipelined --config <path>";
 
-fn config_path(args: impl Iterator<Item = String>) -> Result<PathBuf, String> {
-    let mut args = args.peekable();
+fn config_path(mut args: impl Iterator<Item = String>) -> Result<PathBuf, String> {
     let mut path = None;
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--config" | "-c" => {
-                path = Some(
-                    args.next()
-                        .ok_or_else(|| format!("--config needs a path\n{USAGE}"))?,
-                );
-            }
-            other => match other.strip_prefix("--config=") {
-                Some(value) => path = Some(value.to_owned()),
-                None => return Err(format!("unknown argument `{other}`\n{USAGE}")),
-            },
+        if arg != "--config" {
+            return Err(format!("unknown argument `{arg}`\n{USAGE}"));
         }
+        path = Some(
+            args.next()
+                .ok_or_else(|| format!("--config needs a path\n{USAGE}"))?,
+        );
     }
     path.map(PathBuf::from).ok_or_else(|| USAGE.to_owned())
 }

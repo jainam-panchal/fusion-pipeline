@@ -85,6 +85,11 @@ impl Server {
             .expect("stream deleted");
     }
 
+    /// Best-effort cleanup: the stream may already be gone.
+    fn try_delete_stream(&self, name: &str) {
+        let _ = self.rt.block_on(self.js.delete_stream(name));
+    }
+
     fn publish(&self, subject: &str, payload: &str) {
         self.rt
             .block_on(async {
@@ -190,14 +195,8 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = self
-            .server
-            .rt
-            .block_on(self.server.js.delete_stream(&self.in_stream));
-        let _ = self
-            .server
-            .rt
-            .block_on(self.server.js.delete_stream(&self.out_stream));
+        self.server.try_delete_stream(&self.in_stream);
+        self.server.try_delete_stream(&self.out_stream);
     }
 }
 
@@ -238,6 +237,23 @@ fn sink_fails_fast_when_its_stream_is_missing() {
 
     assert!(matches!(err, NatsError::StreamMissing { .. }), "{err}");
     assert!(err.to_string().contains(&params.stream), "{err}");
+}
+
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn sink_fails_fast_when_its_stream_does_not_capture_the_subject() {
+    let f = Fixture::new("capture");
+    let nats = Nats::new().expect("nats runtime");
+    let params = SinkParams {
+        subject: "processed.elsewhere".to_owned(),
+        ..f.sink_params()
+    };
+
+    let err = nats.sink(&params).expect_err("uncaptured subject rejected");
+
+    assert!(matches!(err, NatsError::SubjectNotCaptured { .. }), "{err}");
+    assert!(err.to_string().contains("processed.elsewhere"), "{err}");
+    assert!(err.to_string().contains(&f.out_stream), "{err}");
 }
 
 #[test]
@@ -359,6 +375,50 @@ fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
                 > 0
         }),
         "consumer shows the message redelivered"
+    );
+
+    nats.shutdown();
+    engine.join().expect("clean shutdown");
+}
+
+/// A payload that is not a record is terminated, and the source keeps serving the next one.
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn undecodable_payload_is_terminated_and_the_source_keeps_going() {
+    let f = Fixture::new("garbage");
+    let nats = Nats::new().expect("nats runtime");
+    let sinks = MemorySinks::new();
+    let mut registry = Registry::new();
+    registry.register_sink("sink.memory", sinks.clone());
+    let pipeline = Pipeline::from_yaml("nodes:\n  - id: out\n    type: sink.memory\n", &registry)
+        .expect("pipeline loads");
+    let source = nats.source(&f.source_params()).expect("source builds");
+    let engine = Engine::start(pipeline, Box::new(source), 1).expect("engine starts");
+
+    f.server.publish(&f.in_subject("acme"), "this is not json");
+    f.server.publish(
+        &f.in_subject("acme"),
+        r#"{"id": 44, "body": "after garbage"}"#,
+    );
+
+    assert!(
+        wait_until(WAIT, || !sinks.records("out").is_empty()),
+        "the record after the garbage reaches the sink"
+    );
+    assert_eq!(sinks.records("out")[0].id.map(|id| id.0), Some(44));
+    assert!(
+        wait_until(WAIT, || {
+            let info = f.server.consumer_info(&f.in_stream, &f.consumer);
+            info.num_ack_pending == 0 && info.num_pending == 0
+        }),
+        "both messages are settled"
+    );
+    assert_eq!(
+        f.server
+            .consumer_info(&f.in_stream, &f.consumer)
+            .num_redelivered,
+        0,
+        "the garbage was terminated, not redelivered"
     );
 
     nats.shutdown();
