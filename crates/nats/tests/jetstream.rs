@@ -16,7 +16,7 @@ use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
-use fusion_nats::{Nats, NatsError};
+use fusion_nats::{Nats, NatsError, stamp_ingestion_time};
 use futures::StreamExt;
 
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -132,6 +132,33 @@ impl JetStreamClient {
             consumer.info().await.expect("consumer info").clone()
         })
     }
+}
+
+#[test]
+fn ingestion_time_is_stamped_only_when_the_record_has_no_timestamp_at_all() {
+    let mut bare = Record::from_json(r#"{"id": 1, "body": "x"}"#).expect("parses");
+    stamp_ingestion_time(&mut bare, 1_700_000_000_000_000_000);
+    assert_eq!(
+        bare.observed_time_unix_nano,
+        Some(1_700_000_000_000_000_000)
+    );
+
+    let mut observed = Record::from_json(r#"{"id": 1, "body": "x", "observed_time_unix_nano": 5}"#)
+        .expect("parses");
+    stamp_ingestion_time(&mut observed, 1_700_000_000_000_000_000);
+    assert_eq!(
+        observed.observed_time_unix_nano,
+        Some(5),
+        "its own word stands"
+    );
+
+    let mut event_timed =
+        Record::from_json(r#"{"id": 1, "body": "x", "time_unix_nano": 7}"#).expect("parses");
+    stamp_ingestion_time(&mut event_timed, 1_700_000_000_000_000_000);
+    assert_eq!(
+        event_timed.observed_time_unix_nano, None,
+        "a record with an event time is not given an observed time"
+    );
 }
 
 /// These pipelines have no stateful node; the engine never opens the store.
@@ -373,6 +400,17 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].tenant(), Some("acme"));
     assert_eq!(records[0].id.map(|id| id.0), Some(42));
+    let observed = records[0]
+        .observed_time_unix_nano
+        .expect("observed_time_unix_nano stamped from the JetStream publish time");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    assert!(
+        u128::from(observed) <= now && now - u128::from(observed) < 60_000_000_000,
+        "publish time {observed} is recent"
+    );
 
     assert!(
         wait_until(SETTLE_TIMEOUT, || fixture.consumer_settled()),

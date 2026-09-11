@@ -30,7 +30,7 @@ use tokio::sync::watch;
 
 pub use config::{SinkParams, SourceParams};
 pub use sink::NatsSink;
-pub use source::NatsSource;
+pub use source::{NatsSource, stamp_ingestion_time};
 
 /// Registry type name of the source (`source: {type: nats}`).
 pub const SOURCE_TYPE: &str = "nats";

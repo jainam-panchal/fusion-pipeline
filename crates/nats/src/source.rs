@@ -9,10 +9,15 @@
 //! ```
 //!
 //! Each message is decoded as one JSON record, stamped with the tenant from its subject when
-//! the record carries none, and handed to the engine with an ack handle that acks or naks the
-//! JetStream message. A payload that is not a record is nak'd like any other failure and
-//! reported on stderr; it runs out `max_deliver` the same way a record without an id does,
-//! which is where the dead-letter ticket picks it up.
+//! the record carries none and with the JetStream publish time as `observed_time_unix_nano`
+//! when it carries no timestamp at all, and handed to the engine with an ack handle that acks
+//! or naks the JetStream message. The publish time is the server's and does not change on
+//! redelivery, so stateful stages that measure windows in ingestion time see the same value
+//! every time the record comes back.
+//!
+//! A payload that is not a record is nak'd like any other failure and reported on stderr; it
+//! runs out `max_deliver` the same way a record without an id does, which is where the
+//! dead-letter ticket picks it up.
 //!
 //! Naks carry a delay. When the engine gives none, [`nak_delay`] derives one from the
 //! message's delivery count: 1s on the first failure, doubling to [`MAX_NAK_DELAY`], so a
@@ -97,18 +102,21 @@ impl NatsSource {
                 }
                 None => return Ok(()),
             };
-            let delivered = message
-                .info()
-                .ok()
+            let info = message.info().ok();
+            let delivered = info
+                .as_ref()
                 .and_then(|info| u64::try_from(info.delivered).ok())
                 .unwrap_or(1);
+            let published = info
+                .as_ref()
+                .and_then(|info| u64::try_from(info.published.unix_timestamp_nanos()).ok());
             let (message, acker) = message.split();
             let subject_tenant = tenant_from_subject(&message.subject);
             let tenant = subject_tenant.unwrap_or(Metrics::UNKNOWN_TENANT);
             if delivered > 1 {
                 self.metrics.source_redelivery(tenant);
             }
-            let record = match decode(subject_tenant, &message.payload) {
+            let record = match decode(subject_tenant, published, &message.payload) {
                 Ok(record) => record,
                 Err(err) => {
                     eprintln!(
@@ -137,13 +145,31 @@ impl NatsSource {
     }
 }
 
-/// Decode one record, stamping `tenant` (from the subject) when the record carries none.
-fn decode(tenant: Option<&str>, payload: &[u8]) -> Result<Record, serde_json::Error> {
+/// Decode one record, stamping `tenant` (from the subject) when the record carries none and
+/// `published` (the JetStream publish time) when it carries no timestamp.
+fn decode(
+    tenant: Option<&str>,
+    published: Option<u64>,
+    payload: &[u8],
+) -> Result<Record, serde_json::Error> {
     let mut record: Record = serde_json::from_slice(payload)?;
     if let Some(tenant) = tenant {
         stamp_tenant(&mut record, tenant);
     }
+    if let Some(published) = published {
+        stamp_ingestion_time(&mut record, published);
+    }
     Ok(record)
+}
+
+/// Set `observed_time_unix_nano` to `published_unix_nanos` when the record has neither
+/// `observed_time_unix_nano` nor `time_unix_nano`. A record that says when it was observed
+/// or when it happened keeps its own word; only a record with no notion of time gets the
+/// server's.
+pub fn stamp_ingestion_time(record: &mut Record, published_unix_nanos: u64) {
+    if record.observed_time_unix_nano.is_none() && record.time_unix_nano.is_none() {
+        record.observed_time_unix_nano = Some(published_unix_nanos);
+    }
 }
 
 impl Source for NatsSource {
