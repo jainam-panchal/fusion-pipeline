@@ -11,7 +11,7 @@ use async_nats::jetstream::consumer::{AckPolicy, pull};
 use async_nats::jetstream::{self, stream};
 use fusion_core::engine::Engine;
 use fusion_core::memory::MemorySinks;
-use fusion_core::metrics::Metrics;
+use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
@@ -217,7 +217,7 @@ impl Drop for Fixture {
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn sink_write_returns_once_the_record_is_in_the_stream() {
     let fixture = Fixture::new("sink");
-    let nats = Nats::new().expect("nats runtime");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
     let sink = nats.sink(&fixture.sink_params()).expect("sink builds");
     let record = Record::from_json(r#"{"id": 7, "body": "hello"}"#).expect("record parses");
 
@@ -236,7 +236,7 @@ fn sink_write_returns_once_the_record_is_in_the_stream() {
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn sink_fails_fast_when_its_stream_is_missing() {
-    let nats = Nats::new().expect("nats runtime");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
     let params = SinkParams {
         url: Some(url()),
         stream: unique("MISSING"),
@@ -253,7 +253,7 @@ fn sink_fails_fast_when_its_stream_is_missing() {
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn sink_fails_fast_when_its_stream_does_not_capture_the_subject() {
     let fixture = Fixture::new("capture");
-    let nats = Nats::new().expect("nats runtime");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
     let params = SinkParams {
         subject: "processed.elsewhere".to_owned(),
         ..fixture.sink_params()
@@ -270,7 +270,7 @@ fn sink_fails_fast_when_its_stream_does_not_capture_the_subject() {
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn source_fails_fast_when_stream_or_consumer_is_missing() {
     let fixture = Fixture::new("src_missing");
-    let nats = Nats::new().expect("nats runtime");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
 
     let no_stream = SourceParams {
         stream: unique("MISSING"),
@@ -297,7 +297,7 @@ fn source_fails_fast_when_stream_or_consumer_is_missing() {
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn source_fails_fast_when_the_consumer_does_not_ack_explicitly() {
     let fixture = Fixture::new("ackpolicy");
-    let nats = Nats::new().expect("nats runtime");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
     let input = fixture
         .client
         .rt
@@ -324,7 +324,7 @@ fn source_fails_fast_when_the_consumer_does_not_ack_explicitly() {
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn connect_fails_fast_when_the_server_is_unreachable() {
-    let nats = Nats::new().expect("nats runtime");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
     let params = SinkParams {
         url: Some("nats://127.0.0.1:1".to_owned()),
         stream: "PROCESSED".to_owned(),
@@ -343,7 +343,7 @@ fn connect_fails_fast_when_the_server_is_unreachable() {
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
     let fixture = Fixture::new("src");
-    let nats = Nats::new().expect("nats runtime");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
     let sinks = MemorySinks::new();
     let mut registry = Registry::new();
     registry.register_sink("sink.memory", sinks.clone());
@@ -380,12 +380,14 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
 }
 
 /// Source into the NATS sink whose stream has been deleted: the write fails, the record is
-/// nak'd, and JetStream redelivers it.
+/// nak'd, JetStream redelivers it, and the redelivery is counted for the record's tenant.
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
     let fixture = Fixture::new("nak");
-    let nats = std::sync::Arc::new(Nats::new().expect("nats runtime"));
+    let recorder = InMemoryRecorder::new();
+    let metrics = Metrics::new(recorder.clone());
+    let nats = std::sync::Arc::new(Nats::new(metrics.clone()).expect("nats runtime"));
     let mut registry = Registry::new();
     nats.register(&mut registry);
     let yaml = format!(
@@ -398,8 +400,7 @@ fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
     let source = nats
         .source(&fixture.source_params())
         .expect("source builds");
-    let engine =
-        Engine::start(pipeline, Box::new(source), 1, Metrics::noop()).expect("engine starts");
+    let engine = Engine::start(pipeline, Box::new(source), 1, metrics).expect("engine starts");
 
     fixture.client.delete_stream(&fixture.out_stream);
     fixture.client.publish(
@@ -417,6 +418,16 @@ fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
         }),
         "consumer shows the message redelivered"
     );
+    assert!(
+        wait_until(SETTLE_TIMEOUT, || {
+            recorder.counter(Metric::SourceRedeliveries, &[("tenant", "acme")]) > 0
+        }),
+        "the source counted the redelivery for tenant acme"
+    );
+    assert!(
+        recorder.counter(Metric::SourceNaks, &[("tenant", "acme")]) > 0,
+        "the engine counted the nak"
+    );
 
     nats.shutdown();
     engine.join().expect("clean shutdown");
@@ -428,7 +439,7 @@ fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn undecodable_payload_is_nakd_and_the_source_keeps_going() {
     let fixture = Fixture::new("garbage");
-    let nats = Nats::new().expect("nats runtime");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
     let sinks = MemorySinks::new();
     let mut registry = Registry::new();
     registry.register_sink("sink.memory", sinks.clone());

@@ -96,7 +96,8 @@ pub fn run(path: &Path) -> Result<(), StartError> {
     let config = Config::from_yaml(&yaml)?;
     let source_config = config.source.as_ref().ok_or(StartError::NoSource)?;
 
-    let nats = Arc::new(Nats::new()?);
+    let metrics = Metrics::noop();
+    let nats = Arc::new(Nats::new(metrics.clone())?);
     let mut registry = default_registry();
     nats.register(&mut registry);
 
@@ -105,7 +106,7 @@ pub fn run(path: &Path) -> Result<(), StartError> {
     let workers = pipeline.worker_count();
 
     stop_on_ctrl_c(Arc::clone(&nats))?;
-    let engine = Engine::start(pipeline, source, workers, Metrics::noop())?;
+    let engine = Engine::start(pipeline, source, workers, metrics)?;
     eprintln!("pipelined: running with {workers} workers; Ctrl-C to stop");
     engine.join()?;
     Ok(())
