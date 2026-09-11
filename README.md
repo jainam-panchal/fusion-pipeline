@@ -85,7 +85,7 @@ resource, so `--scale pipeline=3` gives three series that the dashboard sums. NA
 (`jetstream_consumer_*` for pending, redelivered and ack floor), Dragonfly at
 `:6379/metrics`. Each process reports its own CPU and memory: the pipeline exports OTel's
 `process.cpu.time`, `process.memory.usage` and `process.thread.count`, NATS its `varz`,
-Dragonfly its own metrics. `deploy/nats-smoke.sh` runs its own `pipelined` on the host and
+Dragonfly its own metrics (ADR 0003 says why not cAdvisor). `deploy/nats-smoke.sh` runs its own `pipelined` on the host and
 stops the compose one first.
 
 The dashboard is timeseries only, no stat tiles: an Overview row (throughput, latency, backlog,

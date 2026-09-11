@@ -4,11 +4,11 @@
 # Brings up deploy/compose.yaml (pipeline included), drives traffic through it, and checks:
 #   1. every scrape target is up: the collector (pipeline metrics), NATS via
 #      prometheus-nats-exporter, Dragonfly, and the collector's self-metrics;
-#   2. after 1,000 records, one TRACE record the filter drops, one record without an id and
-#      one sink failure, every metric the spec's Telemetry section names is in Prometheus,
-#      with the labels the spec gives it;
-#   3. the `reason` values seen on records_dropped_total are within the spec's closed set;
-#   4. the NATS exporter reports JetStream consumer pending, redelivered and ack floor;
+#   2. traffic: 1,000 records, one TRACE record the filter drops, one record without an id
+#      and one sink failure;
+#   3. every metric with a producer is in Prometheus with the labels the spec gives it;
+#   4. the `reason` values seen on records_dropped_total are within the spec's closed set;
+#   5. the NATS exporter reports JetStream consumer pending, redelivered and ack floor;
 #   6. every pipeline series carries the instance id, and the pipeline, NATS and Dragonfly
 #      each report their own CPU and resident memory;
 #   7. Grafana serves the provisioned internal dashboard.
@@ -98,7 +98,8 @@ SPEC_METRICS=(
     'pipeline_end_to_end_seconds_bucket{tenant="acme"}'
 )
 # Named in the spec, emitted by stages that do not exist yet (#6 state store, #8 Lua,
-# #10 dead-letter queue). Reported, not required, until their tickets land.
+# #10 dead-letter queue). Reported, not required, until their tickets land. Likewise the
+# `regex_limit` drop reason has no producer until the regex stages (#5).
 PENDING_METRICS=(
     state_ops_total state_op_duration_seconds_bucket state_errors_total
     lua_errors_total dlq_total
