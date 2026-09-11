@@ -350,14 +350,12 @@ fn lex_path_rest(expr: &str, start: usize, mut i: usize) -> Result<usize, Condit
                 }
             }
             b'[' => {
+                // Old bracket syntax: take the whole bracket, quotes honoured, so the path
+                // parser reports it with a dotted hint. An unclosed quote runs to the end.
                 i += 1;
                 while i < bytes.len() && bytes[i] != b']' {
                     i = match bytes[i] {
-                        b'"' => quoted_end(expr, i).unwrap_or(bytes.len()),
-                        b'\'' => {
-                            let (_, end) = lex_string(expr, i)?;
-                            end
-                        }
+                        b'"' | b'\'' => quoted_end(expr, i).unwrap_or(bytes.len()),
                         _ => i + 1,
                     };
                 }

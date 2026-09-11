@@ -430,6 +430,11 @@ fn bracket_hints_unquote_each_part_before_rebuilding() {
         (r#"attributes["a\"b"]"#, r#"attributes."a\"b""#),
         (r#"attributes['x y']"#, r#"attributes."x y""#),
         (r#"resource["service"]["name"]"#, "resource.service.name"),
+        (r#"attributes["a[0]"]"#, r#"attributes."a[0]""#),
+        (r#"attributes["a]b"]"#, r#"attributes."a]b""#),
+        (r#"attributes['a]b'].c"#, r#"attributes."a]b".c"#),
+        (r#"attributes["open"#, "attributes.open"),
+        (r#"attributes['a == 1"#, r#"attributes."a == 1""#),
     ];
     for (bad, hint) in cases {
         let err = FieldPath::parse(bad).expect_err(bad);
@@ -455,4 +460,25 @@ fn display_round_trips_keys_with_empty_dot_parts() {
         let again = FieldPath::parse(&shown).unwrap_or_else(|e| panic!("{text} -> {shown}: {e}"));
         assert_eq!(again.map_key(), Some(key), "{text} -> {shown}");
     }
+}
+
+#[test]
+fn empty_brackets_hint_the_shape_of_a_key() {
+    for bad in [
+        "attributes[]",
+        r#"attributes[""]"#,
+        "attributes['']",
+        "attributes[][]",
+    ] {
+        let err = FieldPath::parse(bad).expect_err(bad);
+        let PathError::BracketSyntax { instead } = &err else {
+            panic!("{bad}: unexpected {err}");
+        };
+        assert_eq!(instead, "attributes.<key>", "{bad}: {err}");
+    }
+    let err = FieldPath::parse("body[]").expect_err("body[]");
+    assert!(
+        matches!(err, PathError::BracketSyntax { ref instead } if instead == "body"),
+        "{err}"
+    );
 }

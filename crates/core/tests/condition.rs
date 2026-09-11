@@ -272,3 +272,17 @@ fn text_glued_to_a_closing_quote_is_the_path_error_with_a_hint() {
         "{err}"
     );
 }
+
+#[test]
+fn unterminated_quote_inside_a_bracket_is_the_bracket_error_for_both_quote_kinds() {
+    for (expr, hint) in [
+        (r#"attributes['a == 1"#, r#"attributes."a == 1""#),
+        (r#"attributes["a == 1"#, r#"attributes."a == 1""#),
+    ] {
+        let err = Condition::parse(expr).expect_err(expr);
+        assert!(
+            matches!(err, ConditionError::Field { offset: 0, ref source } if matches!(source, PathError::BracketSyntax { instead } if instead == hint)),
+            "{expr}: {err}"
+        );
+    }
+}

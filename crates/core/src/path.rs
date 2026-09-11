@@ -301,29 +301,74 @@ fn display_segment(segment: &str) -> String {
 }
 
 /// `attributes["http.status"]["a b"]` as `attributes.http.status."a b"`, for the bracket
-/// error's hint. Each bracket part is unquoted before the dotted form is rebuilt.
+/// error's hint. The scan honours quotes, so `["a[0]"]` and `['a]b']` name the key the user
+/// wrote; an unclosed quote runs to the end of the path. The hint is a valid path whenever
+/// the input named a key; an empty bracket on a map hints `<map>.<key>`.
 fn unbracket(path: &str) -> String {
     let mut segments: Vec<String> = Vec::new();
-    for part in path.split(['[', ']']) {
-        for piece in dotted_pieces(part) {
-            segments.push(display_segment(&piece));
+    let mut i = 0;
+    while i < path.len() {
+        let rest = &path[i..];
+        if let Some(inner) = rest.strip_prefix('[') {
+            let (inner, consumed) = bracket_contents(inner);
+            i += 1 + consumed;
+            segments.extend(bracket_pieces(inner));
+        } else if rest.starts_with(']') {
+            i += 1;
+        } else {
+            let end = rest.find(['[', ']']).unwrap_or(rest.len());
+            segments.extend(dotted_pieces(&rest[..end]));
+            i += end;
         }
     }
-    segments.join(".")
+    let mut out: Vec<String> = segments.iter().map(|s| display_segment(s)).collect();
+    if out.len() == 1 && Root::parse(&out[0]).is_some_and(|root| matches!(root, Root::Map(_))) {
+        out.push("<key>".to_owned());
+    }
+    out.join(".")
 }
 
-/// The pieces of one bracket part: unquoted and unescaped, then split on dots, since a
-/// bracketed dotted key and dotted segments name the same flat key. Empty pieces are
+/// The text inside a bracket that opens just before `text`, and how many bytes of `text` it
+/// and the closing `]` take. Quotes are honoured; an unclosed quote or bracket runs to the
+/// end.
+fn bracket_contents(text: &str) -> (&str, usize) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => match quoted_end(text, i) {
+                Some(end) => i = end,
+                None => return (text, text.len()),
+            },
+            b']' => return (&text[..i], i + 1),
+            _ => i += 1,
+        }
+    }
+    (text, text.len())
+}
+
+/// The pieces one bracket's contents name: a quoted part is unescaped, then split on dots
+/// since `["http.status"]` and `.http.status` name the same flat key. Empty pieces are
+/// dropped.
+fn bracket_pieces(inner: &str) -> Vec<String> {
+    let inner = inner.trim();
+    let unquoted = match inner.chars().next() {
+        Some(quote @ ('"' | '\'')) => {
+            let body = &inner[1..];
+            unescape(body.strip_suffix(quote).unwrap_or(body))
+        }
+        _ => inner.to_owned(),
+    };
+    unquoted
+        .split('.')
+        .filter(|piece| !piece.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The pieces of dotted text outside brackets, each bare or `"`-quoted. Empty pieces are
 /// dropped.
 fn dotted_pieces(part: &str) -> Vec<String> {
-    if let Some(inner) = strip_quotes(part) {
-        // `["http.status"]` and `.http.status` name the same flat key.
-        return unescape(inner)
-            .split('.')
-            .filter(|piece| !piece.is_empty())
-            .map(str::to_owned)
-            .collect();
-    }
     let mut pieces = Vec::new();
     let mut rest = part;
     while !rest.is_empty() {
@@ -349,12 +394,6 @@ fn dotted_pieces(part: &str) -> Vec<String> {
     pieces
 }
 
-/// The inside of a part wrapped whole in matching `"` or `'` quotes.
-fn strip_quotes(part: &str) -> Option<&str> {
-    let quote = part.chars().next().filter(|c| matches!(c, '"' | '\''))?;
-    part.strip_prefix(quote)?.strip_suffix(quote)
-}
-
 /// Drop the backslash from every `\x`, for hints built from old bracket text.
 fn unescape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -372,17 +411,18 @@ fn unescape(text: &str) -> String {
     out
 }
 
-/// From the opening `"` at `start`, the offset just past the closing `"`, skipping
-/// backslash-escaped characters. `None` when the quote is never closed. The condition lexer
-/// uses this too, so both sides agree on where a quoted segment ends.
+/// From the opening quote at `start` (`"` or `'`), the offset just past the matching closing
+/// quote, skipping backslash-escaped characters. `None` when the quote is never closed. The
+/// condition lexer uses this too, so both sides agree on where a quoted segment ends.
 #[must_use]
 pub fn quoted_end(text: &str, start: usize) -> Option<usize> {
     let bytes = text.as_bytes();
+    let quote = *bytes.get(start)?;
     let mut i = start + 1;
     while i < bytes.len() {
         match bytes[i] {
             b'\\' => i += 2,
-            b'"' => return Some(i + 1),
+            b if b == quote => return Some(i + 1),
             _ => i += 1,
         }
     }
