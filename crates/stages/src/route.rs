@@ -1,13 +1,5 @@
 //! `route`: send a record down the first label whose condition matches, else the default.
-//!
-//! ```yaml
-//! - id: by_format
-//!   type: route
-//!   routes:                     # ordered; first match wins
-//!     linux: resource["log.format"] == "Linux"
-//!     apache: resource["log.format"] == "Apache"
-//!   default: other              # a label, or `drop`
-//! ```
+//! The README's "Routing" section has the config example.
 //!
 //! The declaration is parsed by [`fusion_core::route::RouteSpec`], which the graph validator
 //! also uses to check that every label has a consumer.
@@ -20,10 +12,17 @@ use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 
 use crate::condition::parse_condition;
 
+/// A compiled rule: the label and the condition that selects it.
+#[derive(Debug)]
+struct Rule {
+    label: String,
+    condition: Condition,
+}
+
 /// The `route` stage.
 #[derive(Debug)]
 pub struct Route {
-    routes: Vec<(String, Condition)>,
+    routes: Vec<Rule>,
     fallback: Fallback,
 }
 
@@ -40,9 +39,11 @@ impl Route {
         let routes = spec
             .routes()
             .iter()
-            .map(|(label, source)| {
-                let condition = parse_condition(node, source, &format!("route `{label}`"))?;
-                Ok((label.clone(), condition))
+            .map(|rule| {
+                let label = rule.label.clone();
+                let condition =
+                    parse_condition(node, &rule.condition, &format!("route `{label}`"))?;
+                Ok(Rule { label, condition })
             })
             .collect::<Result<Vec<_>, ConfigError>>()?;
         Ok(Self {
@@ -63,9 +64,9 @@ impl Route {
 
 impl Stage for Route {
     fn process(&self, record: Record, _ctx: &Context<'_>) -> StageOutput {
-        for (label, condition) in &self.routes {
-            if condition.matches(&record) {
-                return StageOutput::Routed(label.clone(), record);
+        for rule in &self.routes {
+            if rule.condition.matches(&record) {
+                return StageOutput::Routed(rule.label.clone(), record);
             }
         }
         match &self.fallback {

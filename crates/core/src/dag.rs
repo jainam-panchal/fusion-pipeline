@@ -45,8 +45,6 @@ pub struct Dag {
     source_successors: Vec<NodeIndex>,
     /// Successor ids keyed by node id, including `source`, for callers that speak in ids.
     successor_ids: BTreeMap<String, Vec<String>>,
-    /// Node index keyed by id.
-    by_id: BTreeMap<String, NodeIndex>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -101,7 +99,8 @@ impl Dag {
             .map(|(i, n)| (n.id.as_str(), i))
             .collect();
 
-        // Route declarations, parsed once here so label checks and the stage agree.
+        // Route declarations. The stage parses its own node again at registry build; both
+        // go through `RouteSpec::from_node`, so the labels checked here are the labels emitted.
         let mut routes: BTreeMap<usize, RouteSpec> = BTreeMap::new();
         for (i, node) in file_order.iter().enumerate() {
             if node.kind == ROUTE_KIND {
@@ -109,25 +108,30 @@ impl Dag {
             }
         }
 
-        // Data-flow edges in file order of the consumer. Sinks emit nothing.
-        let mut succ: Vec<Vec<(usize, Option<String>)>> = vec![Vec::new(); file_order.len()];
+        // Data-flow edges in file order of the consumer. Until the topological remap below,
+        // `Edge::target` holds a file-order position, not a final `NodeIndex`. Sinks emit
+        // nothing.
+        let mut succ: Vec<Vec<Edge>> = vec![Vec::new(); file_order.len()];
         let mut source_succ = Vec::new();
         let mut consumed: BTreeSet<(usize, &str)> = BTreeSet::new();
         for (i, node) in file_order.iter().enumerate() {
             for entry in &node.from {
                 let from = parse_from(entry);
-                if from.target == SOURCE_ID {
-                    source_succ.push(i);
-                    continue;
-                }
-                let Some(&t) = position.get(from.target) else {
-                    return Err(ConfigError::UnknownFrom {
-                        node: node.id.clone(),
-                        target: entry.clone(),
-                    });
+                // `None` is the implicit source, which is not a route and has no position.
+                let target = if from.target == SOURCE_ID {
+                    None
+                } else {
+                    let t = position
+                        .get(from.target)
+                        .ok_or_else(|| ConfigError::UnknownFrom {
+                            node: node.id.clone(),
+                            target: entry.clone(),
+                        })?;
+                    Some(*t)
                 };
-                match (routes.get(&t), from.label) {
-                    (Some(spec), Some(label)) => {
+                let route = target.and_then(|t| routes.get(&t).map(|spec| (t, spec)));
+                match (route, from.label) {
+                    (Some((t, spec)), Some(label)) => {
                         if !spec.labels().any(|l| l == label) {
                             return Err(ConfigError::UnknownRouteLabel {
                                 node: node.id.clone(),
@@ -152,8 +156,15 @@ impl Dag {
                     }
                     (None, None) => {}
                 }
+                let Some(t) = target else {
+                    source_succ.push(i);
+                    continue;
+                };
                 if !file_order[t].is_sink() {
-                    succ[t].push((i, from.label.map(str::to_owned)));
+                    succ[t].push(Edge {
+                        target: NodeIndex(i),
+                        label: from.label.map(str::to_owned),
+                    });
                 }
             }
         }
@@ -167,18 +178,13 @@ impl Dag {
             }
         }
 
-        let plain_succ: Vec<Vec<usize>> = succ
-            .iter()
-            .map(|edges| edges.iter().map(|(s, _)| *s).collect())
-            .collect();
-
         let mut reachable = vec![false; file_order.len()];
         let mut stack: Vec<usize> = source_succ.clone();
         while let Some(i) = stack.pop() {
             if std::mem::replace(&mut reachable[i], true) {
                 continue;
             }
-            stack.extend(plain_succ[i].iter().copied());
+            stack.extend(succ[i].iter().map(|e| e.target.0));
         }
         if let Some(i) = reachable.iter().position(|r| !r) {
             return Err(ConfigError::Unreachable {
@@ -191,10 +197,8 @@ impl Dag {
         let mut marks = vec![Mark::Unvisited; file_order.len()];
         let mut post_order = Vec::with_capacity(file_order.len());
         for &start in &source_succ {
-            visit(start, &plain_succ, &mut marks, &mut post_order).map_err(|i| {
-                ConfigError::Cycle {
-                    node: file_order[i].id.clone(),
-                }
+            visit(start, &succ, &mut marks, &mut post_order).map_err(|i| ConfigError::Cycle {
+                node: file_order[i].id.clone(),
             })?;
         }
         post_order.reverse();
@@ -213,9 +217,9 @@ impl Dag {
             .map(|&old| {
                 succ[old]
                     .iter()
-                    .map(|(s, label)| Edge {
-                        target: new_index[*s],
-                        label: label.clone(),
+                    .map(|e| Edge {
+                        target: new_index[e.target.0],
+                        label: e.label.clone(),
                     })
                     .collect()
             })
@@ -236,18 +240,12 @@ impl Dag {
             })
             .collect();
         successor_ids.insert(SOURCE_ID.to_owned(), ids(&source_successors));
-        let by_id = nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.id.clone(), NodeIndex(i)))
-            .collect();
 
         Ok(Self {
             nodes,
             edges,
             source_successors,
             successor_ids,
-            by_id,
         })
     }
 
@@ -266,7 +264,7 @@ impl Dag {
     /// The index of the node with id `id`, if any.
     #[must_use]
     pub fn index_of(&self, id: &str) -> Option<NodeIndex> {
-        self.by_id.get(id).copied()
+        self.nodes.iter().position(|n| n.id == id).map(NodeIndex)
     }
 
     /// Ids of the nodes that read from `id` (`source` included). Empty for sinks and unknown ids.
@@ -281,6 +279,19 @@ impl Dag {
         &self.edges[index.0]
     }
 
+    /// The nodes that read from `index`: with `label`, only those subscribed to that route
+    /// label; without, every consumer whatever it subscribed to.
+    pub fn consumers<'a>(
+        &'a self,
+        index: NodeIndex,
+        label: Option<&'a str>,
+    ) -> impl Iterator<Item = NodeIndex> + 'a {
+        self.edges[index.0]
+            .iter()
+            .filter(move |e| label.is_none_or(|l| e.label.as_deref() == Some(l)))
+            .map(|e| e.target)
+    }
+
     /// Indices of the nodes that read from `source`.
     #[must_use]
     pub fn source_successors(&self) -> &[NodeIndex] {
@@ -291,7 +302,7 @@ impl Dag {
 /// Iterative DFS. On a back edge returns the index of the node it points at.
 fn visit(
     start: usize,
-    succ: &[Vec<usize>],
+    succ: &[Vec<Edge>],
     marks: &mut [Mark],
     post_order: &mut Vec<usize>,
 ) -> Result<(), usize> {
@@ -301,7 +312,7 @@ fn visit(
     marks[start] = Mark::InProgress;
     let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
     while let Some(&mut (node, ref mut next)) = stack.last_mut() {
-        if let Some(&child) = succ[node].get(*next) {
+        if let Some(child) = succ[node].get(*next).map(|e| e.target.0) {
             *next += 1;
             match marks[child] {
                 Mark::InProgress => return Err(child),

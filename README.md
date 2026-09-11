@@ -80,6 +80,8 @@ nodes:
     subject: processed.logs
 ```
 
+## Routing
+
 A `route` node has named outputs. Consumers read `<route>.<label>`; two nodes naming the
 same label fan out, and a node with `from: [a, b]` fans in. Every declared label, the default
 included, must have a consumer, or the config is rejected at load. The source message is

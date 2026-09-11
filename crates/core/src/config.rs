@@ -77,7 +77,7 @@ pub enum ConfigError {
     },
     /// A route declares a label (or a default label) that no node reads from.
     #[error(
-        "route `{route}` label `{label}` is never consumed; read from `{route}.{label}` or remove it"
+        "route `{route}` label `{label}` is never consumed; add a node with `from: {route}.{label}`, remove the rule, or if it is only the default use `default: drop`"
     )]
     UnconsumedRouteLabel {
         /// The route node.

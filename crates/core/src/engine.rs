@@ -5,12 +5,17 @@
 //! source message is acknowledged once all branches have ended without failure and
 //! negatively acknowledged otherwise. Because a worker walks the graph synchronously, the
 //! outstanding-branch count is the recursion itself: every branch runs to its end even after
-//! one has failed, so the nak fires once all of them have finished, as the spec asks.
+//! one has failed, so the nak fires once all of them have finished, as the spec asks. The
+//! one exception is a panic, which unwinds past the remaining branches; the record is still
+//! nakked, so the outcome is safe.
 //!
 //! Records are copy-on-write across branches: a fan-out hands every branch the same
 //! `Arc<Record>`. A sink reads through the shared pointer; a stage takes ownership, which
 //! copies only while another branch still holds the record. A mutation on one branch is
-//! therefore never visible on another.
+//! therefore never visible on another. The copy is per stage, not per mutation: a stage that
+//! would not have mutated the record still copies while a sibling holds it. Branches run in
+//! file order of the consumers, so with a sink and a stage on one label, listing the sink
+//! first means no copy at all.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
@@ -210,25 +215,6 @@ impl Walker<'_> {
         }
     }
 
-    /// Every consumer of `index`, whatever label it subscribed to.
-    fn all_successors(&self, index: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
-        self.pipeline.dag().edges(index).iter().map(|e| e.target)
-    }
-
-    /// The consumers of `index` that subscribed to `label`.
-    fn labelled_successors<'a>(
-        &'a self,
-        index: NodeIndex,
-        label: &'a str,
-    ) -> impl Iterator<Item = NodeIndex> + 'a {
-        self.pipeline
-            .dag()
-            .edges(index)
-            .iter()
-            .filter(move |e| e.label.as_deref() == Some(label))
-            .map(|e| e.target)
-    }
-
     fn run_node(&self, index: NodeIndex, record: Arc<Record>, walk: &mut Walk) {
         let dag = self.pipeline.dag();
         let node_id = dag.node(index).id.as_str();
@@ -247,16 +233,16 @@ impl Walker<'_> {
                 let owned = Arc::unwrap_or_clone(record);
                 match stage.process(owned, &ctx) {
                     StageOutput::Pass(record) => {
-                        self.fan_out(self.all_successors(index), Arc::new(record), walk);
+                        self.fan_out(dag.consumers(index, None), Arc::new(record), walk);
                     }
                     StageOutput::Split(records) => {
                         for record in records {
-                            self.fan_out(self.all_successors(index), Arc::new(record), walk);
+                            self.fan_out(dag.consumers(index, None), Arc::new(record), walk);
                         }
                     }
                     StageOutput::Drop(_reason) => {}
                     StageOutput::Routed(label, record) => {
-                        let mut targets = self.labelled_successors(index, &label).peekable();
+                        let mut targets = dag.consumers(index, Some(&label)).peekable();
                         if targets.peek().is_none() {
                             // Load validation guarantees every declared label a consumer, so
                             // this is a stage emitting a label it never declared.

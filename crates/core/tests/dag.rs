@@ -285,3 +285,23 @@ fn route_label_named_drop_is_rejected() {
         "{err}"
     );
 }
+
+#[test]
+fn reading_a_label_from_source_is_rejected() {
+    let yaml = r#"
+nodes:
+  - id: keep_errors
+    type: filter
+    from: source.anything
+  - id: out
+    type: sink.memory
+"#;
+
+    let err = dag(yaml).expect_err("source is not a route");
+
+    assert!(
+        matches!(err, ConfigError::NotARoute { ref node, ref target, ref label }
+            if node == "keep_errors" && target == "source" && label == "anything"),
+        "{err}"
+    );
+}

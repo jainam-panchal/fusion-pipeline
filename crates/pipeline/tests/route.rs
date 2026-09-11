@@ -233,6 +233,42 @@ nodes:
 }
 
 #[test]
+fn fan_in_node_receives_records_from_every_labelled_input() {
+    // The README's shape: one node reading two labels of the same route.
+    let yaml = r#"
+nodes:
+  - id: by_format
+    type: route
+    routes:
+      linux: resource["log.format"] == "Linux"
+      apache: resource["log.format"] == "Apache"
+    default: other
+  - id: linux_out
+    type: sink.memory
+    from: by_format.linux
+  - id: rest
+    type: sink.memory
+    from: [by_format.apache, by_format.other]
+"#;
+    for_each_worker_count(|workers| {
+        let h = start(yaml, workers);
+
+        let probes = [
+            h.source.push(record(1, "Linux")),
+            h.source.push(record(2, "Apache")),
+            h.source.push(record(3, "Mac")),
+        ];
+
+        for probe in &probes {
+            assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
+        }
+        assert_eq!(h.ids("linux_out"), [1], "workers={workers}");
+        assert_eq!(h.ids("rest"), [2, 3], "workers={workers}");
+        h.finish();
+    });
+}
+
+#[test]
 fn mutation_on_one_branch_is_not_visible_on_the_other() {
     // `touch` runs first in file order, while the other branch still shares the record.
     let yaml = r#"

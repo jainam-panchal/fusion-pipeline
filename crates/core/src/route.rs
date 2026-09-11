@@ -1,16 +1,5 @@
 //! The `route` node's declared outputs: ordered labelled conditions plus a required default.
-//!
-//! ```yaml
-//! - id: by_format
-//!   type: route
-//!   routes:                     # ordered; first match wins
-//!     linux: resource["log.format"] == "Linux"
-//!     apache: resource["log.format"] == "Apache"
-//!   default: other              # a label, or `drop`
-//! - id: linux_parse
-//!   type: pcre2_extract
-//!   from: by_format.linux       # downstream nodes name `<route>.<label>`
-//! ```
+//! The README's "Routing" section has the config example.
 //!
 //! This module owns the config shape so that graph validation (every label consumed) and the
 //! stage that evaluates the conditions read the same declaration.
@@ -35,10 +24,19 @@ pub enum Fallback {
     Drop,
 }
 
-/// A route node's declaration: `(label, condition source)` pairs in file order and the default.
+/// One entry of `routes`: the label and the condition source that selects it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteRule {
+    /// The output label.
+    pub label: String,
+    /// The condition source text, compiled by the stage.
+    pub condition: String,
+}
+
+/// A route node's declaration: rules in file order and the default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteSpec {
-    routes: Vec<(String, String)>,
+    routes: Vec<RouteRule>,
     fallback: Fallback,
 }
 
@@ -76,7 +74,10 @@ impl RouteSpec {
                     node.invalid_params(format!("route `{label}` must map to a condition string"))
                 );
             };
-            routes.push((label.to_owned(), condition.to_owned()));
+            routes.push(RouteRule {
+                label: label.to_owned(),
+                condition: condition.to_owned(),
+            });
         }
         let fallback = if params.default == DROP {
             Fallback::Drop
@@ -86,9 +87,9 @@ impl RouteSpec {
         Ok(Self { routes, fallback })
     }
 
-    /// `(label, condition source)` pairs in declaration order.
+    /// The rules in declaration order.
     #[must_use]
-    pub fn routes(&self) -> &[(String, String)] {
+    pub fn routes(&self) -> &[RouteRule] {
         &self.routes
     }
 
@@ -102,14 +103,11 @@ impl RouteSpec {
     /// default label if it is not already one of them.
     pub fn labels(&self) -> impl Iterator<Item = &str> {
         let default = match &self.fallback {
-            Fallback::Label(label) if !self.routes.iter().any(|(l, _)| l == label) => {
+            Fallback::Label(label) if !self.routes.iter().any(|r| &r.label == label) => {
                 Some(label.as_str())
             }
             _ => None,
         };
-        self.routes
-            .iter()
-            .map(|(label, _)| label.as_str())
-            .chain(default)
+        self.routes.iter().map(|r| r.label.as_str()).chain(default)
     }
 }
