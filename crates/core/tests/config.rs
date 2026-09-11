@@ -105,3 +105,40 @@ nodes:
         "{err}"
     );
 }
+
+#[test]
+fn source_block_loads_with_its_type_and_params() {
+    let yaml = r#"
+source:
+  type: nats
+  url: nats://localhost:4222
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: out
+    type: sink.memory
+"#;
+
+    let config = Config::from_yaml(yaml).expect("config loads");
+
+    let source = config.source.expect("source block present");
+    assert_eq!(source.kind, "nats");
+    let params: std::collections::BTreeMap<String, String> =
+        source.parse_params().expect("params parse");
+    assert_eq!(params["url"], "nats://localhost:4222");
+    assert_eq!(params["stream"], "LOGS");
+    assert_eq!(params["consumer"], "pipeline");
+}
+
+#[test]
+fn source_block_is_optional() {
+    let yaml = r#"
+nodes:
+  - id: out
+    type: sink.memory
+"#;
+
+    let config = Config::from_yaml(yaml).expect("config loads");
+
+    assert!(config.source.is_none());
+}

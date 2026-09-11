@@ -1,5 +1,5 @@
-//! Pipeline config: a YAML list of `nodes`, each with `id`, `type`, optional `from`, and
-//! type-specific parameters.
+//! Pipeline config: an optional `source` block (`type` plus type-specific parameters) and a
+//! YAML list of `nodes`, each with `id`, `type`, optional `from`, and type-specific parameters.
 //!
 //! Loading resolves the `from` default (the previous node in the file, or `source` for the
 //! first node) and rejects reserved or duplicate ids. Graph validation lives in [`crate::dag`].
@@ -77,8 +77,37 @@ pub enum ConfigError {
 pub struct Config {
     /// Number of worker threads, or `None` to use one per core.
     pub workers: Option<usize>,
+    /// The source block, or `None` when the caller supplies the source (tests, embedding).
+    pub source: Option<SourceConfig>,
     /// Nodes in file order, with `from` already resolved.
     pub nodes: Vec<NodeConfig>,
+}
+
+/// The `source` block: which source implementation feeds the pipeline and how it is set up.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceConfig {
+    /// The source type string (`nats`, ...).
+    pub kind: String,
+    /// Type-specific parameters, everything except `type`.
+    pub params: serde_yaml_ng::Value,
+}
+
+impl SourceConfig {
+    /// Deserialize the type-specific parameters into `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidParams`] naming `source` when the parameters do not
+    /// match `T`.
+    pub fn parse_params<T: DeserializeOwned>(&self) -> Result<T, ConfigError> {
+        parse_params(SOURCE_ID, &self.params)
+    }
+
+    /// An [`ConfigError::InvalidParams`] naming `source`.
+    #[must_use]
+    pub fn invalid_params(&self, message: impl Into<String>) -> ConfigError {
+        invalid_params(SOURCE_ID, message)
+    }
 }
 
 /// One node of the pipeline config.
@@ -108,17 +137,27 @@ impl NodeConfig {
     /// Returns [`ConfigError::InvalidParams`] naming this node when the parameters do not
     /// match `T`.
     pub fn parse_params<T: DeserializeOwned>(&self) -> Result<T, ConfigError> {
-        serde_yaml_ng::from_value(self.params.clone())
-            .map_err(|e| self.invalid_params(e.to_string()))
+        parse_params(&self.id, &self.params)
     }
 
     /// An [`ConfigError::InvalidParams`] naming this node.
     #[must_use]
     pub fn invalid_params(&self, message: impl Into<String>) -> ConfigError {
-        ConfigError::InvalidParams {
-            node: self.id.clone(),
-            message: message.into(),
-        }
+        invalid_params(&self.id, message)
+    }
+}
+
+fn parse_params<T: DeserializeOwned>(
+    node: &str,
+    params: &serde_yaml_ng::Value,
+) -> Result<T, ConfigError> {
+    serde_yaml_ng::from_value(params.clone()).map_err(|e| invalid_params(node, e.to_string()))
+}
+
+fn invalid_params(node: &str, message: impl Into<String>) -> ConfigError {
+    ConfigError::InvalidParams {
+        node: node.to_owned(),
+        message: message.into(),
     }
 }
 
@@ -128,7 +167,17 @@ struct RawConfig {
     #[serde(default)]
     workers: Option<usize>,
     #[serde(default)]
+    source: Option<RawSource>,
+    #[serde(default)]
     nodes: Vec<RawNode>,
+}
+
+#[derive(Deserialize)]
+struct RawSource {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(flatten)]
+    params: serde_yaml_ng::Value,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +239,10 @@ impl Config {
 
         Ok(Self {
             workers: raw.workers,
+            source: raw.source.map(|source| SourceConfig {
+                kind: source.kind,
+                params: normalize_params(source.params),
+            }),
             nodes,
         })
     }

@@ -1,0 +1,47 @@
+# NATS JetStream for the pipeline. Bring up with:
+#
+#   docker compose -f deploy/compose.yaml up -d
+#
+# `nats-init` runs once and creates the streams and the pull consumer the pipeline expects;
+# the pipeline itself never creates them (spec: the sink stream is pre-created by compose).
+# Re-running it is safe: every command is skipped when its object already exists.
+
+services:
+  nats:
+    image: nats:2.11-alpine
+    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  nats-init:
+    image: natsio/nats-box:0.16.0
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        export NATS_URL=nats://nats:4222
+        nats stream info LOGS >/dev/null 2>&1 \
+          || nats stream add LOGS --subjects 'logs.>' --storage file --retention limits \
+               --defaults
+        nats stream info PROCESSED >/dev/null 2>&1 \
+          || nats stream add PROCESSED --subjects 'processed.>' --storage file \
+               --retention limits --defaults
+        nats consumer info LOGS pipeline >/dev/null 2>&1 \
+          || nats consumer add LOGS pipeline --pull --ack explicit --wait 30s \
+               --max-deliver 5 --deliver all --replay instant --defaults
+        nats stream ls
+        nats consumer info LOGS pipeline
+
+volumes:
+  nats-data:
