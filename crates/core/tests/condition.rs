@@ -263,3 +263,12 @@ fn quoted_segment_escapes_match_the_path_rule() {
         Condition::parse(r#"attributes."a[0]" == 1"#).expect("brackets inside quotes are key text");
     assert!(!c.matches(&record()));
 }
+
+#[test]
+fn text_glued_to_a_closing_quote_is_the_path_error_with_a_hint() {
+    let err = Condition::parse(r#"attributes."a"b == 1"#).expect_err("glued");
+    assert!(
+        matches!(err, ConditionError::Field { offset: 0, ref source } if matches!(source, PathError::InvalidSegment { instead, .. } if instead == "attributes.ab")),
+        "{err}"
+    );
+}

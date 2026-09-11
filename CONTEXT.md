@@ -21,7 +21,7 @@ A record paired with the ack handle that settles its message.
 The producer-supplied snowflake that is always present on a record. Records without one are nakked and counted.
 
 **Tenant**:
-The owner of a record, held at `resource["tenant.id"]` and stamped by the source from the subject when absent.
+The owner of a record, held at `resource.tenant.id` and stamped by the source from the subject when absent.
 _Avoid_: customer, org, namespace
 
 **Body**:

@@ -42,7 +42,7 @@ nats pub logs.acme.syslog '{"id": 1, "body": "disk full"}'
 nats consumer info LOGS pipeline        # 0 pending, 0 redelivered
 ```
 
-The record arrives with `resource["tenant.id"]` set to `acme`, read from the subject. A sink
+The record arrives with `resource.tenant.id` set to `acme`, read from the subject. A sink
 that cannot get its `PubAck` (delete `PROCESSED` to see it) makes the engine nak the source
 message and JetStream redeliver it. `NATS_URL` overrides the `url` of the source and every
 sink. `deploy/nats-smoke.sh` runs these checks end to end and exits non-zero on any failure.

@@ -1,6 +1,6 @@
 //! Subject helpers: tenant derivation and wildcard matching.
 //!
-//! Records arrive on `logs.{tenant}.>`; the tenant lives at `resource["tenant.id"]` and is
+//! Records arrive on `logs.{tenant}.>`; the tenant lives at `resource.tenant.id` and is
 //! stamped from the subject when the producer left it out. [`captures`] answers whether a
 //! stream's subject filter covers a concrete subject, so a sink can fail at load instead of
 //! on its first publish.
@@ -22,7 +22,7 @@ pub fn tenant_from_subject(subject: &str) -> Option<&str> {
         .filter(|tenant| !tenant.is_empty())
 }
 
-/// Set `resource["tenant.id"]` to `tenant` unless the record already carries one.
+/// Set `resource.tenant.id` to `tenant` unless the record already carries one.
 pub fn stamp_tenant(record: &mut Record, tenant: &str) {
     record
         .resource

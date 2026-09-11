@@ -9,7 +9,7 @@
 //! The three maps are flat: values are scalars and nothing below a key is addressable.
 //! `body` is addressed only as a whole, and the scalar fields take no segments.
 
-use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::fmt;
 
 use serde_json::{Map, Value};
@@ -49,8 +49,6 @@ pub enum PathError {
     /// The path uses `[...]`, which is no longer part of the grammar.
     #[error("brackets are not allowed; instead use `{instead}`")]
     BracketSyntax {
-        /// The path text.
-        path: String,
         /// The same path in dotted form.
         instead: String,
     },
@@ -118,60 +116,52 @@ enum MapField {
     Scope,
 }
 
-/// What a path names once parsed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Target {
+/// A top-level record field a path may start at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Root {
     Field(Field),
-    /// A key of one of the maps.
-    Key(MapField, String),
+    Map(MapField),
 }
 
-const FIELD_NAMES: [(&str, Field); 9] = [
-    ("id", Field::Id),
-    ("kind", Field::Kind),
-    ("time_unix_nano", Field::TimeUnixNano),
-    ("observed_time_unix_nano", Field::ObservedTimeUnixNano),
-    ("severity_text", Field::SeverityText),
-    ("severity_number", Field::SeverityNumber),
-    ("body", Field::Body),
-    ("trace_id", Field::TraceId),
-    ("span_id", Field::SpanId),
-];
+impl Root {
+    const ALL: [Self; 12] = [
+        Self::Field(Field::Id),
+        Self::Field(Field::Kind),
+        Self::Field(Field::TimeUnixNano),
+        Self::Field(Field::ObservedTimeUnixNano),
+        Self::Field(Field::SeverityText),
+        Self::Field(Field::SeverityNumber),
+        Self::Field(Field::Body),
+        Self::Field(Field::TraceId),
+        Self::Field(Field::SpanId),
+        Self::Map(MapField::Attributes),
+        Self::Map(MapField::Resource),
+        Self::Map(MapField::Scope),
+    ];
 
-const MAP_NAMES: [(&str, MapField); 3] = [
-    ("attributes", MapField::Attributes),
-    ("resource", MapField::Resource),
-    ("scope", MapField::Scope),
-];
-
-impl Field {
     fn parse(name: &str) -> Option<Self> {
-        FIELD_NAMES
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, f)| *f)
+        Self::ALL.into_iter().find(|root| root.name() == name)
     }
 
-    fn name(self) -> &'static str {
-        FIELD_NAMES
-            .iter()
-            .find(|(_, f)| *f == self)
-            .map_or("", |(n, _)| n)
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Field(Field::Id) => "id",
+            Self::Field(Field::Kind) => "kind",
+            Self::Field(Field::TimeUnixNano) => "time_unix_nano",
+            Self::Field(Field::ObservedTimeUnixNano) => "observed_time_unix_nano",
+            Self::Field(Field::SeverityText) => "severity_text",
+            Self::Field(Field::SeverityNumber) => "severity_number",
+            Self::Field(Field::Body) => "body",
+            Self::Field(Field::TraceId) => "trace_id",
+            Self::Field(Field::SpanId) => "span_id",
+            Self::Map(MapField::Attributes) => "attributes",
+            Self::Map(MapField::Resource) => "resource",
+            Self::Map(MapField::Scope) => "scope",
+        }
     }
 }
 
 impl MapField {
-    fn parse(name: &str) -> Option<Self> {
-        MAP_NAMES.iter().find(|(n, _)| *n == name).map(|(_, m)| *m)
-    }
-
-    fn name(self) -> &'static str {
-        MAP_NAMES
-            .iter()
-            .find(|(_, m)| *m == self)
-            .map_or("", |(n, _)| n)
-    }
-
     fn get(self, record: &Record) -> &Map<String, Value> {
         match self {
             Self::Attributes => &record.attributes,
@@ -185,6 +175,90 @@ impl MapField {
             Self::Attributes => &mut record.attributes,
             Self::Resource => &mut record.resource,
             Self::Scope => &mut record.scope,
+        }
+    }
+}
+
+/// What a path names once parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+    Field(Field),
+    /// A key of one of the maps.
+    Key(MapField, String),
+}
+
+/// A number as read from a record. Two integers compare exactly; when either side is a
+/// float both are compared as `f64`, which is lossy above 2^53 and never equal for NaN.
+#[derive(Debug, Clone, Copy)]
+pub enum Num {
+    /// An integer, wide enough for both `i64` and `u64`.
+    Int(i128),
+    /// A float.
+    Float(f64),
+}
+
+impl Num {
+    fn from_value(v: &Value) -> Option<Self> {
+        let n = v.as_number()?;
+        if let Some(i) = n.as_i64() {
+            Some(Self::Int(i128::from(i)))
+        } else if let Some(u) = n.as_u64() {
+            Some(Self::Int(i128::from(u)))
+        } else {
+            n.as_f64().map(Self::Float)
+        }
+    }
+
+    fn as_f64(self) -> f64 {
+        match self {
+            Self::Int(i) => i as f64,
+            Self::Float(f) => f,
+        }
+    }
+}
+
+impl PartialEq for Num {
+    fn eq(&self, other: &Self) -> bool {
+        self.partial_cmp(other) == Some(Ordering::Equal)
+    }
+}
+
+impl PartialOrd for Num {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (*self, *other) {
+            (Self::Int(a), Self::Int(b)) => Some(a.cmp(&b)),
+            (a, b) => a.as_f64().partial_cmp(&b.as_f64()),
+        }
+    }
+}
+
+/// A field as read from a record: a borrowed view, never a copy. An absent field is
+/// [`FieldValue::Null`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum FieldValue<'a> {
+    /// Absent, or JSON `null`.
+    Null,
+    /// A JSON bool.
+    Bool(bool),
+    /// A JSON number.
+    Num(Num),
+    /// A string field or a JSON string.
+    Str(&'a str),
+    /// An array or object: `body` when structured. Comparable to nothing.
+    Json(&'a Value),
+}
+
+impl<'a> FieldValue<'a> {
+    /// View a JSON value.
+    #[must_use]
+    pub fn from_json(v: &'a Value) -> Self {
+        match v {
+            Value::Null => Self::Null,
+            Value::Bool(b) => Self::Bool(*b),
+            Value::Number(_) => Num::from_value(v).map_or(Self::Null, Self::Num),
+            Value::String(s) => Self::Str(s),
+            Value::Array(_) | Value::Object(_) => Self::Json(v),
         }
     }
 }
@@ -211,6 +285,12 @@ fn json_type(v: &Value) -> &'static str {
     }
 }
 
+fn read_only(field: Field) -> PathError {
+    PathError::ReadOnly {
+        field: Root::Field(field).name().to_owned(),
+    }
+}
+
 /// A segment as written in a path: bare when it can be, quoted otherwise.
 fn display_segment(segment: &str) -> String {
     if !segment.is_empty() && segment.chars().all(is_segment_char) {
@@ -221,18 +301,92 @@ fn display_segment(segment: &str) -> String {
 }
 
 /// `attributes["http.status"]["a b"]` as `attributes.http.status."a b"`, for the bracket
-/// error's hint.
+/// error's hint. Each bracket part is unquoted before the dotted form is rebuilt.
 fn unbracket(path: &str) -> String {
     let mut segments: Vec<String> = Vec::new();
     for part in path.split(['[', ']']) {
-        let part = part.trim_matches(['"', '\'']);
-        for segment in part.split('.') {
-            if !segment.is_empty() {
-                segments.push(display_segment(segment));
-            }
+        for piece in dotted_pieces(part) {
+            segments.push(display_segment(&piece));
         }
     }
     segments.join(".")
+}
+
+/// The pieces of one bracket part: unquoted and unescaped, then split on dots, since a
+/// bracketed dotted key and dotted segments name the same flat key. Empty pieces are
+/// dropped.
+fn dotted_pieces(part: &str) -> Vec<String> {
+    if let Some(inner) = strip_quotes(part) {
+        // `["http.status"]` and `.http.status` name the same flat key.
+        return unescape(inner)
+            .split('.')
+            .filter(|piece| !piece.is_empty())
+            .map(str::to_owned)
+            .collect();
+    }
+    let mut pieces = Vec::new();
+    let mut rest = part;
+    while !rest.is_empty() {
+        if rest.starts_with('"') {
+            match quoted_end(rest, 0) {
+                Some(end) => {
+                    pieces.push(unescape(&rest[1..end - 1]));
+                    rest = rest[end..].trim_start_matches('.');
+                }
+                None => {
+                    pieces.push(unescape(&rest[1..]));
+                    rest = "";
+                }
+            }
+        } else {
+            let end = rest.find('.').unwrap_or(rest.len());
+            if end > 0 {
+                pieces.push(rest[..end].to_owned());
+            }
+            rest = rest[end..].trim_start_matches('.');
+        }
+    }
+    pieces
+}
+
+/// The inside of a part wrapped whole in matching `"` or `'` quotes.
+fn strip_quotes(part: &str) -> Option<&str> {
+    let quote = part.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+    part.strip_prefix(quote)?.strip_suffix(quote)
+}
+
+/// Drop the backslash from every `\x`, for hints built from old bracket text.
+fn unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// From the opening `"` at `start`, the offset just past the closing `"`, skipping
+/// backslash-escaped characters. `None` when the quote is never closed. The condition lexer
+/// uses this too, so both sides agree on where a quoted segment ends.
+#[must_use]
+pub fn quoted_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// The segments of `path`, in order, with quotes and escapes resolved. Only key segments
@@ -288,7 +442,6 @@ fn split_segments(path: &str) -> Result<Vec<String>, PathError> {
             }
             Some('[' | ']') => {
                 return Err(PathError::BracketSyntax {
-                    path: path.to_owned(),
                     instead: unbracket(path),
                 });
             }
@@ -312,22 +465,22 @@ fn split_segments(path: &str) -> Result<Vec<String>, PathError> {
 /// Read a quoted segment starting at `start` (the quote). Returns the contents and the
 /// offset just past the closing quote. `\"` and `\\` are the only escapes.
 fn unquote(path: &str, start: usize) -> Result<(String, usize), PathError> {
-    let mut out = String::new();
-    let mut chars = path[start + 1..].char_indices();
+    let end = quoted_end(path, start).ok_or_else(|| PathError::UnterminatedQuote {
+        path: path.to_owned(),
+    })?;
+    let inner = &path[start + 1..end - 1];
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.char_indices();
     while let Some((i, c)) = chars.next() {
         match c {
-            '"' => return Ok((out, start + 1 + i + 1)),
             '\\' => match chars.next() {
                 Some((_, c @ ('"' | '\\'))) => out.push(c),
                 Some((_, other)) => {
+                    let at = start + 1 + i;
                     return Err(PathError::InvalidSegment {
-                        segment: path[start..].to_owned(),
+                        segment: path[start..end].to_owned(),
                         ch: other,
-                        instead: format!(
-                            "{}\\\\{}",
-                            &path[..start + 1 + i],
-                            &path[start + 1 + i + 1..]
-                        ),
+                        instead: format!("{}\\\\{}", &path[..at], &path[at + 1..]),
                     });
                 }
                 None => break,
@@ -335,9 +488,7 @@ fn unquote(path: &str, start: usize) -> Result<(String, usize), PathError> {
             c => out.push(c),
         }
     }
-    Err(PathError::UnterminatedQuote {
-        path: path.to_owned(),
-    })
+    Ok((out, end))
 }
 
 /// `before.` + the bad segment quoted + the rest of the path, for the segment error's hint.
@@ -356,37 +507,31 @@ impl FieldPath {
     /// field, a scalar or `body` is given segments, or a map is named without a key.
     pub fn parse(path: &str) -> Result<Self, PathError> {
         let segments = split_segments(path)?;
-        let (root, keys) = segments
+        let (name, keys) = segments
             .split_first()
             .ok_or_else(|| PathError::EmptySegment {
                 path: path.to_owned(),
             })?;
-        if let Some(map) = MapField::parse(root) {
-            return if keys.is_empty() {
-                Err(PathError::MapNeedsKey {
-                    field: root.clone(),
-                })
-            } else {
-                Ok(Self {
-                    target: Target::Key(map, keys.join(".")),
-                })
-            };
-        }
-        let field =
-            Field::parse(root).ok_or_else(|| PathError::UnknownField { name: root.clone() })?;
-        if keys.is_empty() {
-            Ok(Self {
+        let root =
+            Root::parse(name).ok_or_else(|| PathError::UnknownField { name: name.clone() })?;
+        match (root, keys.is_empty()) {
+            (Root::Map(_), true) => Err(PathError::MapNeedsKey {
+                field: name.clone(),
+            }),
+            (Root::Map(map), false) => Ok(Self {
+                target: Target::Key(map, keys.join(".")),
+            }),
+            (Root::Field(field), true) => Ok(Self {
                 target: Target::Field(field),
-            })
-        } else {
-            Err(PathError::NotAMap {
-                field: root.clone(),
+            }),
+            (Root::Field(field), false) => Err(PathError::NotAMap {
+                field: name.clone(),
                 hint: if field == Field::Body {
                     ", or parse it into attributes first"
                 } else {
                     ""
                 },
-            })
+            }),
         }
     }
 
@@ -399,28 +544,40 @@ impl FieldPath {
         }
     }
 
-    /// Read the field. `None` when it is absent.
-    ///
-    /// Map keys and `body` are borrowed; the typed top-level fields are converted to an
-    /// owned [`Value`].
+    /// Read the field as a borrowed view. An absent field is [`FieldValue::Null`].
     #[must_use]
-    pub fn read<'a>(&self, record: &'a Record) -> Option<Cow<'a, Value>> {
+    pub fn read<'a>(&self, record: &'a Record) -> FieldValue<'a> {
+        fn num(n: impl Into<i128>) -> FieldValue<'static> {
+            FieldValue::Num(Num::Int(n.into()))
+        }
+        fn opt_str(s: Option<&str>) -> FieldValue<'_> {
+            s.map_or(FieldValue::Null, FieldValue::Str)
+        }
         let field = match &self.target {
-            Target::Key(map, key) => return map.get(record).get(key).map(Cow::Borrowed),
+            Target::Key(map, key) => {
+                return map
+                    .get(record)
+                    .get(key)
+                    .map_or(FieldValue::Null, FieldValue::from_json);
+            }
             Target::Field(field) => *field,
         };
-        let owned = match field {
-            Field::Id => record.id.map(|id| Value::from(id.0)),
-            Field::Kind => Some(Value::from(record.kind.as_str())),
-            Field::TimeUnixNano => record.time_unix_nano.map(Value::from),
-            Field::ObservedTimeUnixNano => record.observed_time_unix_nano.map(Value::from),
-            Field::SeverityText => record.severity_text.as_deref().map(Value::from),
-            Field::SeverityNumber => record.severity_number.map(Value::from),
-            Field::Body => return record.body.as_ref().map(Cow::Borrowed),
-            Field::TraceId => record.trace_id.as_deref().map(Value::from),
-            Field::SpanId => record.span_id.as_deref().map(Value::from),
-        };
-        owned.map(Cow::Owned)
+        match field {
+            Field::Id => record.id.map_or(FieldValue::Null, |id| num(id.0)),
+            Field::Kind => FieldValue::Str(record.kind.as_str()),
+            Field::TimeUnixNano => record.time_unix_nano.map_or(FieldValue::Null, num),
+            Field::ObservedTimeUnixNano => {
+                record.observed_time_unix_nano.map_or(FieldValue::Null, num)
+            }
+            Field::SeverityText => opt_str(record.severity_text.as_deref()),
+            Field::SeverityNumber => record.severity_number.map_or(FieldValue::Null, num),
+            Field::Body => record
+                .body
+                .as_ref()
+                .map_or(FieldValue::Null, FieldValue::from_json),
+            Field::TraceId => opt_str(record.trace_id.as_deref()),
+            Field::SpanId => opt_str(record.span_id.as_deref()),
+        }
     }
 
     /// Write `value` to the field, creating or replacing it.
@@ -445,7 +602,7 @@ impl FieldPath {
             Target::Field(field) => *field,
         };
         match field {
-            Field::Id | Field::Kind => return Err(self.read_only(field)),
+            Field::Id | Field::Kind => return Err(read_only(field)),
             Field::TimeUnixNano => record.time_unix_nano = self.expect_u64(value)?,
             Field::ObservedTimeUnixNano => {
                 record.observed_time_unix_nano = self.expect_u64(value)?;
@@ -470,7 +627,7 @@ impl FieldPath {
             Target::Field(field) => *field,
         };
         Ok(match field {
-            Field::Id | Field::Kind => return Err(self.read_only(field)),
+            Field::Id | Field::Kind => return Err(read_only(field)),
             Field::TimeUnixNano => record.time_unix_nano.take().map(Value::from),
             Field::ObservedTimeUnixNano => record.observed_time_unix_nano.take().map(Value::from),
             Field::SeverityText => record.severity_text.take().map(Value::from),
@@ -479,12 +636,6 @@ impl FieldPath {
             Field::TraceId => record.trace_id.take().map(Value::from),
             Field::SpanId => record.span_id.take().map(Value::from),
         })
-    }
-
-    fn read_only(&self, field: Field) -> PathError {
-        PathError::ReadOnly {
-            field: field.name().to_owned(),
-        }
     }
 
     fn wrong_type(&self, expected: &'static str, actual: &Value) -> PathError {
@@ -530,9 +681,12 @@ impl FieldPath {
 impl fmt::Display for FieldPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.target {
-            Target::Field(field) => f.write_str(field.name()),
+            Target::Field(field) => f.write_str(Root::Field(*field).name()),
             Target::Key(map, key) => {
-                f.write_str(map.name())?;
+                f.write_str(Root::Map(*map).name())?;
+                if key.split('.').any(str::is_empty) {
+                    return write!(f, ".{}", display_segment(key));
+                }
                 for part in key.split('.') {
                     write!(f, ".{}", display_segment(part))?;
                 }

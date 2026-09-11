@@ -2,54 +2,14 @@
 //! dotted path, the loader and engine run it against records with OTel-style keys, and
 //! bracket syntax is a config error naming the node.
 
-use std::time::Duration;
+mod common;
 
 use fusion_core::config::ConfigError;
-use fusion_core::engine::Engine;
-use fusion_core::memory::{AckOutcome, MemoryInput, MemorySinks, MemorySource};
+use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
-use fusion_core::registry::Registry;
-use fusion_pipeline::default_registry;
 
-const WAIT: Duration = Duration::from_secs(5);
-
-fn registry(sinks: &MemorySinks) -> Registry {
-    let mut registry = default_registry();
-    registry.register_sink("sink.memory", sinks.clone());
-    registry
-}
-
-struct Harness {
-    engine: Engine,
-    source: MemoryInput,
-    sinks: MemorySinks,
-}
-
-fn start(yaml: &str, workers: usize) -> Harness {
-    let sinks = MemorySinks::new();
-    let pipeline = Pipeline::from_yaml(yaml, &registry(&sinks)).expect("pipeline loads");
-    let (source, input) = MemorySource::new();
-    let engine = Engine::start(pipeline, Box::new(source), workers).expect("engine starts");
-    Harness {
-        engine,
-        source: input,
-        sinks,
-    }
-}
-
-impl Harness {
-    fn finish(self) {
-        drop(self.source);
-        self.engine.join().expect("clean shutdown");
-    }
-}
-
-fn for_each_worker_count(test: impl Fn(usize)) {
-    for workers in [1, 4] {
-        test(workers);
-    }
-}
+use common::{WAIT, for_each_worker_count, registry, start};
 
 fn record(id: u64, attributes: &str, resource: &str) -> Record {
     Record::from_json(&format!(

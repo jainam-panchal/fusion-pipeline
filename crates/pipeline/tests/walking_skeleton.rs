@@ -2,15 +2,13 @@
 //! in-memory source, assertions on what reached the in-memory sink and how each ack handle
 //! was settled.
 
-use std::time::Duration;
+mod common;
 
-use fusion_core::engine::Engine;
-use fusion_core::memory::{AckOutcome, MemorySinks, MemorySource};
+use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
-use fusion_pipeline::default_registry;
 
-const WAIT: Duration = Duration::from_secs(5);
+use common::{WAIT, for_each_worker_count, registry, start};
 
 const KEEP_ERRORS: &str = r#"
 nodes:
@@ -21,34 +19,6 @@ nodes:
   - id: out
     type: sink.memory
 "#;
-
-struct Harness {
-    engine: Engine,
-    source: fusion_core::memory::MemoryInput,
-    sinks: MemorySinks,
-}
-
-fn start(yaml: &str, workers: usize) -> Harness {
-    let sinks = MemorySinks::new();
-    let mut registry = default_registry();
-    registry.register_sink("sink.memory", sinks.clone());
-    let pipeline = Pipeline::from_yaml(yaml, &registry).expect("pipeline loads");
-    let (source, input) = MemorySource::new();
-    let engine = Engine::start(pipeline, Box::new(source), workers).expect("engine starts");
-    Harness {
-        engine,
-        source: input,
-        sinks,
-    }
-}
-
-impl Harness {
-    /// Close the source and wait for the workers to drain.
-    fn finish(self) {
-        drop(self.source);
-        self.engine.join().expect("clean shutdown");
-    }
-}
 
 fn error_record(id: u64) -> Record {
     Record::from_json(&format!(
@@ -62,12 +32,6 @@ fn info_record(id: u64) -> Record {
         r#"{{"id": {id}, "severity_text": "INFO", "body": "started"}}"#
     ))
     .expect("record parses")
-}
-
-fn for_each_worker_count(test: impl Fn(usize)) {
-    for workers in [1, 4] {
-        test(workers);
-    }
 }
 
 #[test]
@@ -170,8 +134,7 @@ fn many_records_are_all_settled_across_workers() {
 #[test]
 fn filter_with_regex_operator_is_rejected_at_load_until_the_regex_ticket() {
     let yaml = KEEP_ERRORS.replace(r#"severity_text == "ERROR""#, r#"body =~ "disk""#);
-    let mut registry = default_registry();
-    registry.register_sink("sink.memory", MemorySinks::new());
+    let registry = registry(&MemorySinks::new());
 
     let err = Pipeline::from_yaml(&yaml, &registry).expect_err("regex ops not wired");
 
@@ -183,8 +146,7 @@ fn filter_with_regex_operator_is_rejected_at_load_until_the_regex_ticket() {
 #[test]
 fn unknown_node_type_is_rejected_naming_the_node() {
     let yaml = KEEP_ERRORS.replace("type: filter", "type: teleport");
-    let mut registry = default_registry();
-    registry.register_sink("sink.memory", MemorySinks::new());
+    let registry = registry(&MemorySinks::new());
 
     let err = Pipeline::from_yaml(&yaml, &registry).expect_err("unknown type");
 
@@ -197,8 +159,7 @@ fn unknown_node_type_is_rejected_naming_the_node() {
 
 #[test]
 fn worker_count_comes_from_config_or_defaults_to_cores() {
-    let mut registry = default_registry();
-    registry.register_sink("sink.memory", MemorySinks::new());
+    let registry = registry(&MemorySinks::new());
 
     let explicit = Pipeline::from_yaml(&format!("workers: 2\n{KEEP_ERRORS}"), &registry)
         .expect("pipeline loads");
@@ -240,8 +201,7 @@ fn metric_and_span_records_are_rejected_and_acked_without_reaching_a_sink() {
 #[test]
 fn unknown_top_level_config_key_is_rejected() {
     let yaml = format!("worker: 2\n{KEEP_ERRORS}");
-    let mut registry = default_registry();
-    registry.register_sink("sink.memory", MemorySinks::new());
+    let registry = registry(&MemorySinks::new());
 
     let err = Pipeline::from_yaml(&yaml, &registry).expect_err("typo rejected");
 

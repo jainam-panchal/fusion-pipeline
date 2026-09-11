@@ -1,9 +1,7 @@
 //! Field paths: one dotted path names one record field. Under `attributes`, `resource` and
 //! `scope` the rest of the path, joined with dots, is the flat map key.
 
-use std::borrow::Cow;
-
-use fusion_core::path::{FieldPath, PathError};
+use fusion_core::path::{FieldPath, FieldValue, Num, PathError};
 use fusion_core::record::Record;
 use serde_json::{Value, json};
 
@@ -89,11 +87,33 @@ fn record() -> Record {
     .expect("record parses")
 }
 
+/// Read `path` from `record` as an owned JSON value, `None` when absent, so assertions can
+/// use `json!` literals.
 fn read_from(record: &Record, path: &str) -> Option<Value> {
-    FieldPath::parse(path)
-        .expect("parses")
-        .read(record)
-        .map(Cow::into_owned)
+    match FieldPath::parse(path).expect("parses").read(record) {
+        FieldValue::Null => None,
+        FieldValue::Bool(b) => Some(json!(b)),
+        FieldValue::Num(Num::Int(i)) => Some(json!(i)),
+        FieldValue::Num(Num::Float(f)) => Some(json!(f)),
+        FieldValue::Str(s) => Some(json!(s)),
+        FieldValue::Json(v) => Some(v.clone()),
+        other => panic!("unexpected view {other:?}"),
+    }
+}
+
+#[test]
+fn read_borrows_strings_and_views_a_structured_body() {
+    let mut r = record();
+    let FieldValue::Str(text) = FieldPath::parse("severity_text").expect("parses").read(&r) else {
+        panic!("severity_text is a string");
+    };
+    assert!(std::ptr::eq(text, r.severity_text.as_deref().expect("set")));
+
+    r.body = Some(json!({"raw": "x"}));
+    let FieldValue::Json(body) = FieldPath::parse("body").expect("parses").read(&r) else {
+        panic!("structured body is a view");
+    };
+    assert_eq!(body, &json!({"raw": "x"}));
 }
 
 fn read(path: &str) -> Option<Value> {
@@ -401,4 +421,38 @@ fn empty_quoted_segment_and_unknown_escapes_are_rejected() {
         matches!(err, PathError::InvalidSegment { ch: 'n', ref instead, .. } if instead == r#"attributes."a\\nb""#),
         "{err}"
     );
+}
+
+#[test]
+fn bracket_hints_unquote_each_part_before_rebuilding() {
+    let cases = [
+        (r#"attributes."a"[0]"#, "attributes.a.0"),
+        (r#"attributes["a\"b"]"#, r#"attributes."a\"b""#),
+        (r#"attributes['x y']"#, r#"attributes."x y""#),
+        (r#"resource["service"]["name"]"#, "resource.service.name"),
+    ];
+    for (bad, hint) in cases {
+        let err = FieldPath::parse(bad).expect_err(bad);
+        let PathError::BracketSyntax { instead } = &err else {
+            panic!("{bad}: unexpected {err}");
+        };
+        assert_eq!(instead, hint, "{bad}: {err}");
+        FieldPath::parse(instead).unwrap_or_else(|e| panic!("hint `{instead}` for `{bad}`: {e}"));
+    }
+}
+
+#[test]
+fn display_round_trips_keys_with_empty_dot_parts() {
+    for (text, key) in [
+        (r#"attributes."a..b""#, "a..b"),
+        (r#"attributes.".a""#, ".a"),
+        (r#"attributes."a.""#, "a."),
+        (r#"attributes.a."b.c".d"#, "a.b.c.d"),
+    ] {
+        let path = FieldPath::parse(text).expect(text);
+        assert_eq!(path.map_key(), Some(key), "{text}");
+        let shown = path.to_string();
+        let again = FieldPath::parse(&shown).unwrap_or_else(|e| panic!("{text} -> {shown}: {e}"));
+        assert_eq!(again.map_key(), Some(key), "{text} -> {shown}");
+    }
 }

@@ -19,9 +19,7 @@
 
 use std::cmp::Ordering;
 
-use serde_json::Value;
-
-use crate::path::{FieldPath, PathError};
+use crate::path::{FieldPath, FieldValue, Num, PathError, quoted_end};
 use crate::record::Record;
 
 /// Errors from parsing a condition string.
@@ -70,72 +68,6 @@ pub enum ConditionError {
         #[source]
         source: PathError,
     },
-}
-
-/// A number as seen by the grammar. Two integers compare exactly; when either side is a
-/// float both are compared as `f64`, which is lossy above 2^53 and never equal for NaN.
-#[derive(Debug, Clone, Copy)]
-enum Num {
-    Int(i128),
-    Float(f64),
-}
-
-impl Num {
-    fn from_value(v: &Value) -> Option<Self> {
-        let n = v.as_number()?;
-        if let Some(i) = n.as_i64() {
-            Some(Self::Int(i128::from(i)))
-        } else if let Some(u) = n.as_u64() {
-            Some(Self::Int(i128::from(u)))
-        } else {
-            n.as_f64().map(Self::Float)
-        }
-    }
-
-    fn as_f64(self) -> f64 {
-        match self {
-            Self::Int(i) => i as f64,
-            Self::Float(f) => f,
-        }
-    }
-}
-
-impl PartialEq for Num {
-    fn eq(&self, other: &Self) -> bool {
-        self.partial_cmp(other) == Some(Ordering::Equal)
-    }
-}
-
-impl PartialOrd for Num {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match (*self, *other) {
-            (Self::Int(a), Self::Int(b)) => Some(a.cmp(&b)),
-            (a, b) => a.as_f64().partial_cmp(&b.as_f64()),
-        }
-    }
-}
-
-/// A resolved field value, borrowed from the record where possible.
-#[derive(Debug, Clone, Copy)]
-enum FieldValue<'a> {
-    Null,
-    Bool(bool),
-    Num(Num),
-    Str(&'a str),
-    /// Arrays and objects: comparable to nothing.
-    Composite,
-}
-
-impl<'a> FieldValue<'a> {
-    fn from_json(v: &'a Value) -> Self {
-        match v {
-            Value::Null => Self::Null,
-            Value::Bool(b) => Self::Bool(*b),
-            Value::Number(_) => Num::from_value(v).map_or(Self::Null, Self::Num),
-            Value::String(s) => Self::Str(s),
-            Value::Array(_) | Value::Object(_) => Self::Composite,
-        }
-    }
 }
 
 /// Comparison operator.
@@ -231,13 +163,7 @@ impl Condition {
     #[must_use]
     pub fn matches(&self, record: &Record) -> bool {
         match self {
-            Self::Compare { field, op, literal } => {
-                let resolved = field.read(record);
-                let value = resolved
-                    .as_deref()
-                    .map_or(FieldValue::Null, FieldValue::from_json);
-                compare(value, *op, literal)
-            }
+            Self::Compare { field, op, literal } => compare(field.read(record), *op, literal),
             Self::And(a, b) => a.matches(record) && b.matches(record),
             Self::Or(a, b) => a.matches(record) || b.matches(record),
             Self::Not(inner) => !inner.matches(record),
@@ -403,8 +329,8 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
 
 /// Lex the segments of a path after its root, starting at `i` (a `.` or `[`), and return
 /// the offset just past them. The text is kept as written; [`FieldPath::parse`] judges it,
-/// so bracket syntax, bad characters and escapes get the path error and its hint. `start`
-/// is the root's offset, reported with an unclosed quote.
+/// so bracket syntax, bad characters, escapes and text glued to a closing quote get the
+/// path error and its hint. `start` is the root's offset, reported with an unclosed quote.
 fn lex_path_rest(expr: &str, start: usize, mut i: usize) -> Result<usize, ConditionError> {
     let bytes = expr.as_bytes();
     while i < bytes.len() {
@@ -412,23 +338,26 @@ fn lex_path_rest(expr: &str, start: usize, mut i: usize) -> Result<usize, Condit
             b'.' => {
                 i += 1;
                 if bytes.get(i) == Some(&b'"') {
-                    i = skip_quoted(bytes, i).ok_or_else(|| ConditionError::Field {
+                    i = quoted_end(expr, i).ok_or_else(|| ConditionError::Field {
                         offset: start,
                         source: PathError::UnterminatedQuote {
                             path: expr[start..].to_owned(),
                         },
                     })?;
-                } else {
-                    while i < bytes.len() && continues_bare_segment(bytes[i]) {
-                        i += 1;
-                    }
+                }
+                while i < bytes.len() && continues_bare_segment(bytes[i]) {
+                    i += 1;
                 }
             }
             b'[' => {
                 i += 1;
                 while i < bytes.len() && bytes[i] != b']' {
                     i = match bytes[i] {
-                        b'"' | b'\'' => skip_quoted(bytes, i).unwrap_or(bytes.len()),
+                        b'"' => quoted_end(expr, i).unwrap_or(bytes.len()),
+                        b'\'' => {
+                            let (_, end) = lex_string(expr, i)?;
+                            end
+                        }
                         _ => i + 1,
                     };
                 }
@@ -438,21 +367,6 @@ fn lex_path_rest(expr: &str, start: usize, mut i: usize) -> Result<usize, Condit
         }
     }
     Ok(i)
-}
-
-/// From the opening quote at `i`, the offset just past the closing quote of the same kind,
-/// skipping backslash-escaped bytes. `None` when the quote is never closed.
-fn skip_quoted(bytes: &[u8], i: usize) -> Option<usize> {
-    let quote = bytes[i];
-    let mut j = i + 1;
-    while j < bytes.len() {
-        match bytes[j] {
-            b'\\' => j += 2,
-            b if b == quote => return Some(j + 1),
-            _ => j += 1,
-        }
-    }
-    None
 }
 
 /// Bytes that keep a bare segment going in the lexer. Wider than the segment charset on

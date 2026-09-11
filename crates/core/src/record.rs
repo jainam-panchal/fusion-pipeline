@@ -89,7 +89,7 @@ pub struct Record {
     /// Record attributes.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub attributes: Map<String, Value>,
-    /// Resource attributes. The tenant lives at `resource["tenant.id"]`.
+    /// Resource attributes. The tenant lives at `resource.tenant.id`.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub resource: Map<String, Value>,
     /// Instrumentation scope attributes.
@@ -122,7 +122,7 @@ impl Record {
         serde_json::to_string(self)
     }
 
-    /// The tenant, read from `resource["tenant.id"]`.
+    /// The tenant, read from `resource.tenant.id`.
     #[must_use]
     pub fn tenant(&self) -> Option<&str> {
         self.resource.get("tenant.id").and_then(Value::as_str)

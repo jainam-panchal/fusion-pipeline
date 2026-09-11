@@ -2,18 +2,15 @@
 //! config in, envelopes pushed through the in-memory source, assertions on which sink saw
 //! which record and how each ack handle was settled.
 
-use std::time::Duration;
+mod common;
 
 use fusion_core::config::{ConfigError, NodeConfig};
-use fusion_core::engine::Engine;
-use fusion_core::memory::{AckOutcome, MemoryInput, MemorySinks, MemorySource};
-use fusion_core::pipeline::Pipeline;
+use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_core::stage::{Context, Stage, StageOutput};
-use fusion_pipeline::default_registry;
 
-const WAIT: Duration = Duration::from_secs(5);
+use common::{Harness, WAIT, for_each_worker_count, start_with};
 
 const BY_FORMAT: &str = r#"
 nodes:
@@ -47,9 +44,9 @@ impl Stage for Touch {
     }
 }
 
+/// The shared registry plus the test-only `touch` stage.
 fn registry(sinks: &MemorySinks) -> Registry {
-    let mut registry = default_registry();
-    registry.register_sink("sink.memory", sinks.clone());
+    let mut registry = common::registry(sinks);
     registry.register_stage(
         "touch",
         |_: &NodeConfig| -> Result<Box<dyn Stage>, ConfigError> { Ok(Box::new(Touch)) },
@@ -57,40 +54,9 @@ fn registry(sinks: &MemorySinks) -> Registry {
     registry
 }
 
-struct Harness {
-    engine: Engine,
-    source: MemoryInput,
-    sinks: MemorySinks,
-}
-
 fn start(yaml: &str, workers: usize) -> Harness {
     let sinks = MemorySinks::new();
-    let pipeline = Pipeline::from_yaml(yaml, &registry(&sinks)).expect("pipeline loads");
-    let (source, input) = MemorySource::new();
-    let engine = Engine::start(pipeline, Box::new(source), workers).expect("engine starts");
-    Harness {
-        engine,
-        source: input,
-        sinks,
-    }
-}
-
-impl Harness {
-    fn finish(self) {
-        drop(self.source);
-        self.engine.join().expect("clean shutdown");
-    }
-
-    fn ids(&self, sink: &str) -> Vec<u64> {
-        let mut ids: Vec<u64> = self
-            .sinks
-            .records(sink)
-            .iter()
-            .filter_map(|r| r.id.map(|id| id.0))
-            .collect();
-        ids.sort_unstable();
-        ids
-    }
+    start_with(yaml, workers, sinks.clone(), registry(&sinks))
 }
 
 fn record(id: u64, format: &str) -> Record {
@@ -98,12 +64,6 @@ fn record(id: u64, format: &str) -> Record {
         r#"{{"id": {id}, "body": "line", "resource": {{"log.format": "{format}", "tenant.id": "acme"}}}}"#
     ))
     .expect("record parses")
-}
-
-fn for_each_worker_count(test: impl Fn(usize)) {
-    for workers in [1, 4] {
-        test(workers);
-    }
 }
 
 #[test]
