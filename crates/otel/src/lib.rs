@@ -6,12 +6,21 @@
 //! buckets for `*_seconds`. Labels become attributes with the same names, so the collector's
 //! Prometheus exporter surfaces `records_dropped_total{tenant, stage, reason}` verbatim.
 //!
+//! The process also reports its own CPU time, resident memory and thread count; see
+//! [`process`].
+//!
+//! The resource carries `service.name` and a `service.instance.id` (the hostname, which in
+//! compose is the container id), and the collector turns resource attributes into labels, so
+//! several pipeline instances behind one consumer never write the same Prometheus series.
+//!
 //! Export is OTLP over HTTP/protobuf on a blocking client: the engine runs on plain threads,
 //! and the SDK's periodic reader drives the exporter from its own thread, so no async
 //! runtime is involved. Configuration is the standard OpenTelemetry environment:
 //! `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`) selects the
 //! collector and `OTEL_METRIC_EXPORT_INTERVAL` the cadence. With neither endpoint set,
 //! [`init`] reports that telemetry is off and the binary records nothing.
+
+pub mod process;
 
 use std::collections::BTreeMap;
 
@@ -129,6 +138,23 @@ impl Telemetry {
     }
 }
 
+/// The resource every metric is exported under: the service name and an instance id.
+///
+/// The instance id is the hostname, or the process id when the hostname is unreadable.
+#[must_use]
+pub fn resource() -> Resource {
+    let instance = std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|h| h.trim().to_owned())
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|h| !h.is_empty()))
+        .unwrap_or_else(|| std::process::id().to_string());
+    Resource::builder()
+        .with_service_name(SERVICE_NAME)
+        .with_attribute(KeyValue::new("service.instance.id", instance))
+        .build()
+}
+
 /// Whether the environment names a collector to export to.
 #[must_use]
 pub fn configured() -> bool {
@@ -156,9 +182,11 @@ pub fn init() -> Result<Option<Telemetry>, OtelError> {
         .build()
         .map_err(OtelError::Exporter)?;
     let provider = SdkMeterProvider::builder()
-        .with_resource(Resource::builder().with_service_name(SERVICE_NAME).build())
+        .with_resource(resource())
         .with_periodic_exporter(exporter)
         .build();
-    let metrics = Metrics::new(OtlpRecorder::new(&provider.meter(SERVICE_NAME)));
+    let meter = provider.meter(SERVICE_NAME);
+    process::observe(&meter);
+    let metrics = Metrics::new(OtlpRecorder::new(&meter));
     Ok(Some(Telemetry { provider, metrics }))
 }

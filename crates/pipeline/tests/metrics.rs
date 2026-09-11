@@ -302,3 +302,33 @@ nodes:
         h.finish();
     });
 }
+
+#[test]
+fn every_record_the_source_hands_over_is_counted_in_at_source_before_any_node_runs() {
+    for_each_worker_count(|workers| {
+        let h = start(KEEP_ERRORS, workers);
+
+        let mut no_id = record(1, "ERROR");
+        no_id.id = None;
+        let mut metric = record(2, "ERROR");
+        metric.kind = fusion_core::record::Kind::Metric;
+        let probes = [
+            h.source.push(record(3, "ERROR")),
+            h.source.push(no_id),
+            h.source.push(metric),
+        ];
+        for probe in &probes {
+            assert!(probe.wait(WAIT).is_some(), "workers={workers}");
+        }
+
+        assert_eq!(
+            h.counter(
+                Metric::RecordsIn,
+                &[("tenant", "acme"), ("stage", "source")]
+            ),
+            3,
+            "workers={workers}"
+        );
+        h.finish();
+    });
+}

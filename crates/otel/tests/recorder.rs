@@ -146,3 +146,74 @@ fn a_duration_histogram_has_sub_second_buckets_so_stage_latency_is_not_all_in_on
         "300µs is not in the lowest bucket: {bounds:?}"
     );
 }
+
+#[test]
+fn the_resource_names_the_service_and_this_instance() {
+    let resource = fusion_otel::resource();
+
+    let name = resource
+        .get(&opentelemetry::Key::from_static_str("service.name"))
+        .expect("service.name set");
+    assert_eq!(name.to_string(), "fusion-pipeline");
+    let instance = resource
+        .get(&opentelemetry::Key::from_static_str("service.instance.id"))
+        .expect("service.instance.id set, so several instances never collide in Prometheus");
+    assert!(!instance.to_string().is_empty());
+}
+
+/// Every metric with `name` in the export, with its unit and the sum of its data points.
+fn exported_sum(exported: &[ResourceMetrics], name: &str) -> Option<(String, f64)> {
+    let metric = exported
+        .iter()
+        .flat_map(|rm| rm.scope_metrics())
+        .flat_map(|sm| sm.metrics())
+        .find(|m| m.name() == name)?;
+    let total = match metric.data() {
+        AggregatedMetrics::F64(MetricData::Sum(sum)) => {
+            sum.data_points().map(|dp| dp.value()).sum()
+        }
+        AggregatedMetrics::F64(MetricData::Gauge(gauge)) => {
+            gauge.data_points().map(|dp| dp.value()).sum()
+        }
+        AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+            sum.data_points().map(|dp| dp.value() as f64).sum()
+        }
+        AggregatedMetrics::U64(MetricData::Gauge(gauge)) => {
+            gauge.data_points().map(|dp| dp.value() as f64).sum()
+        }
+        AggregatedMetrics::I64(MetricData::Gauge(gauge)) => {
+            gauge.data_points().map(|dp| dp.value() as f64).sum()
+        }
+        other => panic!("{name}: unexpected aggregation {other:?}"),
+    };
+    Some((metric.unit().to_owned(), total))
+}
+
+#[test]
+fn the_process_reports_its_own_cpu_time_resident_memory_and_thread_count() {
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter.clone())
+        .build();
+    fusion_otel::process::observe(&provider.meter("fusion-pipeline"));
+    // Burn a little CPU so the counter is not zero on a fast machine.
+    let mut x = 0u64;
+    for i in 0..2_000_000u64 {
+        x = x.wrapping_mul(31).wrapping_add(i);
+    }
+    assert_ne!(x, 1);
+    provider.force_flush().expect("flush");
+    let exported = exporter.get_finished_metrics().expect("exported");
+
+    let (unit, cpu) =
+        exported_sum(&exported, "process.cpu.time").expect("process.cpu.time exported");
+    assert_eq!(unit, "s");
+    assert!(cpu > 0.0, "cpu time {cpu}");
+    let (unit, rss) =
+        exported_sum(&exported, "process.memory.usage").expect("process.memory.usage exported");
+    assert_eq!(unit, "By");
+    assert!(rss > 1_000_000.0, "resident bytes {rss}");
+    let (_, threads) =
+        exported_sum(&exported, "process.thread.count").expect("process.thread.count exported");
+    assert!(threads >= 1.0, "threads {threads}");
+}

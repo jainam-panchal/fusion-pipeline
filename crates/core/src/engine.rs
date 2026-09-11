@@ -178,6 +178,9 @@ impl Walker<'_> {
     fn handle(&self, envelope: Envelope) {
         let Envelope { record, ack } = envelope;
         let tenant = Metrics::tenant_of(&record).to_owned();
+        // Every record the source hands over counts in at `source`, so intake is one series
+        // whatever the first node is called.
+        self.metrics.records_in(&tenant, SOURCE_STAGE);
 
         let Some(record_id) = record.id else {
             // Spec: the idempotency guarantee has no unguarded path, so a record without an
