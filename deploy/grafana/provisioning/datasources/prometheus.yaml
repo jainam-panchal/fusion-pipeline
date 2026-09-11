@@ -1,3 +1,4 @@
+# The one datasource the dashboards read: the compose Prometheus. Provisioned, not clickable.
 apiVersion: 1
 datasources:
   - name: Prometheus

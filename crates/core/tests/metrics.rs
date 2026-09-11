@@ -1,8 +1,8 @@
-//! The metric vocabulary, through the recorder boundary: the closed set of metric names the
-//! spec's Telemetry section declares, the closed set of drop reasons that label
-//! `records_dropped_total`, and what the in-memory recorder observes when either is emitted.
+//! The two closed sets the spec's Telemetry section fixes: the metric names and the drop
+//! reasons that label `records_dropped_total`. Nothing else is observable below the trait
+//! boundary; what the engine emits is tested through it in the pipeline crate.
 
-use fusion_core::metrics::{InMemoryRecorder, Labels, Metric, MetricKind, Metrics, Recorder};
+use fusion_core::metrics::{Metric, MetricKind};
 use fusion_core::stage::DropReason;
 
 /// Spec, Telemetry: the drop reasons are exactly this set, in this spelling.
@@ -66,77 +66,4 @@ fn every_total_is_a_counter_and_every_seconds_is_a_histogram() {
         };
         assert_eq!(metric.kind(), expected, "{}", metric.as_str());
     }
-}
-
-#[test]
-fn a_counted_metric_is_observed_under_its_labels() {
-    let recorder = InMemoryRecorder::new();
-    let metrics = Metrics::new(recorder.clone());
-
-    metrics.dropped("acme", "keep_errors", DropReason::Filter);
-    metrics.dropped("acme", "keep_errors", DropReason::Filter);
-    metrics.dropped("acme", "keep_errors", DropReason::Sample);
-
-    assert_eq!(
-        recorder.counter(
-            Metric::RecordsDropped,
-            &[
-                ("tenant", "acme"),
-                ("stage", "keep_errors"),
-                ("reason", "filter")
-            ],
-        ),
-        2
-    );
-    assert_eq!(
-        recorder.counter(
-            Metric::RecordsDropped,
-            &[
-                ("tenant", "acme"),
-                ("stage", "keep_errors"),
-                ("reason", "sample")
-            ],
-        ),
-        1
-    );
-}
-
-#[test]
-fn an_observed_metric_keeps_every_sample_under_its_labels() {
-    let recorder = InMemoryRecorder::new();
-
-    recorder.observe(
-        Metric::StageDuration,
-        &Labels::new("acme", "keep_errors"),
-        0.25,
-    );
-    recorder.observe(
-        Metric::StageDuration,
-        &Labels::new("acme", "keep_errors"),
-        0.75,
-    );
-
-    assert_eq!(
-        recorder.samples(
-            Metric::StageDuration,
-            &[("tenant", "acme"), ("stage", "keep_errors")]
-        ),
-        [0.25, 0.75]
-    );
-}
-
-#[test]
-fn a_record_without_a_tenant_is_counted_under_unknown() {
-    let recorder = InMemoryRecorder::new();
-    let metrics = Metrics::new(recorder.clone());
-
-    metrics.records_in(Metrics::UNKNOWN_TENANT, "out");
-
-    assert_eq!(
-        recorder.counter(
-            Metric::RecordsIn,
-            &[("tenant", "unknown"), ("stage", "out")]
-        ),
-        1
-    );
 }

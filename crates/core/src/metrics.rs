@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::memory::lock_unpoisoned;
 use crate::record::Record;
 use crate::stage::DropReason;
 
@@ -228,11 +229,7 @@ impl Metrics {
     /// [`Metrics::UNKNOWN_TENANT`].
     #[must_use]
     pub fn tenant_of(record: &Record) -> &str {
-        record
-            .resource
-            .get("tenant.id")
-            .and_then(|v| v.as_str())
-            .unwrap_or(Self::UNKNOWN_TENANT)
+        record.tenant().unwrap_or(Self::UNKNOWN_TENANT)
     }
 
     /// `records_in_total`.
@@ -399,10 +396,4 @@ impl Recorder for InMemoryRecorder {
             .or_default()
             .push(value);
     }
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

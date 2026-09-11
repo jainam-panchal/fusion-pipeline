@@ -332,3 +332,60 @@ fn every_record_the_source_hands_over_is_counted_in_at_source_before_any_node_ru
         h.finish();
     });
 }
+
+/// A test-only stage that panics, so the engine's containment path is observable.
+struct Panics;
+
+impl fusion_core::stage::Stage for Panics {
+    fn process(
+        &self,
+        _record: Record,
+        _ctx: &fusion_core::stage::Context<'_>,
+    ) -> fusion_core::stage::StageOutput {
+        panic!("stage blew up");
+    }
+}
+
+#[test]
+fn a_stage_that_panics_counts_an_error_at_its_own_node_and_naks() {
+    const PANICS: &str = r#"
+nodes:
+  - id: boom
+    type: panics
+  - id: out
+    type: sink.memory
+"#;
+    let sinks = fusion_core::memory::MemorySinks::new();
+    let mut registry = common::registry(&sinks);
+    registry.register_stage(
+        "panics",
+        |_: &fusion_core::config::NodeConfig| -> Result<
+            Box<dyn fusion_core::stage::Stage>,
+            fusion_core::config::ConfigError,
+        > { Ok(Box::new(Panics)) },
+    );
+    let h = common::start_with(PANICS, 1, sinks, registry);
+
+    assert_eq!(
+        h.source.push(record(1, "ERROR")).wait(WAIT),
+        Some(AckOutcome::Nak(None))
+    );
+
+    assert_eq!(
+        h.counter(
+            Metric::RecordsErrored,
+            &[("tenant", "acme"), ("stage", "boom")]
+        ),
+        1
+    );
+    assert_eq!(
+        h.counter(
+            Metric::RecordsErrored,
+            &[("tenant", "acme"), ("stage", "<panic>")]
+        ),
+        0
+    );
+    assert_eq!(h.counter(Metric::SourceNaks, &[("tenant", "acme")]), 1);
+    // The worker survives the panic: the next record is processed normally.
+    h.finish();
+}

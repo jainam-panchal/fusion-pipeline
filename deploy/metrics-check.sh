@@ -9,9 +9,11 @@
 #      with the labels the spec gives it;
 #   3. the `reason` values seen on records_dropped_total are within the spec's closed set;
 #   4. the NATS exporter reports JetStream consumer pending, redelivered and ack floor;
-#   5. every pipeline series carries the instance id, and the pipeline, NATS and Dragonfly
+#   6. every pipeline series carries the instance id, and the pipeline, NATS and Dragonfly
 #      each report their own CPU and resident memory;
-#   6. Grafana serves the provisioned internal dashboard.
+#   7. Grafana serves the provisioned internal dashboard.
+# The state-store, Lua and dead-letter metrics have no producer until #6, #8 and #10; they
+# are reported as pending, not required.
 # Exits non-zero on the first failure. Needs docker compose, the `nats` CLI, curl and jq.
 set -euo pipefail
 
@@ -28,9 +30,9 @@ step() { echo; echo "== $*"; }
 # wait_for <seconds> <description> <command...>: poll until the command succeeds.
 wait_for() {
     local seconds=$1 what=$2; shift 2
-    for ((i = 0; i < seconds * 2; i++)); do
+    for ((i = 0; i < seconds * 4; i++)); do
         if "$@" >/dev/null 2>&1; then return 0; fi
-        sleep 0.5
+        sleep 0.25
     done
     fail "timed out after ${seconds}s waiting for $what"
 }
@@ -123,7 +125,7 @@ for name in jetstream_consumer_num_pending jetstream_consumer_num_redelivered je
     echo "present: $name = $(prom_value "${name}{consumer_name=\"pipeline\"}")"
 done
 
-step "5. instance id on every series, CPU and RSS per process"
+step "6. instance id on every series, CPU and RSS per process"
 [[ "$(prom_query 'records_in_total{job!="fusion-pipeline"}' | jq 'length')" == 0 ]] \
     || fail "pipeline series not labelled job=fusion-pipeline (honor_labels missing?)"
 [[ "$(prom_query 'records_in_total{instance=""}' | jq 'length')" == 0 ]] \
@@ -134,7 +136,7 @@ for expr in 'process_cpu_time_seconds_total{job="fusion-pipeline"}' 'process_mem
     echo "present: $expr"
 done
 
-step "6. Grafana provisioned the internal dashboard"
+step "7. Grafana provisioned the internal dashboard"
 wait_for 60 "grafana" curl -sf "$GRAFANA/api/health"
 title=$(curl -sf "$GRAFANA/api/dashboards/uid/fusion-internal" | jq -r '.dashboard.title')
 [[ "$title" == "fusion-pipeline internal" ]] || fail "dashboard fusion-internal not provisioned (got \`$title\`)"

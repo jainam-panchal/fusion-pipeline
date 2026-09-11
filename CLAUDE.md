@@ -25,11 +25,12 @@ Read first, in this order:
 - Drive behaviour through the trait boundary: load a YAML config, push envelopes through the in-memory `Source`, assert which records reached which in-memory `Sink` and which ack handles saw `ack` versus `nak`. Fakes live in `crates/core/src/memory.rs`.
 - Tests that touch real NATS are `#[ignore]` and need `deploy/compose.yaml` up. Commands are in the README.
 - Tests below the trait boundary, on the safe API only: the regex crate, and the core parsers `path` and `condition`, whose error variants, offsets and hints are not observable through `Source`/`Sink` beyond "config rejected".
+- Metrics are a seam of their own: `Recorder` in `crates/core/src/metrics.rs`, with `InMemoryRecorder` as the fake. Assert what the engine emits through the harness (`h.counter`, `h.samples`); below it only the closed sets (metric names, drop reasons) and the OTLP recorder on the SDK's in-memory exporter.
 
 ## Workflow
 
 - Work happens on a branch named `feat/<issue>-<slug>` (or `fix/`, `refactor/`), pushed and merged by PR. Never commit on `main`.
-- Commits are Conventional Commits scoped by crate: `feat(core): ...`, `fix(nats): ...`, `docs(spec): ...`.
+- Commits are Conventional Commits scoped by crate: `feat(core): ...`, `fix(nats): ...`, `docs(spec): ...`; `deploy` for the compose stack.
 - One ticket per `/implement` session. Clear context between tickets.
 
 ## Agent skills

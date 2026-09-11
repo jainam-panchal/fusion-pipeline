@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::config::SOURCE_ID;
 use crate::dag::NodeIndex;
 use crate::io::{Envelope, Intake, Source, SourceError};
 use crate::metrics::Metrics;
@@ -144,16 +145,16 @@ impl Engine {
     }
 }
 
-/// The `stage` label for decisions the engine takes before any node runs.
-const SOURCE_STAGE: &str = "source";
-
-/// One record's walk through the graph: its id, its tenant, and whether any branch has
-/// failed.
-struct Walk<'m> {
+/// One record's walk through the graph: its id, its tenant, the node it is in, and whether
+/// any branch has failed. `SOURCE_ID` is the `stage` label for decisions the engine takes
+/// before any node runs.
+struct Walk<'p> {
     record_id: RecordId,
     tenant: String,
+    /// The node whose stage or sink is running, so a panic is charged to it.
+    at: Option<&'p str>,
     failed: bool,
-    metrics: &'m Metrics,
+    metrics: &'p Metrics,
 }
 
 impl Walk<'_> {
@@ -174,20 +175,20 @@ struct Walker<'p> {
     metrics: &'p Metrics,
 }
 
-impl Walker<'_> {
+impl<'p> Walker<'p> {
     fn handle(&self, envelope: Envelope) {
         let Envelope { record, ack } = envelope;
         let tenant = Metrics::tenant_of(&record).to_owned();
         // Every record the source hands over counts in at `source`, so intake is one series
         // whatever the first node is called.
-        self.metrics.records_in(&tenant, SOURCE_STAGE);
+        self.metrics.records_in(&tenant, SOURCE_ID);
 
         let Some(record_id) = record.id else {
             // Spec: the idempotency guarantee has no unguarded path, so a record without an
             // id is nak'd. The record was not forwarded, which is the drop the spec counts
             // under `missing_id`; the message is nak'd, which is the nak it counts.
             self.metrics
-                .dropped(&tenant, SOURCE_STAGE, DropReason::MissingId);
+                .dropped(&tenant, SOURCE_ID, DropReason::MissingId);
             self.metrics.source_nak(&tenant);
             ack.nak(None);
             return;
@@ -196,7 +197,7 @@ impl Walker<'_> {
             // Spec: metric and span are rejected by the engine (reason `invalid_record`).
             // Rejection is a drop, and drops are acked.
             self.metrics
-                .dropped(&tenant, SOURCE_STAGE, DropReason::InvalidRecord);
+                .dropped(&tenant, SOURCE_ID, DropReason::InvalidRecord);
             ack.ack();
             return;
         }
@@ -205,6 +206,7 @@ impl Walker<'_> {
         let mut walk = Walk {
             record_id,
             tenant,
+            at: None,
             failed: false,
             metrics: self.metrics,
         };
@@ -215,15 +217,18 @@ impl Walker<'_> {
             self.fan_out(targets, Arc::new(record), &mut walk);
         }));
         if outcome.is_err() {
-            walk.fail("<panic>", &"stage or sink panicked");
-        }
-        if let Some(elapsed) = observed.and_then(since_unix_nanos) {
-            self.metrics.end_to_end(&walk.tenant, elapsed);
+            let at = walk.at.unwrap_or(SOURCE_ID);
+            walk.fail(at, &"stage or sink panicked");
         }
         if walk.failed {
             self.metrics.source_nak(&walk.tenant);
             ack.nak(None);
         } else {
+            // End to end is measured on the ack only: a nakked record comes back and is
+            // measured when it finally settles.
+            if let Some(elapsed) = observed.and_then(since_unix_nanos) {
+                self.metrics.end_to_end(&walk.tenant, elapsed);
+            }
             ack.ack();
         }
     }
@@ -234,7 +239,7 @@ impl Walker<'_> {
         &self,
         targets: impl Iterator<Item = NodeIndex>,
         record: Arc<Record>,
-        walk: &mut Walk<'_>,
+        walk: &mut Walk<'p>,
     ) {
         let mut targets = targets.peekable();
         while let Some(target) = targets.next() {
@@ -246,10 +251,11 @@ impl Walker<'_> {
         }
     }
 
-    fn run_node(&self, index: NodeIndex, record: Arc<Record>, walk: &mut Walk<'_>) {
+    fn run_node(&self, index: NodeIndex, record: Arc<Record>, walk: &mut Walk<'p>) {
         let dag = self.pipeline.dag();
         let node_id = dag.node(index).id.as_str();
         let metrics = self.metrics;
+        walk.at = Some(node_id);
         metrics.records_in(&walk.tenant, node_id);
         match self.pipeline.node(index) {
             CompiledNode::Sink(sink) => {

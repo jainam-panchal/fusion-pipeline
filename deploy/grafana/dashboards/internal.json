@@ -11,7 +11,7 @@
   "graphTooltip": 1,
   "refresh": "5s",
   "schemaVersion": 39,
-  "version": 7,
+  "version": 9,
   "time": {
     "from": "now-15m",
     "to": "now"
@@ -203,7 +203,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(records_in_total{tenant=~\"$tenant\",stage=\"source\"}[1m]))",
+          "expr": "(sum(rate(records_in_total{tenant=~\"$tenant\",stage=\"source\"}[1m]))) or vector(0)",
           "legendFormat": "in",
           "refId": "A"
         },
@@ -221,7 +221,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(records_dropped_total{tenant=~\"$tenant\"}[1m]))",
+          "expr": "(sum(rate(records_dropped_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
           "legendFormat": "dropped",
           "refId": "C"
         },
@@ -230,7 +230,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(records_errored_total{tenant=~\"$tenant\"}[1m]))",
+          "expr": "(sum(rate(records_errored_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
           "legendFormat": "errored",
           "refId": "D"
         }
@@ -259,7 +259,8 @@
             "fillOpacity": 12,
             "showPoints": "never"
           },
-          "min": 0
+          "min": 0,
+          "noValue": "no runs"
         },
         "overrides": []
       },
@@ -285,7 +286,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(pipeline_end_to_end_seconds_bucket{tenant=~\"$tenant\"}[1m])))",
+          "expr": "(histogram_quantile(0.5, sum by (le) (rate(pipeline_end_to_end_seconds_bucket{tenant=~\"$tenant\"}[1m])))) or vector(0)",
           "legendFormat": "end-to-end p50",
           "refId": "A"
         },
@@ -294,7 +295,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(pipeline_end_to_end_seconds_bucket{tenant=~\"$tenant\"}[1m])))",
+          "expr": "(histogram_quantile(0.99, sum by (le) (rate(pipeline_end_to_end_seconds_bucket{tenant=~\"$tenant\"}[1m])))) or vector(0)",
           "legendFormat": "end-to-end p99",
           "refId": "B"
         },
@@ -303,7 +304,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(histogram_quantile(0.99, sum by (le, stage) (rate(stage_duration_seconds_bucket{tenant=~\"$tenant\",stage=~\"$stage\"}[1m]) or rate(sink_publish_duration_seconds_bucket{tenant=~\"$tenant\",stage=~\"$stage\"}[1m]))))",
+          "expr": "(max(histogram_quantile(0.99, sum by (le, stage) (rate(stage_duration_seconds_bucket{tenant=~\"$tenant\",stage=~\"$stage\"}[1m]) or rate(sink_publish_duration_seconds_bucket{tenant=~\"$tenant\",stage=~\"$stage\"}[1m]))))) or vector(0)",
           "legendFormat": "slowest stage p99",
           "refId": "C"
         }
@@ -385,7 +386,7 @@
       "id": 5,
       "type": "timeseries",
       "title": "Failures",
-      "description": "Flat at zero is healthy. A failed record naks; JetStream redelivers up to max_deliver, then the dead-letter queue (#10) takes it.",
+      "description": "Flat at zero is healthy. errored counts a stage error or a sink without PubAck once, under its node; each failed record naks; JetStream redelivers up to max_deliver, then the dead-letter queue (#10) takes it.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -404,7 +405,8 @@
             "fillOpacity": 12,
             "showPoints": "never"
           },
-          "min": 0
+          "min": 0,
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -438,8 +440,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (stage) (rate(sink_publish_errors_total{tenant=~\"$tenant\"}[1m]))",
-          "legendFormat": "no PubAck @ {{stage}}",
+          "expr": "(sum(rate(source_naks_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
+          "legendFormat": "naks",
           "refId": "B"
         },
         {
@@ -447,8 +449,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(source_naks_total{tenant=~\"$tenant\"}[1m]))",
-          "legendFormat": "naks",
+          "expr": "(sum(rate(source_redeliveries_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
+          "legendFormat": "redeliveries",
           "refId": "C"
         },
         {
@@ -456,18 +458,9 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(source_redeliveries_total{tenant=~\"$tenant\"}[1m]))",
-          "legendFormat": "redeliveries",
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum(rate(dlq_total{tenant=~\"$tenant\"}[1m]))",
+          "expr": "(sum(rate(dlq_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
           "legendFormat": "dead-lettered",
-          "refId": "E"
+          "refId": "D"
         }
       ]
     },
@@ -645,7 +638,8 @@
             "fillOpacity": 12,
             "showPoints": "never"
           },
-          "min": 0
+          "min": 0,
+          "noValue": "0"
         },
         "overrides": [
           {
@@ -732,7 +726,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(records_in_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "expr": "(sum(rate(records_in_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))) or vector(0)",
           "legendFormat": "in",
           "refId": "A"
         },
@@ -741,7 +735,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(records_out_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "expr": "(sum(rate(records_out_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))) or vector(0)",
           "legendFormat": "out",
           "refId": "B"
         },
@@ -750,7 +744,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(records_dropped_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "expr": "(sum(rate(records_dropped_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))) or vector(0)",
           "legendFormat": "dropped",
           "refId": "C"
         },
@@ -759,7 +753,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(records_errored_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "expr": "(sum(rate(records_errored_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))) or vector(0)",
           "legendFormat": "errored",
           "refId": "D"
         }
@@ -788,7 +782,8 @@
             "fillOpacity": 12,
             "showPoints": "never"
           },
-          "min": 0
+          "min": 0,
+          "noValue": "no runs"
         },
         "overrides": []
       },
@@ -865,7 +860,8 @@
               "group": "A"
             }
           },
-          "min": 0
+          "min": 0,
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -899,7 +895,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(records_errored_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "expr": "(sum(rate(records_errored_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))) or vector(0)",
           "legendFormat": "errored",
           "refId": "B"
         },
@@ -908,7 +904,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(sink_publish_errors_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "expr": "(sum(rate(sink_publish_errors_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))) or vector(0)",
           "legendFormat": "no PubAck",
           "refId": "C"
         }
@@ -937,7 +933,8 @@
             "fillOpacity": 12,
             "showPoints": "never"
           },
-          "min": 0
+          "min": 0,
+          "noValue": "no state store yet (#6)"
         },
         "overrides": []
       },
@@ -962,7 +959,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(state_ops_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "expr": "(sum(rate(state_ops_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))) or vector(0)",
           "legendFormat": "ops/s",
           "refId": "A"
         },
@@ -980,7 +977,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(state_errors_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "expr": "(sum(rate(state_errors_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))) or vector(0)",
           "legendFormat": "errors/s",
           "refId": "C"
         }
@@ -1021,7 +1018,8 @@
                 "fillOpacity": 12,
                 "showPoints": "never"
               },
-              "min": 0
+              "min": 0,
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -1076,7 +1074,8 @@
                 "fillOpacity": 12,
                 "showPoints": "never"
               },
-              "min": 0
+              "min": 0,
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -1131,7 +1130,8 @@
                 "fillOpacity": 12,
                 "showPoints": "never"
               },
-              "min": 0
+              "min": 0,
+              "noValue": "no Lua stage yet (#8)"
             },
             "overrides": []
           },
@@ -1186,7 +1186,8 @@
                 "fillOpacity": 12,
                 "showPoints": "never"
               },
-              "min": 0
+              "min": 0,
+              "noValue": "0"
             },
             "overrides": []
           },

@@ -70,7 +70,7 @@ from `deploy/grafana` and the pipeline's metrics reach Prometheus through the co
 docker compose -f deploy/compose.yaml up -d --build
 open http://127.0.0.1:3000/d/fusion-internal     # Grafana, no login
 nats pub logs.acme.syslog '{"id": {{Count}}, "body": "disk full"}' --count 1000
-deploy/metrics-check.sh                          # traffic in, every spec metric present, exit non-zero otherwise
+deploy/metrics-check.sh                          # traffic in; every metric with a producer present, labels checked, exit non-zero otherwise
 ```
 
 The pipeline exports over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` (or the metrics-specific
@@ -85,10 +85,10 @@ resource, so `--scale pipeline=3` gives three series that the dashboard sums. NA
 (`jetstream_consumer_*` for pending, redelivered and ack floor), Dragonfly at
 `:6379/metrics`. Each process reports its own CPU and memory: the pipeline exports OTel's
 `process.cpu.time`, `process.memory.usage` and `process.thread.count`, NATS its `varz`,
-Dragonfly its own gauges. `deploy/nats-smoke.sh` runs its own `pipelined` on the host and
+Dragonfly its own metrics. `deploy/nats-smoke.sh` runs its own `pipelined` on the host and
 stops the compose one first.
 
-The dashboard is timeseries only, no gauges: an Overview row (throughput, latency, backlog,
+The dashboard is timeseries only, no stat tiles: an Overview row (throughput, latency, backlog,
 failures, CPU, memory) with Last/Max/Mean in every legend, then one row per stage that
 repeats for every `stage` the pipeline has reported (records, p50/p95/p99, drops by reason,
 state-store ops), and a collapsed Internals row. `Tenant` and `Stage` variables filter

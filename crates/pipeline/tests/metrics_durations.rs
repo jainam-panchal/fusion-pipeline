@@ -105,3 +105,20 @@ fn a_record_without_an_observed_time_leaves_no_end_to_end_sample() {
     );
     h.finish();
 }
+
+#[test]
+fn a_nakked_record_leaves_no_end_to_end_sample() {
+    let h = start(KEEP_ERRORS, 1);
+    h.sinks.fail_writes_to("out");
+
+    assert_eq!(
+        h.source.push(record(1, 1_000_000_000)).wait(WAIT),
+        Some(AckOutcome::Nak(None))
+    );
+
+    assert!(
+        h.samples(Metric::EndToEnd, &[("tenant", "acme")])
+            .is_empty()
+    );
+    h.finish();
+}
