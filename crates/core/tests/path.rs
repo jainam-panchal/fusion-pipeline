@@ -354,3 +354,51 @@ fn remove_deletes_the_field_and_returns_the_old_value() {
     }
     assert_eq!(record, before);
 }
+
+#[test]
+fn quoted_segments_may_hold_brackets_and_dots_and_display_round_trips() {
+    for (text, key) in [
+        (r#"attributes."a[0]""#, "a[0]"),
+        (r#"attributes."a.b""#, "a.b"),
+        (r#"attributes."back\\slash""#, r"back\slash"),
+    ] {
+        let path = FieldPath::parse(text).expect(text);
+        assert_eq!(path.map_key(), Some(key), "{text}");
+        let shown = path.to_string();
+        let again = FieldPath::parse(&shown).expect(&shown);
+        assert_eq!(again.map_key(), Some(key), "{text} -> {shown}");
+    }
+}
+
+#[test]
+fn hints_are_themselves_valid_paths() {
+    let cases = [
+        (r#"attributes["a b"]"#, r#"attributes."a b""#),
+        (r#"attributes["http.status"]"#, "attributes.http.status"),
+        (r#"attributes."x y".x y"#, r#"attributes."x y"."x y""#),
+        ("attributes.a:b.c", r#"attributes."a:b".c"#),
+        (r#"attributes."a"b"#, "attributes.ab"),
+    ];
+    for (bad, hint) in cases {
+        let err = FieldPath::parse(bad).expect_err(bad);
+        let instead = match &err {
+            PathError::BracketSyntax { instead, .. }
+            | PathError::InvalidSegment { instead, .. } => instead.clone(),
+            other => panic!("{bad}: unexpected {other}"),
+        };
+        assert_eq!(instead, hint, "{bad}: {err}");
+        FieldPath::parse(&instead).unwrap_or_else(|e| panic!("hint `{instead}` for `{bad}`: {e}"));
+    }
+}
+
+#[test]
+fn empty_quoted_segment_and_unknown_escapes_are_rejected() {
+    let err = FieldPath::parse(r#"attributes."""#).expect_err("empty");
+    assert!(matches!(err, PathError::EmptySegment { .. }), "{err}");
+
+    let err = FieldPath::parse(r#"attributes."a\nb""#).expect_err("only \\\" and \\\\ escape");
+    assert!(
+        matches!(err, PathError::InvalidSegment { ch: 'n', ref instead, .. } if instead == r#"attributes."a\\nb""#),
+        "{err}"
+    );
+}

@@ -62,7 +62,7 @@ pub enum ConditionError {
         offset: usize,
     },
     /// A field path that does not follow the path rule.
-    #[error("{source}")]
+    #[error("{source} (path at offset {offset})")]
     Field {
         /// Byte offset of the path in the expression.
         offset: usize,
@@ -381,7 +381,7 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
                     i += 1;
                 }
                 if i < bytes.len() && matches!(bytes[i], b'.' | b'[') {
-                    i = lex_path_rest(expr, i)?;
+                    i = lex_path_rest(expr, start, i)?;
                     Tok::Path(expr[start..i].to_owned())
                 } else {
                     Tok::Ident(expr[start..i].to_owned())
@@ -403,18 +403,23 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
 
 /// Lex the segments of a path after its root, starting at `i` (a `.` or `[`), and return
 /// the offset just past them. The text is kept as written; [`FieldPath::parse`] judges it,
-/// so bracket syntax and bad characters get the path error and its hint.
-fn lex_path_rest(expr: &str, mut i: usize) -> Result<usize, ConditionError> {
+/// so bracket syntax, bad characters and escapes get the path error and its hint. `start`
+/// is the root's offset, reported with an unclosed quote.
+fn lex_path_rest(expr: &str, start: usize, mut i: usize) -> Result<usize, ConditionError> {
     let bytes = expr.as_bytes();
     while i < bytes.len() {
         match bytes[i] {
             b'.' => {
                 i += 1;
                 if bytes.get(i) == Some(&b'"') {
-                    let (_, end) = lex_string(expr, i)?;
-                    i = end;
+                    i = skip_quoted(bytes, i).ok_or_else(|| ConditionError::Field {
+                        offset: start,
+                        source: PathError::UnterminatedQuote {
+                            path: expr[start..].to_owned(),
+                        },
+                    })?;
                 } else {
-                    while i < bytes.len() && is_bare_segment_byte(bytes[i]) {
+                    while i < bytes.len() && continues_bare_segment(bytes[i]) {
                         i += 1;
                     }
                 }
@@ -422,12 +427,10 @@ fn lex_path_rest(expr: &str, mut i: usize) -> Result<usize, ConditionError> {
             b'[' => {
                 i += 1;
                 while i < bytes.len() && bytes[i] != b']' {
-                    if bytes[i] == b'"' || bytes[i] == b'\'' {
-                        let (_, end) = lex_string(expr, i)?;
-                        i = end;
-                    } else {
-                        i += 1;
-                    }
+                    i = match bytes[i] {
+                        b'"' | b'\'' => skip_quoted(bytes, i).unwrap_or(bytes.len()),
+                        _ => i + 1,
+                    };
                 }
                 i = (i + 1).min(bytes.len());
             }
@@ -437,9 +440,25 @@ fn lex_path_rest(expr: &str, mut i: usize) -> Result<usize, ConditionError> {
     Ok(i)
 }
 
-/// Bytes that keep a bare segment going. Wider than the segment charset on purpose, so a
-/// stray `:` or `/` is reported as a path error with a hint instead of an unexpected token.
-const fn is_bare_segment_byte(b: u8) -> bool {
+/// From the opening quote at `i`, the offset just past the closing quote of the same kind,
+/// skipping backslash-escaped bytes. `None` when the quote is never closed.
+fn skip_quoted(bytes: &[u8], i: usize) -> Option<usize> {
+    let quote = bytes[i];
+    let mut j = i + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => j += 2,
+            b if b == quote => return Some(j + 1),
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+/// Bytes that keep a bare segment going in the lexer. Wider than the segment charset on
+/// purpose, so a stray `:` or `/` is reported as a path error with a hint instead of an
+/// unexpected token.
+const fn continues_bare_segment(b: u8) -> bool {
     !matches!(
         b,
         b' ' | b'\t'

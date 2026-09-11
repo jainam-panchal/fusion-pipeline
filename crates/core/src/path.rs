@@ -3,11 +3,11 @@
 //! A path is `root ("." segment)*`. The root is a top-level record field. When it is
 //! `attributes`, `resource` or `scope`, the segments joined with dots are the map key, so
 //! `attributes.http.status` names the `http.status` key of `attributes` and
-//! `resource.k8s.pod-name` the `k8s.pod-name` key of `resource`. A segment is one or more of
-//! `[A-Za-z0-9_-]`, or a double-quoted string for keys with other characters:
-//! `attributes."Event ID".code` names the `Event ID.code` key. The three maps are flat: values
-//! are scalars and nothing below a key is addressable. `body` is addressed only as a whole,
-//! and the scalar fields take no segments.
+//! `resource.k8s.pod-name` the `k8s.pod-name` key of `resource`. A bare segment is one or
+//! more of `[A-Za-z0-9_-]`; a segment with any other character is double-quoted, with `\"`
+//! and `\\` as the only escapes: `attributes."Event ID".code` names the `Event ID.code` key.
+//! The three maps are flat: values are scalars and nothing below a key is addressable.
+//! `body` is addressed only as a whole, and the scalar fields take no segments.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -21,7 +21,7 @@ use crate::record::Record;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum PathError {
-    /// The path is empty or has an empty segment (`a..b`, a leading or trailing dot).
+    /// The path is empty or has an empty segment (`a..b`, `a.""`, a leading or trailing dot).
     #[error(
         "`{path}` has an empty segment; instead use `<field>.<key>` with one dot between names"
     )]
@@ -29,12 +29,13 @@ pub enum PathError {
         /// The path text.
         path: String,
     },
-    /// A bare segment has a character outside `[A-Za-z0-9_-]`.
+    /// A bare segment has a character outside `[A-Za-z0-9_-]`, or a quoted segment is
+    /// followed by something other than a dot.
     #[error("`{segment}` has `{ch}`; instead use `{instead}`")]
     InvalidSegment {
-        /// The offending segment.
+        /// The offending segment as written.
         segment: String,
-        /// The first character that is not allowed.
+        /// The first character that is not allowed there.
         ch: char,
         /// The same path with that segment quoted.
         instead: String,
@@ -95,6 +96,110 @@ pub enum PathError {
 const FIELDS: &str = "id, kind, body, severity_text, severity_number, time_unix_nano, \
 observed_time_unix_nano, trace_id, span_id, attributes.<key>, resource.<key>, scope.<key>";
 
+/// A top-level field that is addressed as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Id,
+    Kind,
+    TimeUnixNano,
+    ObservedTimeUnixNano,
+    SeverityText,
+    SeverityNumber,
+    Body,
+    TraceId,
+    SpanId,
+}
+
+/// One of the three flat maps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MapField {
+    Attributes,
+    Resource,
+    Scope,
+}
+
+/// What a path names once parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+    Field(Field),
+    /// A key of one of the maps.
+    Key(MapField, String),
+}
+
+const FIELD_NAMES: [(&str, Field); 9] = [
+    ("id", Field::Id),
+    ("kind", Field::Kind),
+    ("time_unix_nano", Field::TimeUnixNano),
+    ("observed_time_unix_nano", Field::ObservedTimeUnixNano),
+    ("severity_text", Field::SeverityText),
+    ("severity_number", Field::SeverityNumber),
+    ("body", Field::Body),
+    ("trace_id", Field::TraceId),
+    ("span_id", Field::SpanId),
+];
+
+const MAP_NAMES: [(&str, MapField); 3] = [
+    ("attributes", MapField::Attributes),
+    ("resource", MapField::Resource),
+    ("scope", MapField::Scope),
+];
+
+impl Field {
+    fn parse(name: &str) -> Option<Self> {
+        FIELD_NAMES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, f)| *f)
+    }
+
+    fn name(self) -> &'static str {
+        FIELD_NAMES
+            .iter()
+            .find(|(_, f)| *f == self)
+            .map_or("", |(n, _)| n)
+    }
+}
+
+impl MapField {
+    fn parse(name: &str) -> Option<Self> {
+        MAP_NAMES.iter().find(|(n, _)| *n == name).map(|(_, m)| *m)
+    }
+
+    fn name(self) -> &'static str {
+        MAP_NAMES
+            .iter()
+            .find(|(_, m)| *m == self)
+            .map_or("", |(n, _)| n)
+    }
+
+    fn get(self, record: &Record) -> &Map<String, Value> {
+        match self {
+            Self::Attributes => &record.attributes,
+            Self::Resource => &record.resource,
+            Self::Scope => &record.scope,
+        }
+    }
+
+    fn get_mut(self, record: &mut Record) -> &mut Map<String, Value> {
+        match self {
+            Self::Attributes => &mut record.attributes,
+            Self::Resource => &mut record.resource,
+            Self::Scope => &mut record.scope,
+        }
+    }
+}
+
+/// A parsed dotted path into a record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldPath {
+    target: Target,
+}
+
+/// Whether `c` may appear in a bare path segment.
+const fn is_segment_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
 fn json_type(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -106,178 +211,140 @@ fn json_type(v: &Value) -> &'static str {
     }
 }
 
-/// Top-level record field a path starts at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Root {
-    Id,
-    Kind,
-    TimeUnixNano,
-    ObservedTimeUnixNano,
-    SeverityText,
-    SeverityNumber,
-    Body,
-    Attributes,
-    Resource,
-    Scope,
-    TraceId,
-    SpanId,
-}
-
-impl Root {
-    fn parse(name: &str) -> Option<Self> {
-        Some(match name {
-            "id" => Self::Id,
-            "kind" => Self::Kind,
-            "time_unix_nano" => Self::TimeUnixNano,
-            "observed_time_unix_nano" => Self::ObservedTimeUnixNano,
-            "severity_text" => Self::SeverityText,
-            "severity_number" => Self::SeverityNumber,
-            "body" => Self::Body,
-            "attributes" => Self::Attributes,
-            "resource" => Self::Resource,
-            "scope" => Self::Scope,
-            "trace_id" => Self::TraceId,
-            "span_id" => Self::SpanId,
-            _ => return None,
-        })
-    }
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Id => "id",
-            Self::Kind => "kind",
-            Self::TimeUnixNano => "time_unix_nano",
-            Self::ObservedTimeUnixNano => "observed_time_unix_nano",
-            Self::SeverityText => "severity_text",
-            Self::SeverityNumber => "severity_number",
-            Self::Body => "body",
-            Self::Attributes => "attributes",
-            Self::Resource => "resource",
-            Self::Scope => "scope",
-            Self::TraceId => "trace_id",
-            Self::SpanId => "span_id",
-        }
-    }
-
-    const fn is_map(self) -> bool {
-        matches!(self, Self::Attributes | Self::Resource | Self::Scope)
-    }
-}
-
-/// A parsed dotted path into a record.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FieldPath {
-    root: Root,
-    /// The flat map key; `Some` exactly when the root is a map.
-    key: Option<String>,
-}
-
-/// `attributes["http.status"]["x"]` as `attributes.http.status.x`, for the bracket error.
-fn unbracket(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    for part in path.split(['[', ']']) {
-        let part = part.trim_matches(['"', '\'']);
-        if part.is_empty() {
-            continue;
-        }
-        if !out.is_empty() && !out.ends_with('.') && !part.starts_with('.') {
-            out.push('.');
-        }
-        out.push_str(part);
-    }
-    out
-}
-
-/// Whether `c` may appear in a bare path segment.
-#[must_use]
-pub const fn is_segment_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == '-'
-}
-
-/// Split `path` on dots into its segments, honouring double-quoted segments. The root is
-/// never quoted. Every bare segment is checked against [`is_segment_char`].
-fn split_segments(path: &str) -> Result<Vec<String>, PathError> {
-    let empty = || PathError::EmptySegment {
-        path: path.to_owned(),
-    };
-    let mut segments = Vec::new();
-    let mut chars = path.char_indices().peekable();
-    loop {
-        match chars.peek().copied() {
-            Some((_, '"')) if !segments.is_empty() => {
-                chars.next();
-                let mut out = String::new();
-                let closed = loop {
-                    match chars.next() {
-                        None => break false,
-                        Some((_, '"')) => break true,
-                        Some((_, '\\')) => match chars.next() {
-                            Some((_, c)) => out.push(c),
-                            None => break false,
-                        },
-                        Some((_, c)) => out.push(c),
-                    }
-                };
-                if !closed {
-                    return Err(PathError::UnterminatedQuote {
-                        path: path.to_owned(),
-                    });
-                }
-                segments.push(out);
-            }
-            _ => {
-                let mut out = String::new();
-                while let Some(&(_, c)) = chars.peek() {
-                    if c == '.' {
-                        break;
-                    }
-                    chars.next();
-                    out.push(c);
-                }
-                if out.is_empty() {
-                    return Err(empty());
-                }
-                // The root is checked by name; only key segments have a charset.
-                let is_key = !segments.is_empty();
-                if let Some(ch) = out.chars().find(|&c| is_key && !is_segment_char(c)) {
-                    let instead = quote_segment_in(path, &out);
-                    return Err(PathError::InvalidSegment {
-                        segment: out,
-                        ch,
-                        instead,
-                    });
-                }
-                segments.push(out);
-            }
-        }
-        match chars.next() {
-            None => return Ok(segments),
-            Some((_, '.')) => {
-                if chars.peek().is_none() {
-                    return Err(empty());
-                }
-            }
-            Some(_) => return Err(empty()),
-        }
-    }
-}
-
-/// `path` with the first occurrence of `segment` wrapped in quotes, for the error hint.
-fn quote_segment_in(path: &str, segment: &str) -> String {
-    path.replacen(segment, &format!("\"{}\"", quote_escape(segment)), 1)
-}
-
-fn quote_escape(segment: &str) -> String {
-    segment.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 /// A segment as written in a path: bare when it can be, quoted otherwise.
 fn display_segment(segment: &str) -> String {
     if !segment.is_empty() && segment.chars().all(is_segment_char) {
         segment.to_owned()
     } else {
-        format!("\"{}\"", quote_escape(segment))
+        format!("\"{}\"", segment.replace('\\', "\\\\").replace('"', "\\\""))
     }
+}
+
+/// `attributes["http.status"]["a b"]` as `attributes.http.status."a b"`, for the bracket
+/// error's hint.
+fn unbracket(path: &str) -> String {
+    let mut segments: Vec<String> = Vec::new();
+    for part in path.split(['[', ']']) {
+        let part = part.trim_matches(['"', '\'']);
+        for segment in part.split('.') {
+            if !segment.is_empty() {
+                segments.push(display_segment(segment));
+            }
+        }
+    }
+    segments.join(".")
+}
+
+/// The segments of `path`, in order, with quotes and escapes resolved. Only key segments
+/// have a charset; the root is judged by name afterwards.
+fn split_segments(path: &str) -> Result<Vec<String>, PathError> {
+    let empty = || PathError::EmptySegment {
+        path: path.to_owned(),
+    };
+    let mut segments: Vec<String> = Vec::new();
+    let mut i = 0;
+    loop {
+        let start = i;
+        let rest = &path[i..];
+        let segment = if rest.starts_with('"') && !segments.is_empty() {
+            let (segment, end) = unquote(path, i)?;
+            i = end;
+            if segment.is_empty() {
+                return Err(empty());
+            }
+            segment
+        } else {
+            let end = rest
+                .find(['.', '[', ']'])
+                .map_or(path.len(), |offset| i + offset);
+            let segment = &path[i..end];
+            i = end;
+            if segment.is_empty() && !path[i..].starts_with(['[', ']']) {
+                return Err(empty());
+            }
+            if let Some(ch) = segment
+                .chars()
+                .find(|&c| !segments.is_empty() && !is_segment_char(c))
+            {
+                return Err(PathError::InvalidSegment {
+                    segment: segment.to_owned(),
+                    ch,
+                    instead: quoted_hint(&segments, segment, &path[i..]),
+                });
+            }
+            segment.to_owned()
+        };
+        match path[i..].chars().next() {
+            None => {
+                segments.push(segment);
+                return Ok(segments);
+            }
+            Some('.') => {
+                segments.push(segment);
+                i += 1;
+                if i == path.len() {
+                    return Err(empty());
+                }
+            }
+            Some('[' | ']') => {
+                return Err(PathError::BracketSyntax {
+                    path: path.to_owned(),
+                    instead: unbracket(path),
+                });
+            }
+            Some(ch) => {
+                // Text glued to a closing quote: `attributes."a"b`.
+                let end = path[i..].find('.').map_or(path.len(), |offset| i + offset);
+                return Err(PathError::InvalidSegment {
+                    segment: path[start..end].to_owned(),
+                    ch,
+                    instead: quoted_hint(
+                        &segments,
+                        &format!("{segment}{}", &path[i..end]),
+                        &path[end..],
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// Read a quoted segment starting at `start` (the quote). Returns the contents and the
+/// offset just past the closing quote. `\"` and `\\` are the only escapes.
+fn unquote(path: &str, start: usize) -> Result<(String, usize), PathError> {
+    let mut out = String::new();
+    let mut chars = path[start + 1..].char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '"' => return Ok((out, start + 1 + i + 1)),
+            '\\' => match chars.next() {
+                Some((_, c @ ('"' | '\\'))) => out.push(c),
+                Some((_, other)) => {
+                    return Err(PathError::InvalidSegment {
+                        segment: path[start..].to_owned(),
+                        ch: other,
+                        instead: format!(
+                            "{}\\\\{}",
+                            &path[..start + 1 + i],
+                            &path[start + 1 + i + 1..]
+                        ),
+                    });
+                }
+                None => break,
+            },
+            c => out.push(c),
+        }
+    }
+    Err(PathError::UnterminatedQuote {
+        path: path.to_owned(),
+    })
+}
+
+/// `before.` + the bad segment quoted + the rest of the path, for the segment error's hint.
+fn quoted_hint(before: &[String], bad: &str, rest: &str) -> String {
+    let mut out: Vec<String> = before.iter().map(|s| display_segment(s)).collect();
+    out.push(display_segment(bad));
+    format!("{}{rest}", out.join("."))
 }
 
 impl FieldPath {
@@ -288,47 +355,47 @@ impl FieldPath {
     /// A [`PathError`] when the text is not `root ("." segment)*`, the root is not a record
     /// field, a scalar or `body` is given segments, or a map is named without a key.
     pub fn parse(path: &str) -> Result<Self, PathError> {
-        if path.contains('[') || path.contains(']') {
-            return Err(PathError::BracketSyntax {
-                path: path.to_owned(),
-                instead: unbracket(path),
-            });
-        }
         let segments = split_segments(path)?;
-        let (root_name, rest) = segments
+        let (root, keys) = segments
             .split_first()
             .ok_or_else(|| PathError::EmptySegment {
                 path: path.to_owned(),
             })?;
-        Self::from_segments(root_name, rest)
-    }
-
-    /// Build from an already-split path: the root name and the key segments after it.
-    ///
-    /// # Errors
-    ///
-    /// As [`FieldPath::parse`], for the errors that concern the root and the segment count.
-    pub fn from_segments(root_name: &str, segments: &[String]) -> Result<Self, PathError> {
-        let root = Root::parse(root_name).ok_or_else(|| PathError::UnknownField {
-            name: root_name.to_owned(),
-        })?;
-        match (root.is_map(), segments.is_empty()) {
-            (true, true) => Err(PathError::MapNeedsKey {
-                field: root_name.to_owned(),
-            }),
-            (true, false) => Ok(Self {
-                root,
-                key: Some(segments.join(".")),
-            }),
-            (false, true) => Ok(Self { root, key: None }),
-            (false, false) => Err(PathError::NotAMap {
-                field: root_name.to_owned(),
-                hint: if root == Root::Body {
+        if let Some(map) = MapField::parse(root) {
+            return if keys.is_empty() {
+                Err(PathError::MapNeedsKey {
+                    field: root.clone(),
+                })
+            } else {
+                Ok(Self {
+                    target: Target::Key(map, keys.join(".")),
+                })
+            };
+        }
+        let field =
+            Field::parse(root).ok_or_else(|| PathError::UnknownField { name: root.clone() })?;
+        if keys.is_empty() {
+            Ok(Self {
+                target: Target::Field(field),
+            })
+        } else {
+            Err(PathError::NotAMap {
+                field: root.clone(),
+                hint: if field == Field::Body {
                     ", or parse it into attributes first"
                 } else {
                     ""
                 },
-            }),
+            })
+        }
+    }
+
+    /// The flat map key when the path names a key of `attributes`, `resource` or `scope`.
+    #[must_use]
+    pub fn map_key(&self) -> Option<&str> {
+        match &self.target {
+            Target::Key(_, key) => Some(key),
+            Target::Field(_) => None,
         }
     }
 
@@ -338,34 +405,22 @@ impl FieldPath {
     /// owned [`Value`].
     #[must_use]
     pub fn read<'a>(&self, record: &'a Record) -> Option<Cow<'a, Value>> {
-        fn owned<'a>(v: Value) -> Option<Cow<'a, Value>> {
-            Some(Cow::Owned(v))
-        }
-        match self.root {
-            Root::Id => record.id.map(|id| Cow::Owned(Value::from(id.0))),
-            Root::Kind => owned(Value::from(record.kind.as_str())),
-            Root::TimeUnixNano => record.time_unix_nano.map(Value::from).map(Cow::Owned),
-            Root::ObservedTimeUnixNano => record
-                .observed_time_unix_nano
-                .map(Value::from)
-                .map(Cow::Owned),
-            Root::SeverityText => record
-                .severity_text
-                .as_deref()
-                .map(Value::from)
-                .map(Cow::Owned),
-            Root::SeverityNumber => record.severity_number.map(Value::from).map(Cow::Owned),
-            Root::Body => record.body.as_ref().map(Cow::Borrowed),
-            Root::Attributes => self.map_get(&record.attributes),
-            Root::Resource => self.map_get(&record.resource),
-            Root::Scope => self.map_get(&record.scope),
-            Root::TraceId => record.trace_id.as_deref().map(Value::from).map(Cow::Owned),
-            Root::SpanId => record.span_id.as_deref().map(Value::from).map(Cow::Owned),
-        }
-    }
-
-    fn map_get<'a>(&self, map: &'a Map<String, Value>) -> Option<Cow<'a, Value>> {
-        map.get(self.key.as_deref()?).map(Cow::Borrowed)
+        let field = match &self.target {
+            Target::Key(map, key) => return map.get(record).get(key).map(Cow::Borrowed),
+            Target::Field(field) => *field,
+        };
+        let owned = match field {
+            Field::Id => record.id.map(|id| Value::from(id.0)),
+            Field::Kind => Some(Value::from(record.kind.as_str())),
+            Field::TimeUnixNano => record.time_unix_nano.map(Value::from),
+            Field::ObservedTimeUnixNano => record.observed_time_unix_nano.map(Value::from),
+            Field::SeverityText => record.severity_text.as_deref().map(Value::from),
+            Field::SeverityNumber => record.severity_number.map(Value::from),
+            Field::Body => return record.body.as_ref().map(Cow::Borrowed),
+            Field::TraceId => record.trace_id.as_deref().map(Value::from),
+            Field::SpanId => record.span_id.as_deref().map(Value::from),
+        };
+        owned.map(Cow::Owned)
     }
 
     /// Write `value` to the field, creating or replacing it.
@@ -379,40 +434,29 @@ impl FieldPath {
     /// `severity_text`, `trace_id` and `span_id` a string, the time fields an integer in
     /// `u64`) or a map key is offered an array or object. The record is unchanged on error.
     pub fn write(&self, record: &mut Record, value: Value) -> Result<(), PathError> {
-        match self.root {
-            Root::Id | Root::Kind => Err(self.read_only()),
-            Root::TimeUnixNano => {
-                record.time_unix_nano = self.expect_u64(value)?;
-                Ok(())
+        let field = match &self.target {
+            Target::Key(map, key) => {
+                if matches!(value, Value::Array(_) | Value::Object(_)) {
+                    return Err(self.wrong_type("a scalar", &value));
+                }
+                map.get_mut(record).insert(key.clone(), value);
+                return Ok(());
             }
-            Root::ObservedTimeUnixNano => {
+            Target::Field(field) => *field,
+        };
+        match field {
+            Field::Id | Field::Kind => return Err(self.read_only(field)),
+            Field::TimeUnixNano => record.time_unix_nano = self.expect_u64(value)?,
+            Field::ObservedTimeUnixNano => {
                 record.observed_time_unix_nano = self.expect_u64(value)?;
-                Ok(())
             }
-            Root::SeverityText => {
-                record.severity_text = self.expect_string(value)?;
-                Ok(())
-            }
-            Root::SeverityNumber => {
-                record.severity_number = self.expect_i32(value)?;
-                Ok(())
-            }
-            Root::Body => {
-                record.body = Some(value);
-                Ok(())
-            }
-            Root::Attributes => self.map_insert(&mut record.attributes, value),
-            Root::Resource => self.map_insert(&mut record.resource, value),
-            Root::Scope => self.map_insert(&mut record.scope, value),
-            Root::TraceId => {
-                record.trace_id = self.expect_string(value)?;
-                Ok(())
-            }
-            Root::SpanId => {
-                record.span_id = self.expect_string(value)?;
-                Ok(())
-            }
+            Field::SeverityText => record.severity_text = self.expect_string(value)?,
+            Field::SeverityNumber => record.severity_number = self.expect_i32(value)?,
+            Field::Body => record.body = Some(value),
+            Field::TraceId => record.trace_id = self.expect_string(value)?,
+            Field::SpanId => record.span_id = self.expect_string(value)?,
         }
+        Ok(())
     }
 
     /// Remove the field, returning the old value. Absent is `Ok(None)`.
@@ -421,41 +465,25 @@ impl FieldPath {
     ///
     /// [`PathError::ReadOnly`] for `id` and `kind`.
     pub fn remove(&self, record: &mut Record) -> Result<Option<Value>, PathError> {
-        Ok(match self.root {
-            Root::Id | Root::Kind => return Err(self.read_only()),
-            Root::TimeUnixNano => record.time_unix_nano.take().map(Value::from),
-            Root::ObservedTimeUnixNano => record.observed_time_unix_nano.take().map(Value::from),
-            Root::SeverityText => record.severity_text.take().map(Value::from),
-            Root::SeverityNumber => record.severity_number.take().map(Value::from),
-            Root::Body => record.body.take(),
-            Root::Attributes => self.map_remove(&mut record.attributes),
-            Root::Resource => self.map_remove(&mut record.resource),
-            Root::Scope => self.map_remove(&mut record.scope),
-            Root::TraceId => record.trace_id.take().map(Value::from),
-            Root::SpanId => record.span_id.take().map(Value::from),
+        let field = match &self.target {
+            Target::Key(map, key) => return Ok(map.get_mut(record).remove(key)),
+            Target::Field(field) => *field,
+        };
+        Ok(match field {
+            Field::Id | Field::Kind => return Err(self.read_only(field)),
+            Field::TimeUnixNano => record.time_unix_nano.take().map(Value::from),
+            Field::ObservedTimeUnixNano => record.observed_time_unix_nano.take().map(Value::from),
+            Field::SeverityText => record.severity_text.take().map(Value::from),
+            Field::SeverityNumber => record.severity_number.take().map(Value::from),
+            Field::Body => record.body.take(),
+            Field::TraceId => record.trace_id.take().map(Value::from),
+            Field::SpanId => record.span_id.take().map(Value::from),
         })
     }
 
-    fn map_remove(&self, map: &mut Map<String, Value>) -> Option<Value> {
-        map.remove(self.key.as_deref()?)
-    }
-
-    fn map_insert(&self, map: &mut Map<String, Value>, value: Value) -> Result<(), PathError> {
-        let Some(key) = &self.key else {
-            return Err(PathError::MapNeedsKey {
-                field: self.root.name().to_owned(),
-            });
-        };
-        if matches!(value, Value::Array(_) | Value::Object(_)) {
-            return Err(self.wrong_type("a scalar", &value));
-        }
-        map.insert(key.clone(), value);
-        Ok(())
-    }
-
-    fn read_only(&self) -> PathError {
+    fn read_only(&self, field: Field) -> PathError {
         PathError::ReadOnly {
-            field: self.root.name().to_owned(),
+            field: field.name().to_owned(),
         }
     }
 
@@ -476,38 +504,40 @@ impl FieldPath {
     }
 
     fn expect_u64(&self, value: Value) -> Result<Option<u64>, PathError> {
-        match value {
+        match &value {
             Value::Null => Ok(None),
-            Value::Number(ref n) if n.as_u64().is_some() => Ok(n.as_u64()),
-            other => Err(self.wrong_type("a non-negative integer", &other)),
+            Value::Number(n) => n
+                .as_u64()
+                .map(Some)
+                .ok_or_else(|| self.wrong_type("a non-negative integer", &value)),
+            _ => Err(self.wrong_type("a non-negative integer", &value)),
         }
     }
 
     fn expect_i32(&self, value: Value) -> Result<Option<i32>, PathError> {
-        match value {
+        match &value {
             Value::Null => Ok(None),
-            Value::Number(ref n) if n.as_i64().and_then(|i| i32::try_from(i).ok()).is_some() => {
-                Ok(n.as_i64().and_then(|i| i32::try_from(i).ok()))
-            }
-            other => Err(self.wrong_type("an integer", &other)),
+            Value::Number(n) => n
+                .as_i64()
+                .and_then(|i| i32::try_from(i).ok())
+                .map(Some)
+                .ok_or_else(|| self.wrong_type("an integer", &value)),
+            _ => Err(self.wrong_type("an integer", &value)),
         }
-    }
-
-    /// The flat map key when the path names a key of `attributes`, `resource` or `scope`.
-    #[must_use]
-    pub fn map_key(&self) -> Option<&str> {
-        self.key.as_deref()
     }
 }
 
 impl fmt::Display for FieldPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.root.name())?;
-        if let Some(key) = &self.key {
-            for part in key.split('.') {
-                write!(f, ".{}", display_segment(part))?;
+        match &self.target {
+            Target::Field(field) => f.write_str(field.name()),
+            Target::Key(map, key) => {
+                f.write_str(map.name())?;
+                for part in key.split('.') {
+                    write!(f, ".{}", display_segment(part))?;
+                }
+                Ok(())
             }
         }
-        Ok(())
     }
 }

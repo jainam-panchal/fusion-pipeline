@@ -238,3 +238,28 @@ fn parse_errors_name_the_problem() {
         "{err}"
     );
 }
+
+#[test]
+fn unclosed_quote_in_a_path_is_the_path_error_with_its_offset() {
+    let err =
+        Condition::parse(r#"severity_number > 1 and attributes."open == 1"#).expect_err("unclosed");
+    assert!(
+        matches!(err, ConditionError::Field { offset: 24, ref source } if matches!(source, PathError::UnterminatedQuote { .. })),
+        "{err}"
+    );
+    assert!(err.to_string().contains("offset 24"), "{err}");
+    assert!(err.to_string().contains("instead close it"), "{err}");
+}
+
+#[test]
+fn quoted_segment_escapes_match_the_path_rule() {
+    assert!(eval(r#"attributes."Event ID".code == 4625"#));
+    let err = Condition::parse(r#"attributes."a\nb" == 1"#).expect_err("unknown escape");
+    assert!(
+        matches!(err, ConditionError::Field { ref source, .. } if matches!(source, PathError::InvalidSegment { ch: 'n', .. })),
+        "{err}"
+    );
+    let c =
+        Condition::parse(r#"attributes."a[0]" == 1"#).expect("brackets inside quotes are key text");
+    assert!(!c.matches(&record()));
+}
