@@ -11,7 +11,7 @@
   "graphTooltip": 1,
   "refresh": "5s",
   "schemaVersion": 39,
-  "version": 13,
+  "version": 15,
   "time": {
     "from": "now-15m",
     "to": "now"
@@ -782,7 +782,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
         "y": 29
       },
@@ -871,125 +871,6 @@
           },
           "expr": "sum by (reason) (rate(records_dropped_total{tenant=~\"$tenant\",stage=\"source\"}[1m]))",
           "legendFormat": "rejected: {{reason}}",
-          "refId": "C"
-        }
-      ]
-    },
-    {
-      "id": 1002,
-      "type": "timeseries",
-      "title": "Naks, redeliveries, dead-lettered",
-      "description": "A nak is any failed record (or one without an id); JetStream redelivers it after a backoff, up to max_deliver, then the dead-letter queue takes it. Flat at zero is healthy.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 29
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 12,
-            "showPoints": "never"
-          },
-          "min": 0,
-          "noValue": "0"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "naks"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "redeliveries"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "orange"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "dead-lettered (#10)"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "purple"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "(sum(rate(source_naks_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
-          "legendFormat": "naks",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "(sum(rate(source_redeliveries_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
-          "legendFormat": "redeliveries",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "(sum(rate(dlq_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
-          "legendFormat": "dead-lettered (#10)",
           "refId": "C"
         }
       ]
@@ -1376,7 +1257,28 @@
           "min": 0,
           "noValue": "no state store yet (#6)"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "op p99"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "latency"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -1399,7 +1301,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(rate(state_ops_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))) or vector(0)",
+          "expr": "sum(rate(state_ops_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
           "legendFormat": "ops/s",
           "refId": "A"
         },
@@ -1409,7 +1311,7 @@
             "uid": "prometheus"
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(state_op_duration_seconds_bucket{tenant=~\"$tenant\",stage=\"$stage\"}[1m])))",
-          "legendFormat": "op p99 (s)",
+          "legendFormat": "op p99",
           "refId": "B"
         },
         {
@@ -1417,7 +1319,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(rate(state_errors_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))) or vector(0)",
+          "expr": "sum(rate(state_errors_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
           "legendFormat": "errors/s",
           "refId": "C"
         }

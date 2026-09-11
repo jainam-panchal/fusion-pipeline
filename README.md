@@ -90,7 +90,7 @@ stops the compose one first.
 
 The dashboard is timeseries only, no stat tiles: an Overview row (throughput, latency, backlog,
 failures, CPU, memory) with Last/Max/Mean in every legend, a Source row (handed over,
-entered the graph, rejected by reason; naks, redeliveries, dead-lettered), then one row per
+entered the graph, rejected by reason), then one row per
 stage that repeats for every node the pipeline has reported (records, p50/p95/p99, drops by
 reason, state-store ops), and a collapsed Internals row. A node added to the config gets
 its row on first record, no dashboard edit. `Tenant` and `Stage` variables filter
