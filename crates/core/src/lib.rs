@@ -10,4 +10,5 @@ pub mod memory;
 pub mod pipeline;
 pub mod record;
 pub mod registry;
+pub mod route;
 pub mod stage;

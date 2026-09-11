@@ -149,6 +149,10 @@ impl Walk {
     }
 }
 
+fn all_targets(edges: &[crate::dag::Edge]) -> Vec<NodeIndex> {
+    edges.iter().map(|e| e.target).collect()
+}
+
 struct Walker<'p> {
     pipeline: &'p Pipeline,
 }
@@ -216,11 +220,11 @@ impl Walker<'_> {
                 };
                 match stage.process(record, &ctx) {
                     StageOutput::Pass(record) => {
-                        self.fan_out(dag.successor_indices(index), record, walk)
+                        self.fan_out(&all_targets(dag.edges(index)), record, walk);
                     }
                     StageOutput::Split(records) => {
                         for record in records {
-                            self.fan_out(dag.successor_indices(index), record, walk);
+                            self.fan_out(&all_targets(dag.edges(index)), record, walk);
                         }
                     }
                     StageOutput::Drop(_reason) => {}

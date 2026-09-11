@@ -39,6 +39,44 @@ pub enum ConfigError {
         /// The `from` entry that matched nothing.
         target: String,
     },
+    /// A node reads from a route node without naming one of its labels.
+    #[error("node `{node}` reads from route `{route}` without a label; use `{route}.<label>`")]
+    RouteNeedsLabel {
+        /// The node whose `from` is wrong.
+        node: String,
+        /// The route node it reads from.
+        route: String,
+    },
+    /// A node reads `<node>.<label>` from a node that is not a route.
+    #[error("node `{node}` reads label `{label}` from `{target}`, which is not a route")]
+    NotARoute {
+        /// The node whose `from` is wrong.
+        node: String,
+        /// The node named before the dot.
+        target: String,
+        /// The label named after the dot.
+        label: String,
+    },
+    /// A node reads a label the route does not declare.
+    #[error("node `{node}` reads label `{label}` from route `{route}`, which does not declare it")]
+    UnknownRouteLabel {
+        /// The node whose `from` is wrong.
+        node: String,
+        /// The route node.
+        route: String,
+        /// The undeclared label.
+        label: String,
+    },
+    /// A route declares a label (or a default label) that no node reads from.
+    #[error(
+        "route `{route}` label `{label}` is never consumed; read from `{route}.{label}` or remove it"
+    )]
+    UnconsumedRouteLabel {
+        /// The route node.
+        route: String,
+        /// The label nothing reads from.
+        label: String,
+    },
     /// The graph contains a cycle through the named node.
     #[error("node `{node}` is part of a cycle")]
     Cycle {
