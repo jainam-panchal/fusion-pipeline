@@ -31,7 +31,9 @@ use tokio::sync::watch;
 
 use crate::subject::{stamp_tenant, tenant_from_subject};
 
-/// Longest redelivery delay [`nak_delay`] asks for.
+/// Longest redelivery delay [`nak_delay`] asks for. A consumer with `max_deliver` 5, as the
+/// compose stack creates, never reaches it (1s, 2s, 4s, 8s, then the final delivery); the cap
+/// guards consumers configured with more attempts.
 pub const MAX_NAK_DELAY: Duration = Duration::from_secs(30);
 
 /// Redelivery delay for a nak on the `delivered`-th delivery of a message: 1s, 2s, 4s, ...,

@@ -51,6 +51,11 @@ pub enum StartError {
 
 /// First Ctrl-C stops the source so the workers drain; a second one exits at once, since the
 /// drain can stall behind a sink that is not answering.
+///
+/// Draining settles only the envelopes already handed to workers. Messages the consumer had
+/// pulled into its batch but not yet decoded are dropped unsettled and redeliver after
+/// `ack_wait`, with their delivery count bumped, so the next run may start with
+/// `num_redelivered > 0` and a longer first nak delay for those messages.
 fn stop_on_ctrl_c(nats: Arc<Nats>) -> Result<(), StartError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()

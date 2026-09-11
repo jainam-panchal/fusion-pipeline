@@ -205,7 +205,7 @@ impl Nats {
                 return Err(NatsError::ConsumerNotExplicitAck {
                     stream: params.stream.clone(),
                     consumer: params.consumer.clone(),
-                    policy: format!("{:?}", info.config.ack_policy).to_ascii_lowercase(),
+                    policy: ack_policy_name(info.config.ack_policy),
                     url: url.clone(),
                 });
             }
@@ -234,15 +234,11 @@ impl Nats {
         let stream = self
             .runtime
             .block_on(get_stream(&context, &params.stream, &url))?;
-        let subjects = &stream.cached_info().config.subjects;
-        if !subjects
-            .iter()
-            .any(|s| subject::captures(s, &params.subject))
-        {
+        if !subject::stream_captures(&stream, &params.subject) {
             return Err(NatsError::SubjectNotCaptured {
                 stream: params.stream.clone(),
                 subject: params.subject.clone(),
-                subjects: subjects.clone(),
+                subjects: stream.cached_info().config.subjects.clone(),
                 url,
             });
         }
@@ -304,6 +300,14 @@ async fn get_stream(
             }
             _ => request_error(url, &e),
         })
+}
+
+/// The wire name of an ack policy (`explicit`, `none`, `all`), as the NATS CLI shows it.
+fn ack_policy_name(policy: AckPolicy) -> String {
+    serde_json::to_value(policy)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{policy:?}"))
 }
 
 fn request_error(url: &str, err: &dyn std::fmt::Display) -> NatsError {

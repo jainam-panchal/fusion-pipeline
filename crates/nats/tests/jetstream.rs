@@ -18,7 +18,7 @@ use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
 use fusion_nats::{Nats, NatsError};
 use futures::StreamExt;
 
-const WAIT: Duration = Duration::from_secs(10);
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn url() -> String {
     url_from_env(None)
@@ -101,7 +101,7 @@ impl JetStreamClient {
             .expect("published");
     }
 
-    /// The first message on `stream`'s `subject`, as a string, or `None` within `WAIT`.
+    /// The first message on `stream`'s `subject`, as a string, or `None` within `SETTLE_TIMEOUT`.
     fn first_payload(&self, stream: &str, subject: &str) -> Option<String> {
         self.rt.block_on(async {
             let stream = self.js.get_stream(stream).await.expect("stream exists");
@@ -113,7 +113,9 @@ impl JetStreamClient {
                 .await
                 .expect("probe consumer");
             let mut messages = consumer.messages().await.expect("messages");
-            let message = tokio::time::timeout(WAIT, messages.next()).await.ok()??;
+            let message = tokio::time::timeout(SETTLE_TIMEOUT, messages.next())
+                .await
+                .ok()??;
             let message = message.ok()?;
             String::from_utf8(message.payload.to_vec()).ok()
         })
@@ -143,7 +145,7 @@ fn wait_until(timeout: Duration, mut check: impl FnMut() -> bool) -> bool {
 }
 
 struct Fixture {
-    server: JetStreamClient,
+    client: JetStreamClient,
     in_stream: String,
     out_stream: String,
     consumer: String,
@@ -153,17 +155,17 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str) -> Self {
-        let server = JetStreamClient::connect();
+        let client = JetStreamClient::connect();
         let in_stream = unique(&format!("LOGS_{tag}"));
         let out_stream = unique(&format!("PROCESSED_{tag}"));
         let consumer = "pipeline".to_owned();
         let tenant_prefix = unique("logs").to_ascii_lowercase();
         let out_subject = format!("{}.out", unique("processed").to_ascii_lowercase());
-        let input = server.create_stream(&in_stream, &[&format!("{tenant_prefix}.>")]);
-        server.create_pull_consumer(&input, &consumer, AckPolicy::Explicit);
-        server.create_stream(&out_stream, &[&out_subject]);
+        let input = client.create_stream(&in_stream, &[&format!("{tenant_prefix}.>")]);
+        client.create_pull_consumer(&input, &consumer, AckPolicy::Explicit);
+        client.create_stream(&out_stream, &[&out_subject]);
         Self {
-            server,
+            client,
             in_stream,
             out_stream,
             consumer,
@@ -193,7 +195,7 @@ impl Fixture {
     }
 
     fn consumer_info(&self) -> jetstream::consumer::Info {
-        self.server.consumer_info(&self.in_stream, &self.consumer)
+        self.client.consumer_info(&self.in_stream, &self.consumer)
     }
 
     /// Whether every message the consumer has seen is acknowledged and none is waiting.
@@ -205,24 +207,24 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        self.server.try_delete_stream(&self.in_stream);
-        self.server.try_delete_stream(&self.out_stream);
+        self.client.try_delete_stream(&self.in_stream);
+        self.client.try_delete_stream(&self.out_stream);
     }
 }
 
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn sink_write_returns_once_the_record_is_in_the_stream() {
-    let f = Fixture::new("sink");
+    let fixture = Fixture::new("sink");
     let nats = Nats::new().expect("nats runtime");
-    let sink = nats.sink(&f.sink_params()).expect("sink builds");
+    let sink = nats.sink(&fixture.sink_params()).expect("sink builds");
     let record = Record::from_json(r#"{"id": 7, "body": "hello"}"#).expect("record parses");
 
     fusion_core::io::Sink::write(&sink, std::slice::from_ref(&record)).expect("write acked");
 
-    let payload = f
-        .server
-        .first_payload(&f.out_stream, &f.out_subject)
+    let payload = fixture
+        .client
+        .first_payload(&fixture.out_stream, &fixture.out_subject)
         .expect("record is in the sink stream");
     assert_eq!(
         Record::from_json(&payload).expect("sink emits a record"),
@@ -249,29 +251,29 @@ fn sink_fails_fast_when_its_stream_is_missing() {
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn sink_fails_fast_when_its_stream_does_not_capture_the_subject() {
-    let f = Fixture::new("capture");
+    let fixture = Fixture::new("capture");
     let nats = Nats::new().expect("nats runtime");
     let params = SinkParams {
         subject: "processed.elsewhere".to_owned(),
-        ..f.sink_params()
+        ..fixture.sink_params()
     };
 
     let err = nats.sink(&params).expect_err("uncaptured subject rejected");
 
     assert!(matches!(err, NatsError::SubjectNotCaptured { .. }), "{err}");
     assert!(err.to_string().contains("processed.elsewhere"), "{err}");
-    assert!(err.to_string().contains(&f.out_stream), "{err}");
+    assert!(err.to_string().contains(&fixture.out_stream), "{err}");
 }
 
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn source_fails_fast_when_stream_or_consumer_is_missing() {
-    let f = Fixture::new("src_missing");
+    let fixture = Fixture::new("src_missing");
     let nats = Nats::new().expect("nats runtime");
 
     let no_stream = SourceParams {
         stream: unique("MISSING"),
-        ..f.source_params()
+        ..fixture.source_params()
     };
     let err = nats
         .source(&no_stream)
@@ -281,7 +283,7 @@ fn source_fails_fast_when_stream_or_consumer_is_missing() {
 
     let no_consumer = SourceParams {
         consumer: "nobody".to_owned(),
-        ..f.source_params()
+        ..fixture.source_params()
     };
     let err = nats
         .source(&no_consumer)
@@ -293,18 +295,19 @@ fn source_fails_fast_when_stream_or_consumer_is_missing() {
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn source_fails_fast_when_the_consumer_does_not_ack_explicitly() {
-    let f = Fixture::new("ackpolicy");
+    let fixture = Fixture::new("ackpolicy");
     let nats = Nats::new().expect("nats runtime");
-    let input = f
-        .server
+    let input = fixture
+        .client
         .rt
-        .block_on(f.server.js.get_stream(&f.in_stream))
+        .block_on(fixture.client.js.get_stream(&fixture.in_stream))
         .expect("stream exists");
-    f.server
+    fixture
+        .client
         .create_pull_consumer(&input, "fire_and_forget", AckPolicy::None);
     let params = SourceParams {
         consumer: "fire_and_forget".to_owned(),
-        ..f.source_params()
+        ..fixture.source_params()
     };
 
     let err = nats.source(&params).expect_err("ack policy none rejected");
@@ -338,23 +341,25 @@ fn connect_fails_fast_when_the_server_is_unreachable() {
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
-    let f = Fixture::new("src");
+    let fixture = Fixture::new("src");
     let nats = Nats::new().expect("nats runtime");
     let sinks = MemorySinks::new();
     let mut registry = Registry::new();
     registry.register_sink("sink.memory", sinks.clone());
     let pipeline = Pipeline::from_yaml("nodes:\n  - id: out\n    type: sink.memory\n", &registry)
         .expect("pipeline loads");
-    let source = nats.source(&f.source_params()).expect("source builds");
+    let source = nats
+        .source(&fixture.source_params())
+        .expect("source builds");
     let engine = Engine::start(pipeline, Box::new(source), 2).expect("engine starts");
 
-    f.server.publish(
-        &f.in_subject("acme"),
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
         r#"{"id": 42, "body": "no tenant here"}"#,
     );
 
     assert!(
-        wait_until(WAIT, || !sinks.records("out").is_empty()),
+        wait_until(SETTLE_TIMEOUT, || !sinks.records("out").is_empty()),
         "record reaches the memory sink"
     );
     let records = sinks.records("out");
@@ -363,10 +368,10 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
     assert_eq!(records[0].id.map(|id| id.0), Some(42));
 
     assert!(
-        wait_until(WAIT, || f.consumer_settled()),
+        wait_until(SETTLE_TIMEOUT, || fixture.consumer_settled()),
         "consumer shows the message acknowledged"
     );
-    assert_eq!(f.consumer_info().num_redelivered, 0);
+    assert_eq!(fixture.consumer_info().num_redelivered, 0);
 
     nats.shutdown();
     engine.join().expect("clean shutdown");
@@ -377,30 +382,33 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
-    let f = Fixture::new("nak");
+    let fixture = Fixture::new("nak");
     let nats = std::sync::Arc::new(Nats::new().expect("nats runtime"));
     let mut registry = Registry::new();
     nats.register(&mut registry);
     let yaml = format!(
         "nodes:\n  - id: out\n    type: sink.nats\n    url: {}\n    stream: {}\n    subject: {}\n",
         url(),
-        f.out_stream,
-        f.out_subject
+        fixture.out_stream,
+        fixture.out_subject
     );
     let pipeline = Pipeline::from_yaml(&yaml, &registry).expect("pipeline loads");
-    let source = nats.source(&f.source_params()).expect("source builds");
+    let source = nats
+        .source(&fixture.source_params())
+        .expect("source builds");
     let engine = Engine::start(pipeline, Box::new(source), 1).expect("engine starts");
 
-    f.server.delete_stream(&f.out_stream);
-    f.server.publish(
-        &f.in_subject("acme"),
+    fixture.client.delete_stream(&fixture.out_stream);
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
         r#"{"id": 43, "body": "sink is gone"}"#,
     );
 
     assert!(
-        wait_until(WAIT * 3, || {
-            f.server
-                .consumer_info(&f.in_stream, &f.consumer)
+        wait_until(SETTLE_TIMEOUT * 3, || {
+            fixture
+                .client
+                .consumer_info(&fixture.in_stream, &fixture.consumer)
                 .num_redelivered
                 > 0
         }),
@@ -416,29 +424,34 @@ fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn undecodable_payload_is_nakd_and_the_source_keeps_going() {
-    let f = Fixture::new("garbage");
+    let fixture = Fixture::new("garbage");
     let nats = Nats::new().expect("nats runtime");
     let sinks = MemorySinks::new();
     let mut registry = Registry::new();
     registry.register_sink("sink.memory", sinks.clone());
     let pipeline = Pipeline::from_yaml("nodes:\n  - id: out\n    type: sink.memory\n", &registry)
         .expect("pipeline loads");
-    let source = nats.source(&f.source_params()).expect("source builds");
+    let source = nats
+        .source(&fixture.source_params())
+        .expect("source builds");
     let engine = Engine::start(pipeline, Box::new(source), 1).expect("engine starts");
 
-    f.server.publish(&f.in_subject("acme"), "this is not json");
-    f.server.publish(
-        &f.in_subject("acme"),
+    fixture
+        .client
+        .publish(&fixture.in_subject("acme"), "this is not json");
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
         r#"{"id": 44, "body": "after garbage"}"#,
     );
 
     assert!(
-        wait_until(WAIT, || !sinks.records("out").is_empty()),
+        wait_until(SETTLE_TIMEOUT, || !sinks.records("out").is_empty()),
         "the record after the garbage reaches the sink"
     );
     assert_eq!(sinks.records("out")[0].id.map(|id| id.0), Some(44));
     assert!(
-        wait_until(WAIT, || f.consumer_info().num_redelivered > 0),
+        wait_until(SETTLE_TIMEOUT, || fixture.consumer_info().num_redelivered
+            > 0),
         "the garbage is redelivered"
     );
 
