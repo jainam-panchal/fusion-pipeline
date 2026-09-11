@@ -13,10 +13,10 @@ Cargo workspace under `crates/`:
 | Crate | Contents |
 |---|---|
 | `core` | record model, field paths (read, write, remove), config loader, DAG validation, engine, `Source`/`Sink`/`AckHandle` traits, in-memory fakes, condition grammar |
-| `stages` | built-in stages: `filter`, `route` |
+| `stages` | built-in stages: `filter`, `route`, `dedupe` |
 | `regex` | two-engine regex facade: linear `regex` first, PCRE2 fallback with configurable limits, load-time ReDoS lint and canary; the only crate with `unsafe` |
 | `nats` | NATS JetStream source (pull consumer, explicit ack) and sink (returns after `PubAck`); tenant stamped from the subject; `NATS_URL` overrides configured URLs |
-| `state` | state store implementations (placeholder) |
+| `state` | Dragonfly state store over the Redis protocol: one sync connection per worker, timeouts and reconnect, `DRAGONFLY_URL` |
 | `otel` | OTLP metrics exporter: one instrument per spec metric behind core's `Recorder` boundary, HTTP/protobuf to the collector, configured by `OTEL_EXPORTER_OTLP_*` |
 | `pipeline` | the `pipelined` binary and the default stage registry |
 
@@ -45,7 +45,10 @@ nats consumer info LOGS pipeline        # 0 pending, 0 redelivered
 The record arrives with `resource.tenant.id` set to `acme`, read from the subject. A sink
 that cannot get its `PubAck` (delete `PROCESSED` to see it) makes the engine nak the source
 message and JetStream redeliver it. `NATS_URL` overrides the `url` of the source and every
-sink. `deploy/nats-smoke.sh` runs these checks end to end and exits non-zero on any failure.
+sink. The compose pipeline has a `dedupe` node, so it also needs the compose Dragonfly:
+`DRAGONFLY_URL` names it (default `redis://127.0.0.1:6379`), and a config with no stateful
+node never touches it. `deploy/nats-smoke.sh` runs these checks end to end and exits
+non-zero on any failure.
 
 The live tests are ignored by default and need the compose stack:
 
@@ -92,7 +95,7 @@ The dashboard is timeseries only, no stat tiles: an Overview row (throughput, la
 failures, CPU, memory) with Last/Max/Mean in every legend, a Source row (handed over,
 entered the graph, rejected by reason), then one row per
 stage that repeats for every node the pipeline has reported (records, p50/p95/p99, drops by
-reason, state-store ops), and a collapsed Internals row. A node added to the config gets
+reason, state-store ops, latency and errors), and a collapsed Internals row. A node added to the config gets
 its row on first record, no dashboard edit. `Tenant` and `Stage` variables filter
 everything. Latency charts go blank for a minute with no records, since a quantile of
 nothing is undefined; the grey records/s bars in each show what the line is based on.
@@ -115,6 +118,42 @@ nodes:
     stream: PROCESSED
     subject: processed.logs
 ```
+
+## State and dedupe
+
+Stateful nodes keep their state in Dragonfly, one keyspace shared by every worker and every
+replica; each worker holds its own connection, opened at startup with a ping when some node
+uses state, so an unreachable store fails fast. Every key is `{pipeline}:{tenant}:{node}:...`:
+`name:` at the top of the config (default `pipeline`) is the first segment, so replicas of
+one pipeline share state and two different pipelines on one Dragonfly must be given
+different names. The tenant segment means no node can dedupe one tenant against another.
+
+```yaml
+name: ingest
+nodes:
+  - id: dedupe_body
+    type: dedupe
+    key: [body, resource.host]   # one or more field paths; a missing field is null
+    window: 10s                  # ms | s | m | h; at least 1ms
+    on_state_error: pass         # pass (default) | nak
+  - id: out
+    type: sink.memory
+```
+
+`dedupe` keeps one key per distinct content (the hash of the `key` values) holding the id
+and ingestion time of the record that claimed it, with `window` as its TTL. The first record
+passes; a different record with the same content inside the window drops with reason
+`dedupe` and is acked; after the window the next one passes and opens a new window. The
+window is measured in ingestion time (`observed_time_unix_nano`, which the NATS source
+fills from the JetStream publish time when a record has no timestamp), so a record
+redelivered after a crash carries the same time it had before and is recognised as itself
+however long the redelivery took, even if a newer duplicate claimed the key meanwhile.
+
+When Dragonfly cannot answer (2 s per operation, then the connection is reopened on the
+next call) the stage hands the record back and the engine applies `on_state_error`: `pass`
+forwards it un-deduped, `nak` fails it so JetStream redelivers. Either way the operation is
+on `state_errors_total`. Live keys are unique contents per window, about 200 bytes each;
+the Dragonfly panel shows the memory, `state_ops_total` the call rate per node.
 
 ## Field paths
 

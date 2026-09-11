@@ -125,8 +125,30 @@ The `stage` label on per-node metrics: the node id, or the reserved `source`, it
 ### State
 
 **State store**:
-The external key-value service behind stateful stages: `set_nx`, `get`, `incr`, `del`. Dragonfly in deploy, in-memory in tests.
+The external key-value service behind stateful stages: `set_nx`, `get`, `incr`, `del`. One keyspace shared by every worker and every replica. Dragonfly in deploy, in-memory in tests.
 _Avoid_: cache, Redis (the protocol, not the store)
+
+**State handle**:
+What a stage gets on its context: the worker's connection, scoped to one record. Prefixes every key with `{pipeline}:{tenant}:{node}:` and counts every operation.
+_Avoid_: client, store (the handle is not the store)
+
+**Pipeline name**:
+The top-level `name` in the config, default `pipeline`. First segment of every state key: replicas of one pipeline share state, different pipelines never do.
+
+**Ingestion time**:
+When a record entered: `observed_time_unix_nano`, else `time_unix_nano`, else the worker clock. The NATS source fills `observed_time_unix_nano` from the JetStream publish time when a record has neither. Unchanged by redelivery.
+_Avoid_: arrival time, processing time
+
+**Window**:
+How long a first sighting suppresses repeats, measured in ingestion time. The TTL of the state key, not part of its name.
+_Avoid_: bucket, slot
+
+**Dedupe key**:
+The `key` field paths of a `dedupe` node, whose values (a missing one is `null`) hashed together say "same content".
+
+**State error policy**:
+A node's `on_state_error`, `pass` or `nak`, applied by the engine when a stage could not reach the store. The stage only reports.
+_Avoid_: fallback, degrade
 
 **Worker**:
 One OS thread that owns a Lua VM and a state-store connection and runs stages synchronously.
