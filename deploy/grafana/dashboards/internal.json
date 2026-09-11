@@ -11,7 +11,7 @@
   "graphTooltip": 1,
   "refresh": "5s",
   "schemaVersion": 39,
-  "version": 11,
+  "version": 12,
   "time": {
     "from": "now-15m",
     "to": "now"
@@ -55,10 +55,10 @@
           "uid": "prometheus"
         },
         "query": {
-          "query": "label_values(records_in_total, stage)",
+          "query": "label_values(records_in_total{stage!=\"source\"}, stage)",
           "refId": "stage"
         },
-        "definition": "label_values(records_in_total, stage)",
+        "definition": "label_values(records_in_total{stage!=\"source\"}, stage)",
         "includeAll": true,
         "allValue": ".*",
         "multi": true,
@@ -799,6 +799,242 @@
       ]
     },
     {
+      "id": 1000,
+      "type": "row",
+      "title": "Source (NATS in)  \u2014  what the engine did before any stage ran",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "panels": []
+    },
+    {
+      "id": 1001,
+      "type": "timeseries",
+      "title": "Handed over \u2192 entered the graph \u2192 rejected",
+      "description": "Every record the source handed to the engine; those with an id and of kind log entered the first stage; the rest were rejected here (missing_id naks and comes back, invalid_record acks and is gone).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0,
+          "noValue": "0"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "handed over"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "entered the graph"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(records_in_total{tenant=~\"$tenant\",stage=\"source\"}[1m]))",
+          "legendFormat": "handed over",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(records_out_total{tenant=~\"$tenant\",stage=\"source\"}[1m]))",
+          "legendFormat": "entered the graph",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (reason) (rate(records_dropped_total{tenant=~\"$tenant\",stage=\"source\"}[1m]))",
+          "legendFormat": "rejected: {{reason}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 1002,
+      "type": "timeseries",
+      "title": "Naks, redeliveries, dead-lettered",
+      "description": "A nak is any failed record (or one without an id); JetStream redelivers it after a backoff, up to max_deliver, then the dead-letter queue takes it. Flat at zero is healthy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0,
+          "noValue": "0"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "naks"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "redeliveries"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dead-lettered (#10)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(rate(source_naks_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
+          "legendFormat": "naks",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(rate(source_redeliveries_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
+          "legendFormat": "redeliveries",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(rate(dlq_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
+          "legendFormat": "dead-lettered (#10)",
+          "refId": "C"
+        }
+      ]
+    },
+    {
       "id": 8,
       "type": "row",
       "title": "Stage: $stage  \u2014  records, time per record, why records left, state store",
@@ -807,7 +1043,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 37
       },
       "panels": [],
       "repeat": "stage"
@@ -825,7 +1061,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 29
+        "y": 38
       },
       "fieldConfig": {
         "defaults": {
@@ -968,7 +1204,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 29
+        "y": 38
       },
       "fieldConfig": {
         "defaults": {
@@ -1090,7 +1326,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 29
+        "y": 38
       },
       "fieldConfig": {
         "defaults": {
@@ -1167,7 +1403,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 29
+        "y": 38
       },
       "fieldConfig": {
         "defaults": {
@@ -1236,7 +1472,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 37
+        "y": 46
       },
       "panels": [
         {
@@ -1252,7 +1488,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 38
+            "y": 47
           },
           "fieldConfig": {
             "defaults": {
@@ -1308,7 +1544,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 38
+            "y": 47
           },
           "fieldConfig": {
             "defaults": {
@@ -1364,7 +1600,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 38
+            "y": 47
           },
           "fieldConfig": {
             "defaults": {
@@ -1420,7 +1656,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 46
+            "y": 55
           },
           "fieldConfig": {
             "defaults": {
@@ -1476,7 +1712,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 46
+            "y": 55
           },
           "fieldConfig": {
             "defaults": {
@@ -1540,7 +1776,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 46
+            "y": 55
           },
           "fieldConfig": {
             "defaults": {
@@ -1613,7 +1849,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 54
+            "y": 63
           },
           "fieldConfig": {
             "defaults": {
@@ -1677,7 +1913,7 @@
             "h": 8,
             "w": 16,
             "x": 8,
-            "y": 54
+            "y": 63
           },
           "fieldConfig": {
             "defaults": {
