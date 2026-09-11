@@ -32,9 +32,26 @@ const PURPOSE: &str = "dedupe";
 #[serde(deny_unknown_fields)]
 struct Params {
     key: Vec<String>,
-    window: String,
+    window: WindowText,
     #[serde(default = "default_policy")]
     on_state_error: StateErrorPolicy,
+}
+
+/// `window` as written: a string, or a bare number so the error can say a unit is missing.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WindowText {
+    Text(String),
+    Bare(u64),
+}
+
+impl WindowText {
+    fn as_text(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Bare(n) => n.to_string(),
+        }
+    }
 }
 
 const fn default_policy() -> StateErrorPolicy {
@@ -70,8 +87,9 @@ impl Dedupe {
                     .map_err(|e| node.invalid_params(format!("key `{path}`: {e}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let window = parse_window(&params.window)
-            .map_err(|e| node.invalid_params(format!("window `{}`: {e}", params.window)))?;
+        let window_text = params.window.as_text();
+        let window = parse_window(&window_text)
+            .map_err(|e| node.invalid_params(format!("window `{window_text}`: {e}")))?;
         Ok(Self {
             key,
             window,

@@ -164,3 +164,38 @@ nodes:
         "{err}"
     );
 }
+
+#[test]
+fn a_node_id_with_a_colon_is_rejected_because_state_keys_use_it_as_the_separator() {
+    let err = Config::from_yaml(
+        "nodes:\n  - id: a:b\n    type: filter\n  - id: out\n    type: sink.memory\n",
+    )
+    .expect_err("rejected");
+
+    assert!(
+        matches!(err, ConfigError::ColonId { ref node } if node == "a:b"),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("state key"), "{err}");
+}
+
+#[test]
+fn a_pipeline_name_with_a_colon_is_rejected_for_the_same_reason() {
+    let err = Config::from_yaml("name: a:b\nnodes:\n  - id: out\n    type: sink.memory\n")
+        .expect_err("rejected");
+
+    assert!(
+        matches!(err, ConfigError::ColonName { ref name } if name == "a:b"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn the_pipeline_name_defaults_to_pipeline_and_is_read_when_given() {
+    let default = Config::from_yaml("nodes:\n  - id: out\n    type: sink.memory\n").expect("loads");
+    assert_eq!(default.name, "pipeline");
+
+    let named = Config::from_yaml("name: ingest\nnodes:\n  - id: out\n    type: sink.memory\n")
+        .expect("loads");
+    assert_eq!(named.name, "ingest");
+}
