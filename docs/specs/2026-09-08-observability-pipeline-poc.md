@@ -144,6 +144,8 @@ Config is a list of `nodes`, each with `id`, `type`, optional `from` (string or 
 
 Load-time validation: acyclic, every node reachable from `source`, every route label consumed or named as default, at least one sink, all `from` targets exist.
 
+Amended 2026-09-11 (issue #4): a default label with no consumer is rejected too, not only an unconsumed route label. Otherwise `default: other` with nothing reading `router.other` would ack and discard unmatched records with no drop reason recorded, which is the silent fall-off story 5 exists to prevent; `default: drop` is the explicit way to say that. The label `drop` is reserved.
+
 The compiled pipeline is versioned and swappable in memory. The loader produces an immutable compiled pipeline (DAG, compiled nodes, version label) held behind an atomic swap pointer. A new version is fully validated, compiled and canaried before it replaces the current one, so a failing config never displaces a running one. Records hold the version they entered on until ack or nak. Per-worker resources (Lua VM, regex match data) rebuild at the next record boundary after a swap. State-store keys are namespaced by node id rather than version, so a config change does not reset windows unless a node is renamed. The POC loads version 1 from a file at startup and never swaps; the trigger (file watch, signal, control-plane fetch) is a follow-up that calls the same load path.
 
 Internally the config becomes a DAG (node ids plus an edge list). The POC config runs filter, route, four per-format `pcre2_extract` nodes, redact, sample, dedupe, lua and a main sink, with a second sink hanging off one route branch to exercise fan-out.

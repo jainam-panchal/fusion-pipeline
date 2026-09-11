@@ -4,7 +4,7 @@
 //! [`AckProbe`] that observes how the engine settled the record. [`MemorySinks`] is a
 //! [`SinkFactory`] whose sinks collect records per node id for later inspection.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -135,16 +135,35 @@ impl Source for MemorySource {
 }
 
 /// Collects records per sink node id. Register it under a `sink.*` type name.
+///
+/// Any sink can be made to fail on demand with [`MemorySinks::fail_writes_to`], to exercise
+/// the engine's nak path.
 #[derive(Debug, Clone, Default)]
 pub struct MemorySinks {
     records: Arc<Mutex<BTreeMap<String, Vec<Record>>>>,
+    failing: Arc<Mutex<BTreeSet<String>>>,
 }
+
+/// The error a failing memory sink returns.
+#[derive(Debug, thiserror::Error)]
+#[error("memory sink `{0}` is set to fail")]
+pub struct InjectedSinkFailure(String);
 
 impl MemorySinks {
     /// An empty collector.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make every write to the sink node `node_id` fail until [`MemorySinks::restore`].
+    pub fn fail_writes_to(&self, node_id: &str) {
+        lock_unpoisoned(&self.failing).insert(node_id.to_owned());
+    }
+
+    /// Let writes to `node_id` succeed again.
+    pub fn restore(&self, node_id: &str) {
+        lock_unpoisoned(&self.failing).remove(node_id);
     }
 
     /// Records written to the sink node `node_id`, in arrival order.
@@ -162,6 +181,7 @@ impl SinkFactory for MemorySinks {
         Ok(Box::new(MemorySink {
             node_id: node.id.clone(),
             records: Arc::clone(&self.records),
+            failing: Arc::clone(&self.failing),
         }))
     }
 }
@@ -169,10 +189,14 @@ impl SinkFactory for MemorySinks {
 struct MemorySink {
     node_id: String,
     records: Arc<Mutex<BTreeMap<String, Vec<Record>>>>,
+    failing: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl Sink for MemorySink {
     fn write(&self, records: &[Record]) -> Result<(), SinkError> {
+        if lock_unpoisoned(&self.failing).contains(&self.node_id) {
+            return Err(SinkError::new(InjectedSinkFailure(self.node_id.clone())));
+        }
         lock_unpoisoned(&self.records)
             .entry(self.node_id.clone())
             .or_default()
