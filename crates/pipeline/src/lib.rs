@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use fusion_core::config::{Config, ConfigError};
 use fusion_core::engine::{Engine, EngineError};
+use fusion_core::metrics::Metrics;
 use fusion_core::pipeline::Pipeline;
 use fusion_core::registry::Registry;
 use fusion_nats::{Nats, NatsError};
@@ -104,7 +105,7 @@ pub fn run(path: &Path) -> Result<(), StartError> {
     let workers = pipeline.worker_count();
 
     stop_on_ctrl_c(Arc::clone(&nats))?;
-    let engine = Engine::start(pipeline, source, workers)?;
+    let engine = Engine::start(pipeline, source, workers, Metrics::noop())?;
     eprintln!("pipelined: running with {workers} workers; Ctrl-C to stop");
     engine.join()?;
     Ok(())

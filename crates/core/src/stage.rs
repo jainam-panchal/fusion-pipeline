@@ -32,6 +32,20 @@ pub enum DropReason {
 }
 
 impl DropReason {
+    /// Every reason, for checks against the spec's closed set.
+    pub const ALL: [Self; 10] = [
+        Self::Filter,
+        Self::RouteDefaultDrop,
+        Self::Sample,
+        Self::Dedupe,
+        Self::LuaDrop,
+        Self::LuaError,
+        Self::RegexLimit,
+        Self::StateError,
+        Self::InvalidRecord,
+        Self::MissingId,
+    ];
+
     /// The metric label value.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
