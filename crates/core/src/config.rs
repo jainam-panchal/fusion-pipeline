@@ -25,6 +25,12 @@ pub enum ConfigError {
         /// The offending node id.
         node: String,
     },
+    /// A node id contains a dot, which `from` uses to separate a route from its label.
+    #[error("node id `{node}` contains a dot; `from` reads `<node>.<label>` so ids cannot")]
+    DottedId {
+        /// The offending node id.
+        node: String,
+    },
     /// Two nodes share an id.
     #[error("node id `{node}` is declared more than once")]
     DuplicateId {
@@ -40,7 +46,9 @@ pub enum ConfigError {
         target: String,
     },
     /// A node reads from a route node without naming one of its labels.
-    #[error("node `{node}` reads from route `{route}` without a label; use `{route}.<label>`")]
+    #[error(
+        "node `{node}` reads from route `{route}` without a label; use `{route}.<label>` (a node with no `from` reads from the node before it)"
+    )]
     RouteNeedsLabel {
         /// The node whose `from` is wrong.
         node: String,
@@ -251,7 +259,8 @@ impl Config {
     /// # Errors
     ///
     /// Returns [`ConfigError::Yaml`] for malformed YAML, [`ConfigError::ReservedId`] when a
-    /// node is called `source`, and [`ConfigError::DuplicateId`] when two nodes share an id.
+    /// node is called `source`, [`ConfigError::DottedId`] when an id contains a dot, and
+    /// [`ConfigError::DuplicateId`] when two nodes share an id.
     pub fn from_yaml(yaml: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = serde_yaml_ng::from_str(yaml)?;
         let mut seen = BTreeSet::new();
@@ -261,6 +270,9 @@ impl Config {
         for node in raw.nodes {
             if node.id == SOURCE_ID {
                 return Err(ConfigError::ReservedId { node: node.id });
+            }
+            if node.id.contains('.') {
+                return Err(ConfigError::DottedId { node: node.id });
             }
             if !seen.insert(node.id.clone()) {
                 return Err(ConfigError::DuplicateId { node: node.id });

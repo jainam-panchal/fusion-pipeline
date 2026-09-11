@@ -142,3 +142,25 @@ nodes:
 
     assert!(config.source.is_none());
 }
+
+#[test]
+fn node_id_with_a_dot_is_rejected_because_from_uses_dots_for_route_labels() {
+    let yaml = r#"
+nodes:
+  - id: by.format
+    type: route
+    routes:
+      linux: resource["log.format"] == "Linux"
+    default: drop
+  - id: out
+    type: sink.memory
+    from: by.format.linux
+"#;
+
+    let err = Config::from_yaml(yaml).expect_err("dotted id rejected");
+
+    assert!(
+        matches!(err, ConfigError::DottedId { ref node } if node == "by.format"),
+        "{err}"
+    );
+}

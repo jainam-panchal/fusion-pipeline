@@ -25,9 +25,10 @@ pub const ROUTE_KIND: &str = "route";
 /// The `default` value that drops unmatched records instead of naming a label.
 pub const DROP: &str = "drop";
 
-/// Where unmatched records go.
+/// Where unmatched records go. Deliberately exhaustive: a consumer that could not name a
+/// fallback would have to send records nowhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Default {
+pub enum Fallback {
     /// Send them down this label.
     Label(String),
     /// Drop them with reason `route_default_drop`.
@@ -38,7 +39,7 @@ pub enum Default {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteSpec {
     routes: Vec<(String, String)>,
-    default: Default,
+    fallback: Fallback,
 }
 
 #[derive(Deserialize)]
@@ -77,12 +78,12 @@ impl RouteSpec {
             };
             routes.push((label.to_owned(), condition.to_owned()));
         }
-        let default = if params.default == DROP {
-            Default::Drop
+        let fallback = if params.default == DROP {
+            Fallback::Drop
         } else {
-            Default::Label(params.default)
+            Fallback::Label(params.default)
         };
-        Ok(Self { routes, default })
+        Ok(Self { routes, fallback })
     }
 
     /// `(label, condition source)` pairs in declaration order.
@@ -91,17 +92,17 @@ impl RouteSpec {
         &self.routes
     }
 
-    /// The default.
+    /// What happens to a record no route matches: the `default` key.
     #[must_use]
-    pub fn default(&self) -> &Default {
-        &self.default
+    pub fn fallback(&self) -> &Fallback {
+        &self.fallback
     }
 
     /// Every label a downstream node may read from: the route labels in order, then the
     /// default label if it is not already one of them.
     pub fn labels(&self) -> impl Iterator<Item = &str> {
-        let default = match &self.default {
-            Default::Label(label) if !self.routes.iter().any(|(l, _)| l == label) => {
+        let default = match &self.fallback {
+            Fallback::Label(label) if !self.routes.iter().any(|(l, _)| l == label) => {
                 Some(label.as_str())
             }
             _ => None,

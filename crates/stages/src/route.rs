@@ -15,14 +15,16 @@
 use fusion_core::condition::Condition;
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::record::Record;
-use fusion_core::route::{Default, RouteSpec};
+use fusion_core::route::{Fallback, RouteSpec};
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
+
+use crate::condition::parse_condition;
 
 /// The `route` stage.
 #[derive(Debug)]
 pub struct Route {
     routes: Vec<(String, Condition)>,
-    default: Default,
+    fallback: Fallback,
 }
 
 impl Route {
@@ -39,20 +41,13 @@ impl Route {
             .routes()
             .iter()
             .map(|(label, source)| {
-                let condition = Condition::parse(source).map_err(|e| {
-                    node.invalid_params(format!("route `{label}` condition `{source}`: {e}"))
-                })?;
-                if condition.has_regex_ops() {
-                    return Err(node.invalid_params(format!(
-                        "route `{label}` condition `{source}`: regex operators `=~` and `!~` are not wired yet"
-                    )));
-                }
+                let condition = parse_condition(node, source, &format!("route `{label}`"))?;
                 Ok((label.clone(), condition))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, ConfigError>>()?;
         Ok(Self {
             routes,
-            default: spec.default().clone(),
+            fallback: spec.fallback().clone(),
         })
     }
 
@@ -73,9 +68,9 @@ impl Stage for Route {
                 return StageOutput::Routed(label.clone(), record);
             }
         }
-        match &self.default {
-            Default::Label(label) => StageOutput::Routed(label.clone(), record),
-            Default::Drop => StageOutput::Drop(DropReason::RouteDefaultDrop),
+        match &self.fallback {
+            Fallback::Label(label) => StageOutput::Routed(label.clone(), record),
+            Fallback::Drop => StageOutput::Drop(DropReason::RouteDefaultDrop),
         }
     }
 }

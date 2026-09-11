@@ -1,5 +1,6 @@
 //! Built-in pipeline stages.
 
+mod condition;
 pub mod filter;
 pub mod route;
 

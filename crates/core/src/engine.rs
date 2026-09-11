@@ -16,7 +16,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use crate::dag::{Edge, NodeIndex};
+use crate::dag::NodeIndex;
 use crate::io::{Envelope, Intake, Source, SourceError};
 use crate::pipeline::{CompiledNode, Pipeline};
 use crate::record::{Kind, Record, RecordId};
@@ -225,7 +225,7 @@ impl Walker<'_> {
             .dag()
             .edges(index)
             .iter()
-            .filter(move |e: &&Edge| e.label.as_deref() == Some(label))
+            .filter(move |e| e.label.as_deref() == Some(label))
             .map(|e| e.target)
     }
 

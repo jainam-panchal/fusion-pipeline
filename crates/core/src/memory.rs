@@ -156,14 +156,9 @@ impl MemorySinks {
         Self::default()
     }
 
-    /// Make every write to the sink node `node_id` fail until [`MemorySinks::restore`].
+    /// Make every write to the sink node `node_id` fail.
     pub fn fail_writes_to(&self, node_id: &str) {
         lock_unpoisoned(&self.failing).insert(node_id.to_owned());
-    }
-
-    /// Let writes to `node_id` succeed again.
-    pub fn restore(&self, node_id: &str) {
-        lock_unpoisoned(&self.failing).remove(node_id);
     }
 
     /// Records written to the sink node `node_id`, in arrival order.

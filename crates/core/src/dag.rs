@@ -62,15 +62,9 @@ struct FromRef<'a> {
     label: Option<&'a str>,
 }
 
-/// Resolve a `from` entry. A plain id wins even if it contains a dot; otherwise the text up
-/// to the first dot is the node and the rest is the label.
-fn parse_from<'a>(entry: &'a str, position: &BTreeMap<&str, usize>) -> FromRef<'a> {
-    if entry == SOURCE_ID || position.contains_key(entry) {
-        return FromRef {
-            target: entry,
-            label: None,
-        };
-    }
+/// Resolve a `from` entry. Node ids cannot contain dots (the loader rejects them), so the
+/// first dot, if any, separates the route from its label.
+fn parse_from(entry: &str) -> FromRef<'_> {
     match entry.split_once('.') {
         Some((target, label)) if !label.is_empty() => FromRef {
             target,
@@ -121,7 +115,7 @@ impl Dag {
         let mut consumed: BTreeSet<(usize, &str)> = BTreeSet::new();
         for (i, node) in file_order.iter().enumerate() {
             for entry in &node.from {
-                let from = parse_from(entry, &position);
+                let from = parse_from(entry);
                 if from.target == SOURCE_ID {
                     source_succ.push(i);
                     continue;
@@ -173,13 +167,18 @@ impl Dag {
             }
         }
 
+        let plain_succ: Vec<Vec<usize>> = succ
+            .iter()
+            .map(|edges| edges.iter().map(|(s, _)| *s).collect())
+            .collect();
+
         let mut reachable = vec![false; file_order.len()];
         let mut stack: Vec<usize> = source_succ.clone();
         while let Some(i) = stack.pop() {
             if std::mem::replace(&mut reachable[i], true) {
                 continue;
             }
-            stack.extend(succ[i].iter().map(|(s, _)| *s));
+            stack.extend(plain_succ[i].iter().copied());
         }
         if let Some(i) = reachable.iter().position(|r| !r) {
             return Err(ConfigError::Unreachable {
@@ -189,10 +188,6 @@ impl Dag {
 
         // Every node is reachable, so a DFS from the source successors visits all of them
         // and its reverse post-order is a topological order.
-        let plain_succ: Vec<Vec<usize>> = succ
-            .iter()
-            .map(|edges| edges.iter().map(|(s, _)| *s).collect())
-            .collect();
         let mut marks = vec![Mark::Unvisited; file_order.len()];
         let mut post_order = Vec::with_capacity(file_order.len());
         for &start in &source_succ {
