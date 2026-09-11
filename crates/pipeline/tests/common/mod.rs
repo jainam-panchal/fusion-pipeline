@@ -12,6 +12,7 @@ use fusion_core::memory::{MemoryInput, MemorySinks, MemorySource, MemoryStateSto
 use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::registry::Registry;
+use fusion_core::state::StateStoreFactory;
 use fusion_pipeline::default_registry;
 
 /// How long a test waits for an ack handle to settle.
@@ -41,28 +42,46 @@ pub fn start(yaml: &str, workers: usize) -> Harness {
 
 /// As [`start`], with a registry the caller has extended.
 pub fn start_with(yaml: &str, workers: usize, sinks: MemorySinks, registry: Registry) -> Harness {
+    let state = MemoryStateStore::new();
+    start_with_state(yaml, workers, sinks, registry, Arc::new(state.clone()))
+        .with_memory_state(state)
+}
+
+/// As [`start_with`], with the state store the caller supplies (a real Dragonfly in the
+/// ignored tests). `Harness::state` is then an unused memory store.
+pub fn start_with_state(
+    yaml: &str,
+    workers: usize,
+    sinks: MemorySinks,
+    registry: Registry,
+    state: Arc<dyn StateStoreFactory>,
+) -> Harness {
     let pipeline = Pipeline::from_yaml(yaml, &registry).expect("pipeline loads");
     let (source, input) = MemorySource::new();
     let recorder = InMemoryRecorder::new();
-    let state = MemoryStateStore::new();
     let engine = Engine::start(
         pipeline,
         Box::new(source),
         workers,
         Metrics::new(recorder.clone()),
-        Arc::new(state.clone()),
+        state,
     )
     .expect("engine starts");
     Harness {
         engine,
         source: input,
         sinks,
-        state,
+        state: MemoryStateStore::new(),
         recorder,
     }
 }
 
 impl Harness {
+    fn with_memory_state(mut self, state: MemoryStateStore) -> Self {
+        self.state = state;
+        self
+    }
+
     /// Close the source and wait for the workers to drain.
     pub fn finish(self) {
         drop(self.source);
