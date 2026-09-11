@@ -11,7 +11,7 @@
   "graphTooltip": 1,
   "refresh": "5s",
   "schemaVersion": 39,
-  "version": 9,
+  "version": 10,
   "time": {
     "from": "now-15m",
     "to": "now"
@@ -81,22 +81,38 @@
   },
   "panels": [
     {
+      "id": 999,
+      "type": "text",
+      "title": "",
+      "transparent": true,
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**How to read this board** \u2014 every chart has history; hover for the exact value, the legend shows *Last / Max / Mean* for the window, widen the time range top-right for more.  \n**Healthy:** *in* \u2248 *out*, *errored* flat at 0, *waiting in NATS* flat, *end-to-end p99* under the dashed 1 s line.  \n**Something wrong?** *Is anything failing?* names the node \u2192 open its **Stage** row below. Slow? *slowest stage p99* names it \u2192 its *Time per record*. Costly? *What does it cost?*. Filter by **Tenant** / **Stage** top-left."
+      }
+    },
+    {
       "id": 1,
       "type": "row",
-      "title": "Overview",
+      "title": "Is the pipeline healthy?",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 0
+        "y": 3
       },
       "panels": []
     },
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Throughput",
+      "title": "Are records flowing?  (in \u2192 out, dropped, errored)",
       "description": "in: records the source handed to the engine. out: sink writes with durable acceptance (PubAck). dropped: on purpose, see Drops by reason. errored: failed in a stage or a sink; each one naks its message.",
       "datasource": {
         "type": "prometheus",
@@ -106,7 +122,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 1
+        "y": 4
       },
       "fieldConfig": {
         "defaults": {
@@ -239,8 +255,8 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Latency",
-      "description": "End-to-end: observed time on the record to settlement. Slowest stage p99: the worst stage run or sink PubAck wait right now; find which in the per-stage rows below.",
+      "title": "How slow?  (end to end, and the slowest stage)",
+      "description": "End-to-end: observed time on the record to settlement. Slowest stage p99: the worst stage run or sink PubAck wait right now; find which in the per-stage rows below. Dashed lines: 1 s (watch), 5 s (problem).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -249,7 +265,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 1
+        "y": 4
       },
       "fieldConfig": {
         "defaults": {
@@ -257,10 +273,30 @@
           "custom": {
             "lineWidth": 1,
             "fillOpacity": 12,
-            "showPoints": "never"
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
           },
           "min": 0,
-          "noValue": "no runs"
+          "noValue": "no runs",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -313,8 +349,8 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Backlog (NATS consumer)",
-      "description": "Waiting grows when the pipeline is slower than the producer. In flight is what the workers hold. Redelivered means naks or lost acks.",
+      "title": "Is NATS backing up?  (waiting, in flight, redelivered)",
+      "description": "Waiting grows when the pipeline is slower than the producer. In flight is what the workers hold. Redelivered means naks or lost acks. Dashed lines: 100 (watch), 1000 (problem).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -323,7 +359,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 9
+        "y": 12
       },
       "fieldConfig": {
         "defaults": {
@@ -331,11 +367,77 @@
           "custom": {
             "lineWidth": 1,
             "fillOpacity": 12,
-            "showPoints": "never"
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
           },
-          "min": 0
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "waiting in NATS"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in flight (unacked)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "redelivered"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -385,7 +487,7 @@
     {
       "id": 5,
       "type": "timeseries",
-      "title": "Failures",
+      "title": "Is anything failing?  (errors, naks, redeliveries)",
       "description": "Flat at zero is healthy. errored counts a stage error or a sink without PubAck once, under its node; each failed record naks; JetStream redelivers up to max_deliver, then the dead-letter queue (#10) takes it.",
       "datasource": {
         "type": "prometheus",
@@ -395,7 +497,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 9
+        "y": 12
       },
       "fieldConfig": {
         "defaults": {
@@ -408,7 +510,53 @@
           "min": 0,
           "noValue": "0"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "naks"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "redeliveries"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dead-lettered"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -467,7 +615,7 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "CPU per process",
+      "title": "What does it cost?  CPU (cores)",
       "description": "Cores in use, self-reported. Pipeline: one line per instance from process.cpu.time. NATS: varz cpu. Dragonfly does not export CPU.",
       "datasource": {
         "type": "prometheus",
@@ -477,7 +625,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 17
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -531,7 +679,7 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Memory RSS per process",
+      "title": "What does it cost?  memory (RSS)",
       "description": "Resident memory, self-reported: pipeline process.memory.usage per instance, NATS varz mem, Dragonfly used_memory_rss.",
       "datasource": {
         "type": "prometheus",
@@ -541,7 +689,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 17
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -604,13 +752,13 @@
     {
       "id": 8,
       "type": "row",
-      "title": "Stage: $stage",
+      "title": "Stage: $stage  \u2014  records, time per record, why records left, state store",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 28
       },
       "panels": [],
       "repeat": "stage"
@@ -618,7 +766,7 @@
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Records",
+      "title": "Records in / out",
       "description": "What this node did with its records. For source: intake and the engine's own drops. For a sink: out means PubAck.",
       "datasource": {
         "type": "prometheus",
@@ -628,7 +776,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 26
+        "y": 29
       },
       "fieldConfig": {
         "defaults": {
@@ -711,8 +859,7 @@
           "showLegend": true,
           "calcs": [
             "lastNotNull",
-            "max",
-            "mean"
+            "max"
           ]
         },
         "tooltip": {
@@ -762,7 +909,7 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "Latency",
+      "title": "Time per record (p50 / p95 / p99)",
       "description": "Stage run time, or for a sink the wait for durable acceptance (PubAck). Includes any state-store round trip the stage makes.",
       "datasource": {
         "type": "prometheus",
@@ -772,7 +919,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 26
+        "y": 29
       },
       "fieldConfig": {
         "defaults": {
@@ -794,8 +941,7 @@
           "showLegend": true,
           "calcs": [
             "lastNotNull",
-            "max",
-            "mean"
+            "max"
           ]
         },
         "tooltip": {
@@ -836,7 +982,7 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Drops by reason and failures",
+      "title": "Why records left here",
       "description": "Drop reasons are the spec's closed set. Errored and no-PubAck are failures, not drops.",
       "datasource": {
         "type": "prometheus",
@@ -846,7 +992,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 26
+        "y": 29
       },
       "fieldConfig": {
         "defaults": {
@@ -913,7 +1059,7 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "State store",
+      "title": "Dragonfly calls (state store)",
       "description": "Dragonfly round trips this stage makes. Empty for stages without state; populated once the state-store ticket (#6) lands.",
       "datasource": {
         "type": "prometheus",
@@ -923,7 +1069,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 26
+        "y": 29
       },
       "fieldConfig": {
         "defaults": {
@@ -992,7 +1138,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 34
+        "y": 37
       },
       "panels": [
         {
@@ -1008,7 +1154,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 35
+            "y": 38
           },
           "fieldConfig": {
             "defaults": {
@@ -1064,7 +1210,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 35
+            "y": 38
           },
           "fieldConfig": {
             "defaults": {
@@ -1120,7 +1266,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 35
+            "y": 38
           },
           "fieldConfig": {
             "defaults": {
@@ -1176,7 +1322,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 43
+            "y": 46
           },
           "fieldConfig": {
             "defaults": {
@@ -1232,7 +1378,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 43
+            "y": 46
           },
           "fieldConfig": {
             "defaults": {
@@ -1296,7 +1442,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 43
+            "y": 46
           },
           "fieldConfig": {
             "defaults": {
@@ -1369,7 +1515,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 51
+            "y": 54
           },
           "fieldConfig": {
             "defaults": {
@@ -1433,7 +1579,7 @@
             "h": 8,
             "w": 16,
             "x": 8,
-            "y": 51
+            "y": 54
           },
           "fieldConfig": {
             "defaults": {
