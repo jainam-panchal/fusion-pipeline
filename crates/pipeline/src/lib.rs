@@ -9,6 +9,7 @@ use fusion_core::metrics::Metrics;
 use fusion_core::pipeline::Pipeline;
 use fusion_core::registry::Registry;
 use fusion_nats::{Nats, NatsError};
+use fusion_otel::OtelError;
 
 /// The registry the binary runs with: every built-in stage. Sinks and the source are
 /// registered by the caller, since they depend on the deployment (NATS in production, memory
@@ -45,6 +46,9 @@ pub enum StartError {
     /// The engine could not start.
     #[error(transparent)]
     Engine(#[from] EngineError),
+    /// The OTLP exporter could not start or flush.
+    #[error(transparent)]
+    Telemetry(#[from] OtelError),
     /// The Ctrl-C listener could not be set up.
     #[error("could not set up the Ctrl-C handler: {0}")]
     Signals(#[source] std::io::Error),
@@ -84,10 +88,13 @@ fn stop_on_ctrl_c(nats: Arc<Nats>) -> Result<(), StartError> {
 /// Load `path`, connect the NATS source and sinks, and run the engine until the source is
 /// told to stop (Ctrl-C) and the workers have drained.
 ///
+/// Metrics go over OTLP to the collector `OTEL_EXPORTER_OTLP_ENDPOINT` names; with no
+/// endpoint in the environment nothing is exported.
+///
 /// # Errors
 ///
 /// Any [`StartError`]: an unreadable or invalid config, a missing stream or consumer, an
-/// unreachable server, or an engine failure.
+/// unreachable server, an unusable OTLP configuration, or an engine failure.
 pub fn run(path: &Path) -> Result<(), StartError> {
     let yaml = std::fs::read_to_string(path).map_err(|source| StartError::ReadConfig {
         path: path.display().to_string(),
@@ -96,7 +103,10 @@ pub fn run(path: &Path) -> Result<(), StartError> {
     let config = Config::from_yaml(&yaml)?;
     let source_config = config.source.as_ref().ok_or(StartError::NoSource)?;
 
-    let metrics = Metrics::noop();
+    let telemetry = fusion_otel::init()?;
+    let metrics = telemetry
+        .as_ref()
+        .map_or_else(Metrics::noop, fusion_otel::Telemetry::metrics);
     let nats = Arc::new(Nats::new(metrics.clone())?);
     let mut registry = default_registry();
     nats.register(&mut registry);
@@ -107,7 +117,17 @@ pub fn run(path: &Path) -> Result<(), StartError> {
 
     stop_on_ctrl_c(Arc::clone(&nats))?;
     let engine = Engine::start(pipeline, source, workers, metrics)?;
-    eprintln!("pipelined: running with {workers} workers; Ctrl-C to stop");
+    eprintln!(
+        "pipelined: running with {workers} workers, metrics {}; Ctrl-C to stop",
+        if telemetry.is_some() {
+            "over OTLP"
+        } else {
+            "off"
+        }
+    );
     engine.join()?;
+    if let Some(telemetry) = telemetry {
+        telemetry.shutdown()?;
+    }
     Ok(())
 }

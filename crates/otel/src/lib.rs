@@ -1,1 +1,164 @@
-//! OTLP telemetry wiring. Placeholder until the telemetry ticket lands.
+//! OTLP telemetry wiring: the [`Recorder`] that turns the engine's measurements into
+//! OpenTelemetry instruments, and the exporter that ships them to the collector.
+//!
+//! Every metric in [`Metric::ALL`] becomes one instrument, created up front and named as the
+//! spec spells it; a counter for `*_total`, an `f64` histogram in seconds with sub-second
+//! buckets for `*_seconds`. Labels become attributes with the same names, so the collector's
+//! Prometheus exporter surfaces `records_dropped_total{tenant, stage, reason}` verbatim.
+//!
+//! Export is OTLP over HTTP/protobuf on a blocking client: the engine runs on plain threads,
+//! and the SDK's periodic reader drives the exporter from its own thread, so no async
+//! runtime is involved. Configuration is the standard OpenTelemetry environment:
+//! `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`) selects the
+//! collector and `OTEL_METRIC_EXPORT_INTERVAL` the cadence. With neither endpoint set,
+//! [`init`] reports that telemetry is off and the binary records nothing.
+
+use std::collections::BTreeMap;
+
+use fusion_core::metrics::{Labels, Metric, MetricKind, Metrics, Recorder};
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _};
+use opentelemetry_otlp::{MetricExporter, OTEL_EXPORTER_OTLP_ENDPOINT};
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
+
+/// The `service.name` resource attribute and the meter name.
+pub const SERVICE_NAME: &str = "fusion-pipeline";
+
+/// The metrics-specific endpoint variable, which takes precedence over the general one.
+const OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT";
+
+/// Histogram boundaries in seconds for stage, sink and end-to-end latencies: 100µs to 10s.
+const SECONDS_BOUNDARIES: [f64; 16] = [
+    0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+    5.0, 10.0,
+];
+
+/// Errors from setting up or shutting down the exporter.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OtelError {
+    /// The OTLP exporter could not be built from the environment.
+    #[error("could not build the OTLP metrics exporter: {0}")]
+    Exporter(#[source] opentelemetry_otlp::ExporterBuildError),
+    /// The meter provider could not flush or shut down.
+    #[error("could not shut down the meter provider: {0}")]
+    Shutdown(#[source] opentelemetry_sdk::error::OTelSdkError),
+}
+
+/// A [`Recorder`] over OpenTelemetry instruments, one per [`Metric`].
+#[derive(Debug, Clone)]
+pub struct OtlpRecorder {
+    counters: BTreeMap<Metric, Counter<u64>>,
+    histograms: BTreeMap<Metric, Histogram<f64>>,
+}
+
+impl OtlpRecorder {
+    /// Create every instrument on `meter`.
+    #[must_use]
+    pub fn new(meter: &Meter) -> Self {
+        let mut counters = BTreeMap::new();
+        let mut histograms = BTreeMap::new();
+        for metric in Metric::ALL {
+            match metric.kind() {
+                MetricKind::Counter => {
+                    counters.insert(metric, meter.u64_counter(metric.as_str()).build());
+                }
+                MetricKind::Histogram => {
+                    histograms.insert(
+                        metric,
+                        meter
+                            .f64_histogram(metric.as_str())
+                            .with_unit("s")
+                            .with_boundaries(SECONDS_BOUNDARIES.to_vec())
+                            .build(),
+                    );
+                }
+            }
+        }
+        Self {
+            counters,
+            histograms,
+        }
+    }
+}
+
+fn attributes(labels: &Labels<'_>) -> Vec<KeyValue> {
+    labels
+        .pairs()
+        .map(|(name, value)| KeyValue::new(name, value.to_owned()))
+        .collect()
+}
+
+impl Recorder for OtlpRecorder {
+    fn count(&self, metric: Metric, labels: &Labels<'_>, by: u64) {
+        if let Some(counter) = self.counters.get(&metric) {
+            counter.add(by, &attributes(labels));
+        }
+    }
+
+    fn observe(&self, metric: Metric, labels: &Labels<'_>, value: f64) {
+        if let Some(histogram) = self.histograms.get(&metric) {
+            histogram.record(value, &attributes(labels));
+        }
+    }
+}
+
+/// A running exporter. Keep it alive for as long as the engine runs and call
+/// [`Telemetry::shutdown`] afterwards so the last interval is flushed.
+#[derive(Debug)]
+pub struct Telemetry {
+    provider: SdkMeterProvider,
+    metrics: Metrics,
+}
+
+impl Telemetry {
+    /// The engine's handle on this exporter.
+    #[must_use]
+    pub fn metrics(&self) -> Metrics {
+        self.metrics.clone()
+    }
+
+    /// Flush what has not been exported yet and stop the reader thread.
+    ///
+    /// # Errors
+    ///
+    /// [`OtelError::Shutdown`] when the final export fails.
+    pub fn shutdown(self) -> Result<(), OtelError> {
+        self.provider.shutdown().map_err(OtelError::Shutdown)
+    }
+}
+
+/// Whether the environment names a collector to export to.
+#[must_use]
+pub fn configured() -> bool {
+    [
+        OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
+        OTEL_EXPORTER_OTLP_ENDPOINT,
+    ]
+    .iter()
+    .any(|var| std::env::var(var).is_ok_and(|v| !v.trim().is_empty()))
+}
+
+/// Start exporting to the collector the environment names, or return `None` when it names
+/// none.
+///
+/// # Errors
+///
+/// [`OtelError::Exporter`] when the endpoint or another `OTEL_EXPORTER_OTLP_*` variable is
+/// unusable.
+pub fn init() -> Result<Option<Telemetry>, OtelError> {
+    if !configured() {
+        return Ok(None);
+    }
+    let exporter = MetricExporter::builder()
+        .with_http()
+        .build()
+        .map_err(OtelError::Exporter)?;
+    let provider = SdkMeterProvider::builder()
+        .with_resource(Resource::builder().with_service_name(SERVICE_NAME).build())
+        .with_periodic_exporter(exporter)
+        .build();
+    let metrics = Metrics::new(OtlpRecorder::new(&provider.meter(SERVICE_NAME)));
+    Ok(Some(Telemetry { provider, metrics }))
+}
