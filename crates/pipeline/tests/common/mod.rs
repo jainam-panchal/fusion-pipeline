@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use fusion_core::engine::Engine;
 use fusion_core::memory::{MemoryInput, MemorySinks, MemorySource};
+use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::registry::Registry;
 use fusion_pipeline::default_registry;
@@ -15,11 +16,12 @@ use fusion_pipeline::default_registry;
 /// How long a test waits for an ack handle to settle.
 pub const WAIT: Duration = Duration::from_secs(5);
 
-/// A running engine with its in-memory source and sinks.
+/// A running engine with its in-memory source, sinks and metrics recorder.
 pub struct Harness {
     pub engine: Engine,
     pub source: MemoryInput,
     pub sinks: MemorySinks,
+    pub recorder: InMemoryRecorder,
 }
 
 /// The default registry with `sink.memory` writing to `sinks`.
@@ -39,11 +41,19 @@ pub fn start(yaml: &str, workers: usize) -> Harness {
 pub fn start_with(yaml: &str, workers: usize, sinks: MemorySinks, registry: Registry) -> Harness {
     let pipeline = Pipeline::from_yaml(yaml, &registry).expect("pipeline loads");
     let (source, input) = MemorySource::new();
-    let engine = Engine::start(pipeline, Box::new(source), workers).expect("engine starts");
+    let recorder = InMemoryRecorder::new();
+    let engine = Engine::start(
+        pipeline,
+        Box::new(source),
+        workers,
+        Metrics::new(recorder.clone()),
+    )
+    .expect("engine starts");
     Harness {
         engine,
         source: input,
         sinks,
+        recorder,
     }
 }
 
@@ -52,6 +62,16 @@ impl Harness {
     pub fn finish(self) {
         drop(self.source);
         self.engine.join().expect("clean shutdown");
+    }
+
+    /// The counter `metric` under exactly `labels`, zero if never counted.
+    pub fn counter(&self, metric: Metric, labels: &[(&str, &str)]) -> u64 {
+        self.recorder.counter(metric, labels)
+    }
+
+    /// Every sample of the histogram `metric` under exactly `labels`.
+    pub fn samples(&self, metric: Metric, labels: &[(&str, &str)]) -> Vec<f64> {
+        self.recorder.samples(metric, labels)
     }
 
     /// The ids of the records `sink` received, sorted.

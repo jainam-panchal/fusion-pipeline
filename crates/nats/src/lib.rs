@@ -23,6 +23,7 @@ use async_nats::jetstream::context::{ConsumerInfoErrorKind, GetStreamErrorKind};
 use async_nats::jetstream::{self, ErrorCode};
 use fusion_core::config::{NodeConfig, SourceConfig};
 use fusion_core::io::{Sink, Source};
+use fusion_core::metrics::Metrics;
 use fusion_core::registry::Registry;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
@@ -127,15 +128,17 @@ pub struct Nats {
     runtime: Arc<Runtime>,
     connections: Mutex<BTreeMap<String, jetstream::Context>>,
     shutdown: watch::Sender<bool>,
+    metrics: Metrics,
 }
 
 impl Nats {
-    /// Start the I/O runtime.
+    /// Start the I/O runtime. Sources built from it count their redeliveries and their own
+    /// naks through `metrics`.
     ///
     /// # Errors
     ///
     /// [`NatsError::Runtime`] when the runtime threads cannot be spawned.
-    pub fn new() -> Result<Self, NatsError> {
+    pub fn new(metrics: Metrics) -> Result<Self, NatsError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("nats-io")
@@ -147,6 +150,7 @@ impl Nats {
             runtime: Arc::new(runtime),
             connections: Mutex::new(BTreeMap::new()),
             shutdown,
+            metrics,
         })
     }
 
@@ -218,6 +222,7 @@ impl Nats {
             Arc::clone(&self.runtime),
             consumer,
             self.shutdown.subscribe(),
+            self.metrics.clone(),
         ))
     }
 

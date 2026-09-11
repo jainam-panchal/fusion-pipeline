@@ -1,0 +1,34 @@
+# Scrapes the pipeline's metrics from the collector, NATS through prometheus-nats-exporter
+# (JetStream consumer pending, redelivered and ack floor from `-jsz=all`), Dragonfly's own
+# endpoint, and the collector's and Prometheus's self-metrics. Process CPU and memory come
+# from each process itself: the pipeline's `process_*` through the collector, NATS's
+# `gnatsd_varz_*` through the exporter, Dragonfly's `dragonfly_*`.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: pipeline
+    # The collector labels each series with the pipeline's own resource: `job` is the
+    # service name (`fusion-pipeline`) and `instance` the instance id, so several pipeline
+    # processes are distinct series. Honour them rather than renaming to `exported_*`.
+    honor_labels: true
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  - job_name: nats
+    static_configs:
+      - targets: ["nats-exporter:7777"]
+
+  - job_name: dragonfly
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["dragonfly:6379"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -17,6 +17,10 @@
 //! Naks carry a delay. When the engine gives none, [`nak_delay`] derives one from the
 //! message's delivery count: 1s on the first failure, doubling to [`MAX_NAK_DELAY`], so a
 //! sink that is down does not burn through `max_deliver` in milliseconds.
+//!
+//! A message delivered more than once counts on `source_redeliveries_total`, and a nak the
+//! source issues itself (an undecodable payload) on `source_naks_total`, both under the
+//! tenant the subject names.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +28,7 @@ use std::time::Duration;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{AckKind, message::Acker};
 use fusion_core::io::{AckHandle, Envelope, Intake, Source, SourceError};
+use fusion_core::metrics::Metrics;
 use fusion_core::record::Record;
 use futures::StreamExt;
 use tokio::runtime::Runtime;
@@ -53,6 +58,7 @@ pub struct NatsSource {
     runtime: Arc<Runtime>,
     consumer: PullConsumer,
     shutdown: watch::Receiver<bool>,
+    metrics: Metrics,
 }
 
 impl NatsSource {
@@ -60,11 +66,13 @@ impl NatsSource {
         runtime: Arc<Runtime>,
         consumer: PullConsumer,
         shutdown: watch::Receiver<bool>,
+        metrics: Metrics,
     ) -> Self {
         Self {
             runtime,
             consumer,
             shutdown,
+            metrics,
         }
     }
 
@@ -95,13 +103,19 @@ impl NatsSource {
                 .and_then(|info| u64::try_from(info.delivered).ok())
                 .unwrap_or(1);
             let (message, acker) = message.split();
-            let record = match decode(&message.subject, &message.payload) {
+            let subject_tenant = tenant_from_subject(&message.subject);
+            let tenant = subject_tenant.unwrap_or(Metrics::UNKNOWN_TENANT);
+            if delivered > 1 {
+                self.metrics.source_redelivery(tenant);
+            }
+            let record = match decode(subject_tenant, &message.payload) {
                 Ok(record) => record,
                 Err(err) => {
                     eprintln!(
                         "nats source: nak of undecodable message on `{}` (delivery {delivered}): {err}",
                         message.subject
                     );
+                    self.metrics.source_nak(tenant);
                     // Settled here, on the runtime: `NatsAck` blocks on the runtime and
                     // cannot be used from inside it.
                     let nak = AckKind::Nak(Some(nak_delay(delivered)));
@@ -123,9 +137,10 @@ impl NatsSource {
     }
 }
 
-fn decode(subject: &str, payload: &[u8]) -> Result<Record, serde_json::Error> {
+/// Decode one record, stamping `tenant` (from the subject) when the record carries none.
+fn decode(tenant: Option<&str>, payload: &[u8]) -> Result<Record, serde_json::Error> {
     let mut record: Record = serde_json::from_slice(payload)?;
-    if let Some(tenant) = tenant_from_subject(subject) {
+    if let Some(tenant) = tenant {
         stamp_tenant(&mut record, tenant);
     }
     Ok(record)

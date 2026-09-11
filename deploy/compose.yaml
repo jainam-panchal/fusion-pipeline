@@ -1,10 +1,24 @@
-# NATS JetStream for the pipeline. Bring up with:
+# The POC stack: NATS JetStream in and out, the pipeline, and its telemetry. Bring up with:
 #
-#   docker compose -f deploy/compose.yaml up -d
+#   docker compose -f deploy/compose.yaml up -d --build
 #
 # `nats-init` runs once and creates the streams and the pull consumer the pipeline expects;
 # the pipeline itself never creates them (spec: the sink stream is pre-created by compose).
 # Re-running it is safe: every command is skipped when its object already exists.
+#
+# Metrics: the pipeline exports over OTLP to `otel-collector`, which serves them to
+# `prometheus` on :8889. `nats-exporter` scrapes the NATS monitoring port (JetStream
+# consumer pending, redelivered and ack floor included) and `dragonfly` serves its own
+# metrics at :6379/metrics. Each process reports its own CPU and memory: the pipeline as
+# OTel `process.*` metrics, NATS through the exporter's `-varz`, Dragonfly on its own
+# endpoint. `grafana` provisions the Prometheus datasource and the internal dashboard from
+# `deploy/grafana`; open http://127.0.0.1:3000/d/fusion-internal.
+#
+# `deploy/metrics-check.sh` drives traffic through the stack and checks every metric the spec
+# names is in Prometheus with its labels.
+#
+# Host ports that commonly clash with other stacks can be moved: `GRAFANA_PORT` (3000) and
+# `DRAGONFLY_PORT` (6379), e.g. `GRAFANA_PORT=3001 docker compose -f deploy/compose.yaml up`.
 
 services:
   nats:
@@ -43,5 +57,83 @@ services:
         nats stream ls
         nats consumer info LOGS pipeline
 
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.40.1
+    ports:
+      - "${DRAGONFLY_PORT:-6379}:6379"
+    healthcheck:
+      # The image ships no wget or curl; the port answering is the readiness signal.
+      test: ["CMD", "nc", "-z", "127.0.0.1", "6379"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus exporter: the pipeline's metrics
+
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:0.15.0
+    command: ["-varz", "-connz", "-jsz=all", "http://nats:8222"]
+    depends_on:
+      nats:
+        condition: service_healthy
+    ports:
+      - "7777:7777"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--storage.tsdb.retention.time=1d"
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      # POC only: no login, everyone is admin.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+
+  pipeline:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: fusion-pipeline:local
+    depends_on:
+      nats-init:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    environment:
+      NATS_URL: nats://nats:4222
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+    volumes:
+      - ./pipeline.yaml:/etc/pipeline/pipeline.yaml:ro
+    # First Ctrl-C drains, a second exits at once; give the drain time before the kill.
+    stop_signal: SIGINT
+    stop_grace_period: 15s
+    restart: unless-stopped
+
 volumes:
   nats-data:
+  prometheus-data:
