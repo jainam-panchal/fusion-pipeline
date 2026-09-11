@@ -17,7 +17,7 @@ Cargo workspace under `crates/`:
 | `regex` | two-engine regex facade: linear `regex` first, PCRE2 fallback with configurable limits, load-time ReDoS lint and canary; the only crate with `unsafe` |
 | `nats` | NATS JetStream source (pull consumer, explicit ack) and sink (returns after `PubAck`); tenant stamped from the subject; `NATS_URL` overrides configured URLs |
 | `state` | state store implementations (placeholder) |
-| `otel` | OTLP telemetry wiring (placeholder) |
+| `otel` | OTLP metrics exporter: one instrument per spec metric behind core's `Recorder` boundary, HTTP/protobuf to the collector, configured by `OTEL_EXPORTER_OTLP_*` |
 | `pipeline` | the `pipelined` binary and the default stage registry |
 
 ```sh
@@ -60,6 +60,29 @@ tests. Leak-check it with AddressSanitizer on nightly instead:
 ```sh
 RUSTFLAGS=-Zsanitizer=address cargo +nightly test -p fusion-regex --target x86_64-unknown-linux-gnu
 ```
+
+## Metrics
+
+The full stack, pipeline included, is one command; the internal dashboard is provisioned
+from `deploy/grafana` and the pipeline's metrics reach Prometheus through the collector:
+
+```sh
+docker compose -f deploy/compose.yaml up -d --build
+open http://127.0.0.1:3000/d/fusion-internal     # Grafana, no login
+nats pub logs.acme.syslog '{"id": {{Count}}, "body": "disk full"}' --count 1000
+deploy/metrics-check.sh                          # traffic in, every spec metric present, exit non-zero otherwise
+```
+
+The pipeline exports over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` (or the metrics-specific
+variable) is set and records nothing otherwise, so `cargo run` against the compose NATS works
+as before; point it at the compose collector with `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`.
+`OTEL_METRIC_EXPORT_INTERVAL` (milliseconds) sets the cadence; compose uses 5000.
+
+Every metric carries `tenant`; per-node metrics carry `stage` (the node id, `source` for the
+engine's own decisions) and `records_dropped_total` carries `reason` from the spec's closed
+set. NATS is scraped through `prometheus-nats-exporter` (`jetstream_consumer_*` for pending,
+redelivered and ack floor) and Dragonfly at `:6379/metrics`. `deploy/nats-smoke.sh` runs
+its own `pipelined` on the host and stops the compose one first.
 
 A minimal config:
 

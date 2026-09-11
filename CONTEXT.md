@@ -106,6 +106,22 @@ The load-time structural check over the pattern AST for catastrophic shapes.
 **Canary**:
 The load-time run of a PCRE2-bound pattern against generated adversarial inputs under the runtime limits.
 
+### Telemetry
+
+**Metric**:
+One of the closed set of names the spec's Telemetry section exports, with its fixed label set. `records_dropped_total{tenant, stage, reason}` is the spine.
+_Avoid_: counter, gauge, stat (say counter or histogram only for the instrument kind)
+
+**Recorder**:
+The boundary an exporter implements: a counter add and a histogram sample, each with a metric and its labels. In-memory in tests, OTLP in deploy.
+_Avoid_: meter, registry, telemetry sink
+
+**Tenant label**:
+The `tenant` label on every metric: `resource.tenant.id`, or `unknown` when the record has none.
+
+**Stage label**:
+The `stage` label on per-node metrics: the node id, or the reserved `source` for a decision the engine took before any node ran.
+
 ### State
 
 **State store**:

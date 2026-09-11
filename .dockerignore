@@ -1,0 +1,6 @@
+target/
+.git/
+.claude/
+.agents/
+.scratch/
+*.log
