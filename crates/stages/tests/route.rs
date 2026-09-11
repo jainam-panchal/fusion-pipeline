@@ -27,8 +27,8 @@ const CTX: Context<'static> = Context {
 };
 
 const BY_FORMAT: &str = r#"    routes:
-      linux: resource["log.format"] == "Linux"
-      apache: resource["log.format"] == "Apache"
+      linux: resource.log.format == "Linux"
+      apache: resource.log.format == "Apache"
     default: other
 "#;
 
@@ -72,8 +72,8 @@ fn default_drop_drops_unmatched_records_with_route_default_drop() {
 fn first_matching_route_wins_in_declaration_order() {
     let route = route(
         r#"    routes:
-      any: resource["log.format"] != ""
-      linux: resource["log.format"] == "Linux"
+      any: resource.log.format != ""
+      linux: resource.log.format == "Linux"
     default: drop
 "#,
     );
@@ -93,7 +93,7 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource["log.format"] ==
+      linux: resource.log.format ==
     default: drop
   - id: out
     type: sink.memory

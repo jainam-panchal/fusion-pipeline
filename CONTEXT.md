@@ -63,6 +63,10 @@ Two or more nodes consuming the same upstream output. The record is copy-on-writ
 **Fan-in**:
 One node with a list in `from`, consuming several upstream outputs.
 
+**Field path**:
+The one dotted path every stage uses to name a record field: `root ("." segment)*`. Under `attributes`, `resource` or `scope` the segments joined with dots are the flat map key (`attributes.http.status` is the `http.status` key). Segments with characters outside letters, digits, `_` and `-` are double-quoted.
+_Avoid_: selector, accessor, bracket path
+
 **Condition**:
 A `field op literal` expression with `and`, `or`, `not` and parentheses, evaluated against a record. Used by `filter` and `route`.
 _Avoid_: predicate, rule, expression language

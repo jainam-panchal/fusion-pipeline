@@ -2,6 +2,7 @@
 //! against records in the OTLP-semantic wire shape.
 
 use fusion_core::condition::{Condition, ConditionError};
+use fusion_core::path::PathError;
 use fusion_core::record::Record;
 
 fn record() -> Record {
@@ -13,8 +14,10 @@ fn record() -> Record {
             "severity_text": "ERROR",
             "severity_number": 17,
             "body": "disk full on /var",
-            "attributes": {"http.path": "/api/v1", "http.status": 503, "retry": true, "ratio": 0.25},
-            "resource": {"tenant.id": "acme", "service": {"name": "api"}}
+            "attributes": {"http.path": "/api/v1", "http.status": 503, "retry": true, "ratio": 0.25,
+                           "x-request-id": "abc", "5xx.count": 2, "something something": 1,
+                           "Event ID.code": 4625},
+            "resource": {"tenant.id": "acme", "service.name": "api", "k8s.pod-name": "web-0"}
         }"#,
     )
     .expect("record parses")
@@ -31,8 +34,8 @@ fn eq_on_string_number_and_bool() {
     assert!(eval(r#"severity_text == "ERROR""#));
     assert!(!eval(r#"severity_text == "WARN""#));
     assert!(eval("severity_number == 17"));
-    assert!(eval(r#"attributes["retry"] == true"#));
-    assert!(eval(r#"attributes["ratio"] == 0.25"#));
+    assert!(eval(r#"attributes.retry == true"#));
+    assert!(eval(r#"attributes.ratio == 0.25"#));
 }
 
 #[test]
@@ -87,10 +90,10 @@ fn eq_between_mismatched_types_is_false_and_ne_is_true() {
 #[test]
 fn missing_field_equals_null_and_nothing_else() {
     assert!(eval("trace_id == null"));
-    assert!(eval(r#"attributes["nope"] == null"#));
-    assert!(!eval(r#"attributes["nope"] == "x""#));
-    assert!(eval(r#"attributes["nope"] != "x""#));
-    assert!(!eval(r#"attributes["nope"] < 1"#));
+    assert!(eval(r#"attributes.nope == null"#));
+    assert!(!eval(r#"attributes.nope == "x""#));
+    assert!(eval(r#"attributes.nope != "x""#));
+    assert!(!eval(r#"attributes.nope < 1"#));
 }
 
 #[test]
@@ -127,12 +130,11 @@ fn parentheses_group() {
 }
 
 #[test]
-fn dotted_and_bracketed_paths_reach_into_maps() {
-    assert!(eval(r#"attributes["http.path"] == "/api/v1""#));
-    assert!(eval(r#"attributes["http.status"] >= 500"#));
-    assert!(eval(r#"resource["tenant.id"] == "acme""#));
+fn dotted_paths_name_flat_map_keys() {
+    assert!(eval(r#"attributes.http.path == "/api/v1""#));
+    assert!(eval("attributes.http.status >= 500"));
+    assert!(eval(r#"resource.tenant.id == "acme""#));
     assert!(eval(r#"resource.service.name == "api""#));
-    assert!(eval(r#"resource["service"]["name"] == "api""#));
     assert!(eval(r#"body == "disk full on /var""#));
     assert!(eval(r#"kind == "log""#));
     assert!(eval("id == 7"));
@@ -140,10 +142,61 @@ fn dotted_and_bracketed_paths_reach_into_maps() {
 }
 
 #[test]
+fn segments_with_digits_hyphens_and_quotes() {
+    assert!(eval(r#"attributes.x-request-id == "abc""#));
+    assert!(eval("attributes.5xx.count > 1"));
+    assert!(eval(r#"resource.k8s.pod-name == "web-0""#));
+    assert!(eval(r#"attributes."something something" == 1"#));
+    assert!(eval(r#"attributes."Event ID".code == 4625"#));
+    assert!(eval(
+        r#"attributes.5xx.count > 1 and resource.k8s.pod-name != "web-1""#
+    ));
+}
+
+#[test]
+fn bracket_syntax_is_a_parse_error() {
+    let err = Condition::parse(r#"attributes["http.path"] == "x""#).expect_err("brackets are gone");
+    assert!(
+        matches!(err, ConditionError::Field { offset: 0, ref source } if matches!(source, PathError::BracketSyntax { .. })),
+        "{err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("instead use `attributes.http.path`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn body_and_scalars_take_no_segments_and_maps_need_a_key() {
+    let err = Condition::parse("body.x == 1").expect_err("body is whole");
+    assert!(
+        matches!(err, ConditionError::Field { ref source, .. } if matches!(source, PathError::NotAMap { .. })),
+        "{err}"
+    );
+    let err = Condition::parse("severity_number.x == 1").expect_err("scalar");
+    assert!(
+        matches!(err, ConditionError::Field { ref source, .. } if matches!(source, PathError::NotAMap { .. })),
+        "{err}"
+    );
+    let err = Condition::parse("attributes == null").expect_err("map needs key");
+    assert!(
+        matches!(err, ConditionError::Field { ref source, .. } if matches!(source, PathError::MapNeedsKey { .. })),
+        "{err}"
+    );
+    let err =
+        Condition::parse("severity_number > 1 and attributes.a:b == 1").expect_err("bad char");
+    assert!(
+        matches!(err, ConditionError::Field { offset: 24, ref source } if matches!(source, PathError::InvalidSegment { .. })),
+        "{err}"
+    );
+}
+
+#[test]
 fn single_quoted_strings_and_escapes() {
     assert!(eval(r#"severity_text == 'ERROR'"#));
     assert!(eval(r#"body == "disk full on \/var""#));
-    assert!(eval(r#"attributes["http.path"] == "\/api\/v1""#));
+    assert!(eval(r#"attributes.http.path == "\/api\/v1""#));
 }
 
 #[test]
@@ -172,12 +225,9 @@ fn parse_errors_name_the_problem() {
 
     let err = Condition::parse(r#"nonsense == 1"#).expect_err("unknown root");
     assert!(
-        matches!(err, ConditionError::UnknownField { ref name } if name == "nonsense"),
+        matches!(err, ConditionError::Field { offset: 0, ref source } if matches!(source, PathError::UnknownField { name } if name == "nonsense")),
         "{err}"
     );
-
-    let err = Condition::parse(r#"severity_number.x == 1"#).expect_err("scalar has no children");
-    assert!(matches!(err, ConditionError::NotAMap { .. }), "{err}");
 
     let err = Condition::parse(r#"(severity_number == 1"#).expect_err("unbalanced");
     assert!(matches!(err, ConditionError::UnexpectedEnd), "{err}");

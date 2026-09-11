@@ -126,6 +126,8 @@ One record type, OTLP-semantic but flat: `id`, `kind`, `time_unix_nano`, `observ
 
 Tenant lives at `resource["tenant.id"]`. The NATS source reads the tenant from the subject (`logs.{tenant}.>`) and stamps it if absent. (assumed) Fewer than 100 tenants, so tenant is a label on every metric including histograms.
 
+Amended 2026-09-11 (issue #20): `attributes`, `resource` and `scope` are flat maps with OTel-style dotted keys (`http.status`, `tenant.id`, `k8s.pod-name`) and scalar values; nothing is nested below a key.
+
 Records are copy-on-write across fan-out: shared until a branch mutates.
 
 ### Wire format and test data
@@ -152,7 +154,15 @@ Internally the config becomes a DAG (node ids plus an edge list). The POC config
 
 ### Condition grammar
 
-`field op literal`, where field is a dotted or bracketed path into the record, ops are `== != =~ !~ < > <= >=`, combinators are `and or not`, and parentheses group. `=~` and `!~` compile their pattern through the same regex facade with the same limits.
+`field op literal`, where field is a dotted path into the record, ops are `== != =~ !~ < > <= >=`, combinators are `and or not`, and parentheses group. `=~` and `!~` compile their pattern through the same regex facade with the same limits.
+
+Amended 2026-09-11 (issue #20): the field was "a dotted or bracketed path"; bracket syntax is removed and is a load-time config error naming the node, with the dotted form in the message.
+
+### Field paths
+
+Every stage names a record field with one dotted path, `root ("." segment)*`, and nothing else. The root is a top-level record field. When it is `attributes`, `resource` or `scope`, the segments after it joined with dots are the map key: `attributes.http.status` reads and writes the `http.status` key of `attributes`, and `resource.tenant.id` is the tenant. Map values are scalars; nothing below a key is addressable. `body` is addressed only as a whole, and the scalar fields (`id`, `kind`, `severity_text`, `severity_number`, the time fields, `trace_id`, `span_id`) take no segments. A bare segment is one or more of `[A-Za-z0-9_-]`, so `resource.k8s.pod-name` and `attributes.5xx.count` need no quoting; a segment with any other character is written as a double-quoted string, `attributes."Event ID".code` naming the `Event ID.code` key, with `\"` and `\\` as the only escapes. The root is never quoted.
+
+Core exposes read, write and remove by path so `filter`, `route`, `edit`, `pcre2_extract`, `redact` and `lua` share one path semantics. Writes to `id` and `kind` are refused; `severity_number` takes an integer, `severity_text`, `trace_id` and `span_id` a string, the time fields a non-negative integer, and a map key a scalar. Every refusal is an error value, never a panic, and the record is unchanged on error. Every path error is reported at config load, naming the node and saying what to write instead.
 
 ### Stages
 

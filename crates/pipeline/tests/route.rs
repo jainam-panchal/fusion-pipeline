@@ -20,8 +20,8 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource["log.format"] == "Linux"
-      apache: resource["log.format"] == "Apache"
+      linux: resource.log.format == "Linux"
+      apache: resource.log.format == "Apache"
     default: other
   - id: linux_out
     type: sink.memory
@@ -34,7 +34,7 @@ nodes:
     from: by_format.other
 "#;
 
-/// A test-only stage that sets `attributes["touched"] = true`, so cross-branch isolation
+/// A test-only stage that sets `attributes.touched` to `true`, so cross-branch isolation
 /// is observable at a sink.
 struct Touch;
 
@@ -150,7 +150,7 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource["log.format"] == "Linux"
+      linux: resource.log.format == "Linux"
     default: drop
   - id: archive
     type: sink.memory
@@ -202,8 +202,8 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource["log.format"] == "Linux"
-      apache: resource["log.format"] == "Apache"
+      linux: resource.log.format == "Linux"
+      apache: resource.log.format == "Apache"
     default: drop
   - id: linux_touch
     type: touch
@@ -240,8 +240,8 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource["log.format"] == "Linux"
-      apache: resource["log.format"] == "Apache"
+      linux: resource.log.format == "Linux"
+      apache: resource.log.format == "Apache"
     default: other
   - id: linux_out
     type: sink.memory
@@ -276,7 +276,7 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource["log.format"] == "Linux"
+      linux: resource.log.format == "Linux"
     default: drop
   - id: touch
     type: touch

@@ -12,7 +12,7 @@ Cargo workspace under `crates/`:
 
 | Crate | Contents |
 |---|---|
-| `core` | record model, config loader, DAG validation, engine, `Source`/`Sink`/`AckHandle` traits, in-memory fakes, condition grammar |
+| `core` | record model, field paths (read, write, remove), config loader, DAG validation, engine, `Source`/`Sink`/`AckHandle` traits, in-memory fakes, condition grammar |
 | `stages` | built-in stages: `filter`, `route` |
 | `regex` | two-engine regex facade: linear `regex` first, PCRE2 fallback with configurable limits, load-time ReDoS lint and canary; the only crate with `unsafe` |
 | `nats` | NATS JetStream source (pull consumer, explicit ack) and sink (returns after `PubAck`); tenant stamped from the subject; `NATS_URL` overrides configured URLs |
@@ -80,6 +80,21 @@ nodes:
     subject: processed.logs
 ```
 
+## Field paths
+
+Every stage names a record field with one dotted path: write what the JSON shows, outer
+field, dot, key. Under `attributes`, `resource` and `scope` the segments after the root,
+joined with dots, are the flat map key, so `attributes.http.status` reads the `http.status`
+key. A segment is letters, digits, `_` and `-`; quote it for anything else:
+`attributes."Event ID".code`. `body` and the scalar fields take no segments. Brackets are
+not accepted; every path error is a load-time error that names the node and says what to
+write instead.
+
+```yaml
+condition: attributes.http.status >= 500 and resource.tenant.id == "acme"
+condition: resource.k8s.pod-name == "web-0" and attributes."something something" == 1
+```
+
 ## Routing
 
 A `route` node has named outputs. Consumers read `<route>.<label>`; two nodes naming the
@@ -93,8 +108,8 @@ nodes:
   - id: by_format
     type: route
     routes:                                 # ordered; first match wins
-      linux: resource["log.format"] == "Linux"
-      apache: resource["log.format"] == "Apache"
+      linux: resource.log.format == "Linux"
+      apache: resource.log.format == "Apache"
     default: other                          # a label, or `drop`
   - id: linux_out
     type: sink.nats
