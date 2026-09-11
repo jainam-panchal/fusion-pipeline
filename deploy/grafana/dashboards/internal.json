@@ -11,7 +11,7 @@
   "graphTooltip": 1,
   "refresh": "5s",
   "schemaVersion": 39,
-  "version": 10,
+  "version": 11,
   "time": {
     "from": "now-15m",
     "to": "now"
@@ -256,7 +256,7 @@
       "id": 3,
       "type": "timeseries",
       "title": "How slow?  (end to end, and the slowest stage)",
-      "description": "End-to-end: observed time on the record to settlement. Slowest stage p99: the worst stage run or sink PubAck wait right now; find which in the per-stage rows below. Dashed lines: 1 s (watch), 5 s (problem).",
+      "description": "End-to-end: observed time on the record to settlement. Slowest stage p99: the worst stage run or sink PubAck wait right now; find which in the per-stage rows below. Dashed lines: 1 s (watch), 5 s (problem). Gaps are minutes with no records: latency is undefined without them; the grey bars show how many records the number is based on.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -279,7 +279,7 @@
             }
           },
           "min": 0,
-          "noValue": "no runs",
+          "noValue": "no records in this window",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -298,7 +298,47 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "records settled /s"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 25
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "unit",
+                "value": "reqps"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "gray"
+                }
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "records/s"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -322,7 +362,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(histogram_quantile(0.5, sum by (le) (rate(pipeline_end_to_end_seconds_bucket{tenant=~\"$tenant\"}[1m])))) or vector(0)",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(pipeline_end_to_end_seconds_bucket{tenant=~\"$tenant\"}[1m])))",
           "legendFormat": "end-to-end p50",
           "refId": "A"
         },
@@ -331,7 +371,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(histogram_quantile(0.99, sum by (le) (rate(pipeline_end_to_end_seconds_bucket{tenant=~\"$tenant\"}[1m])))) or vector(0)",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(pipeline_end_to_end_seconds_bucket{tenant=~\"$tenant\"}[1m])))",
           "legendFormat": "end-to-end p99",
           "refId": "B"
         },
@@ -340,9 +380,18 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(max(histogram_quantile(0.99, sum by (le, stage) (rate(stage_duration_seconds_bucket{tenant=~\"$tenant\",stage=~\"$stage\"}[1m]) or rate(sink_publish_duration_seconds_bucket{tenant=~\"$tenant\",stage=~\"$stage\"}[1m]))))) or vector(0)",
+          "expr": "max(histogram_quantile(0.99, sum by (le, stage) (rate(stage_duration_seconds_bucket{tenant=~\"$tenant\",stage=~\"$stage\"}[1m]) or rate(sink_publish_duration_seconds_bucket{tenant=~\"$tenant\",stage=~\"$stage\"}[1m]))))",
           "legendFormat": "slowest stage p99",
           "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(pipeline_end_to_end_seconds_count{tenant=~\"$tenant\"}[1m]))",
+          "legendFormat": "records settled /s",
+          "refId": "V"
         }
       ]
     },
@@ -910,7 +959,7 @@
       "id": 10,
       "type": "timeseries",
       "title": "Time per record (p50 / p95 / p99)",
-      "description": "Stage run time, or for a sink the wait for durable acceptance (PubAck). Includes any state-store round trip the stage makes.",
+      "description": "Stage run time, or for a sink the wait for durable acceptance (PubAck). Includes any state-store round trip the stage makes. Gaps are minutes with no records: latency is undefined without them; the grey bars show how many records the number is based on.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -930,9 +979,49 @@
             "showPoints": "never"
           },
           "min": 0,
-          "noValue": "no runs"
+          "noValue": "no records through this node in this window"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "records /s"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 25
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "unit",
+                "value": "reqps"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "gray"
+                }
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "records/s"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -976,6 +1065,15 @@
           "expr": "histogram_quantile(0.99, sum by (le) (rate(stage_duration_seconds_bucket{tenant=~\"$tenant\",stage=\"$stage\"}[1m]) or rate(sink_publish_duration_seconds_bucket{tenant=~\"$tenant\",stage=\"$stage\"}[1m])))",
           "legendFormat": "p99",
           "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(stage_duration_seconds_count{tenant=~\"$tenant\",stage=\"$stage\"}[1m]) or rate(sink_publish_duration_seconds_count{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "legendFormat": "records /s",
+          "refId": "V"
         }
       ]
     },

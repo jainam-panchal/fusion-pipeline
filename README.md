@@ -92,7 +92,8 @@ The dashboard is timeseries only, no stat tiles: an Overview row (throughput, la
 failures, CPU, memory) with Last/Max/Mean in every legend, then one row per stage that
 repeats for every `stage` the pipeline has reported (records, p50/p95/p99, drops by reason,
 state-store ops), and a collapsed Internals row. `Tenant` and `Stage` variables filter
-everything.
+everything. Latency charts go blank for a minute with no records, since a quantile of
+nothing is undefined; the grey records/s bars in each show what the line is based on.
 
 A minimal config:
 
