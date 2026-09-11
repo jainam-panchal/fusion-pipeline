@@ -37,10 +37,16 @@ pub const SERVICE_NAME: &str = "fusion-pipeline";
 /// The metrics-specific endpoint variable, which takes precedence over the general one.
 const OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT";
 
-/// Histogram boundaries in seconds for stage, sink and end-to-end latencies: 100µs to 10s.
+/// Histogram boundaries in seconds for stage runs and sink writes: 100µs to 10s.
 const SECONDS_BOUNDARIES: [f64; 16] = [
     0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
     5.0, 10.0,
+];
+
+/// Histogram boundaries in seconds for end to end: 1ms to 2 minutes, since a record that
+/// was nakked comes back after a backoff that sums to tens of seconds before its ack.
+const END_TO_END_BOUNDARIES: [f64; 16] = [
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0,
 ];
 
 /// Errors from setting up or shutting down the exporter.
@@ -74,12 +80,17 @@ impl OtlpRecorder {
                     counters.insert(metric, meter.u64_counter(metric.as_str()).build());
                 }
                 MetricKind::Histogram => {
+                    let boundaries = if metric == Metric::EndToEnd {
+                        END_TO_END_BOUNDARIES.to_vec()
+                    } else {
+                        SECONDS_BOUNDARIES.to_vec()
+                    };
                     histograms.insert(
                         metric,
                         meter
                             .f64_histogram(metric.as_str())
                             .with_unit("s")
-                            .with_boundaries(SECONDS_BOUNDARIES.to_vec())
+                            .with_boundaries(boundaries)
                             .build(),
                     );
                 }

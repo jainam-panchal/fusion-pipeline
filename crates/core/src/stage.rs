@@ -4,10 +4,9 @@ use std::fmt;
 
 use crate::record::{Record, RecordId};
 
-/// Why a record was intentionally dropped. Closed set; it is the `reason` label on
-/// `records_dropped_total`.
+/// Why a record was intentionally dropped. Closed set: adding one is a spec amendment, and
+/// [`DropReason::ALL`] lists them all. It is the `reason` label on `records_dropped_total`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum DropReason {
     /// A `filter` node dropped it.
     Filter,

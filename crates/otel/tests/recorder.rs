@@ -148,16 +148,25 @@ fn a_duration_histogram_has_sub_second_buckets_so_stage_latency_is_not_all_in_on
 }
 
 #[test]
-fn the_resource_names_the_service_and_this_instance() {
-    let resource = fusion_otel::resource();
+fn every_export_carries_the_service_name_and_an_instance_id() {
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_resource(fusion_otel::resource())
+        .with_periodic_exporter(exporter.clone())
+        .build();
+    let metrics = Metrics::new(OtlpRecorder::new(&provider.meter("fusion-pipeline")));
+    metrics.records_in("acme", "out");
+    provider.force_flush().expect("flush");
+    let exported = exporter.get_finished_metrics().expect("exported");
 
+    let resource = exported[0].resource();
     let name = resource
         .get(&opentelemetry::Key::from_static_str("service.name"))
-        .expect("service.name set");
+        .expect("service.name on the export");
     assert_eq!(name.to_string(), "fusion-pipeline");
     let instance = resource
         .get(&opentelemetry::Key::from_static_str("service.instance.id"))
-        .expect("service.instance.id set, so several instances never collide in Prometheus");
+        .expect("service.instance.id on the export, so several instances never share a series");
     assert!(!instance.to_string().is_empty());
 }
 
@@ -216,4 +225,32 @@ fn the_process_reports_its_own_cpu_time_resident_memory_and_thread_count() {
     let (_, threads) =
         exported_sum(&exported, "process.thread.count").expect("process.thread.count exported");
     assert!(threads >= 1.0, "threads {threads}");
+}
+
+#[test]
+fn the_end_to_end_histogram_reaches_past_the_redelivery_backoff() {
+    let exported = export(|recorder| {
+        Metrics::new(recorder.clone()).end_to_end("acme", std::time::Duration::from_secs(20));
+    });
+
+    let e2e = exported
+        .iter()
+        .flat_map(|rm| rm.scope_metrics())
+        .flat_map(|sm| sm.metrics())
+        .find(|m| m.name() == "pipeline_end_to_end_seconds")
+        .expect("pipeline_end_to_end_seconds exported");
+    let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = e2e.data() else {
+        panic!("histogram expected, got {:?}", e2e.data());
+    };
+    let point = histogram.data_points().next().expect("one data point");
+    let bounds: Vec<f64> = point.bounds().collect();
+    // A 20 s sample lands in a finite bucket, not the overflow one, so p99 still resolves
+    // above the 1 s, 2 s, 4 s, 8 s nak backoff (about 15 s at max_deliver 5).
+    let counts: Vec<u64> = point.bucket_counts().collect();
+    let landed = counts.iter().position(|c| *c > 0).expect("landed");
+    assert!(
+        landed < bounds.len(),
+        "20 s fell in the overflow bucket: {bounds:?}"
+    );
+    assert!(bounds.last().copied().unwrap_or(0.0) >= 60.0, "{bounds:?}");
 }

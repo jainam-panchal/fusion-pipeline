@@ -304,7 +304,7 @@ nodes:
 }
 
 #[test]
-fn every_record_the_source_hands_over_is_counted_in_at_source_before_any_node_runs() {
+fn source_counts_every_record_in_and_only_those_entering_the_graph_out() {
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
 
@@ -327,6 +327,15 @@ fn every_record_the_source_hands_over_is_counted_in_at_source_before_any_node_ru
                 &[("tenant", "acme"), ("stage", "source")]
             ),
             3,
+            "workers={workers}"
+        );
+        // Only the record with an id and of kind log entered the graph.
+        assert_eq!(
+            h.counter(
+                Metric::RecordsOut,
+                &[("tenant", "acme"), ("stage", "source")]
+            ),
+            1,
             "workers={workers}"
         );
         h.finish();
@@ -377,13 +386,6 @@ nodes:
             &[("tenant", "acme"), ("stage", "boom")]
         ),
         1
-    );
-    assert_eq!(
-        h.counter(
-            Metric::RecordsErrored,
-            &[("tenant", "acme"), ("stage", "<panic>")]
-        ),
-        0
     );
     assert_eq!(h.counter(Metric::SourceNaks, &[("tenant", "acme")]), 1);
     // The worker survives the panic: the next record is processed normally.

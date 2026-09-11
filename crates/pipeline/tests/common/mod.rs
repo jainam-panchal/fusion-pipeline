@@ -21,7 +21,7 @@ pub struct Harness {
     pub engine: Engine,
     pub source: MemoryInput,
     pub sinks: MemorySinks,
-    pub metrics: InMemoryRecorder,
+    pub recorder: InMemoryRecorder,
 }
 
 /// The default registry with `sink.memory` writing to `sinks`.
@@ -41,19 +41,19 @@ pub fn start(yaml: &str, workers: usize) -> Harness {
 pub fn start_with(yaml: &str, workers: usize, sinks: MemorySinks, registry: Registry) -> Harness {
     let pipeline = Pipeline::from_yaml(yaml, &registry).expect("pipeline loads");
     let (source, input) = MemorySource::new();
-    let metrics = InMemoryRecorder::new();
+    let recorder = InMemoryRecorder::new();
     let engine = Engine::start(
         pipeline,
         Box::new(source),
         workers,
-        Metrics::new(metrics.clone()),
+        Metrics::new(recorder.clone()),
     )
     .expect("engine starts");
     Harness {
         engine,
         source: input,
         sinks,
-        metrics,
+        recorder,
     }
 }
 
@@ -66,12 +66,12 @@ impl Harness {
 
     /// The counter `metric` under exactly `labels`, zero if never counted.
     pub fn counter(&self, metric: Metric, labels: &[(&str, &str)]) -> u64 {
-        self.metrics.counter(metric, labels)
+        self.recorder.counter(metric, labels)
     }
 
     /// Every sample of the histogram `metric` under exactly `labels`.
     pub fn samples(&self, metric: Metric, labels: &[(&str, &str)]) -> Vec<f64> {
-        self.metrics.samples(metric, labels)
+        self.recorder.samples(metric, labels)
     }
 
     /// The ids of the records `sink` received, sorted.

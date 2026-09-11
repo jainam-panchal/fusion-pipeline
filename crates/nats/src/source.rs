@@ -103,11 +103,12 @@ impl NatsSource {
                 .and_then(|info| u64::try_from(info.delivered).ok())
                 .unwrap_or(1);
             let (message, acker) = message.split();
-            let tenant = tenant_from_subject(&message.subject).unwrap_or(Metrics::UNKNOWN_TENANT);
+            let subject_tenant = tenant_from_subject(&message.subject);
+            let tenant = subject_tenant.unwrap_or(Metrics::UNKNOWN_TENANT);
             if delivered > 1 {
                 self.metrics.source_redelivery(tenant);
             }
-            let record = match decode(&message.subject, &message.payload) {
+            let record = match decode(subject_tenant, &message.payload) {
                 Ok(record) => record,
                 Err(err) => {
                     eprintln!(
@@ -136,9 +137,10 @@ impl NatsSource {
     }
 }
 
-fn decode(subject: &str, payload: &[u8]) -> Result<Record, serde_json::Error> {
+/// Decode one record, stamping `tenant` (from the subject) when the record carries none.
+fn decode(tenant: Option<&str>, payload: &[u8]) -> Result<Record, serde_json::Error> {
     let mut record: Record = serde_json::from_slice(payload)?;
-    if let Some(tenant) = tenant_from_subject(subject) {
+    if let Some(tenant) = tenant {
         stamp_tenant(&mut record, tenant);
     }
     Ok(record)

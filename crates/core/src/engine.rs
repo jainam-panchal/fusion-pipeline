@@ -179,8 +179,10 @@ impl<'p> Walker<'p> {
     fn handle(&self, envelope: Envelope) {
         let Envelope { record, ack } = envelope;
         let tenant = Metrics::tenant_of(&record).to_owned();
-        // Every record the source hands over counts in at `source`, so intake is one series
-        // whatever the first node is called.
+        // `source` is a node like any other on the metrics: every record the source hands
+        // over counts in, every record that enters the graph counts out, and the engine's
+        // own rejections are its drops. Intake is then one series whatever the first node
+        // is called.
         self.metrics.records_in(&tenant, SOURCE_ID);
 
         let Some(record_id) = record.id else {
@@ -201,6 +203,8 @@ impl<'p> Walker<'p> {
             ack.ack();
             return;
         }
+
+        self.metrics.records_out(&tenant, SOURCE_ID, 1);
 
         let observed = record.observed_time_unix_nano.or(record.time_unix_nano);
         let mut walk = Walk {

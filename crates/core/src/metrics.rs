@@ -19,9 +19,9 @@ use crate::memory::lock_unpoisoned;
 use crate::record::Record;
 use crate::stage::DropReason;
 
-/// Every metric the pipeline exports. Closed set; the spelling is [`Metric::as_str`].
+/// Every metric the pipeline exports. Closed set: adding one is a spec amendment, and
+/// [`Metric::ALL`] lists them all. The spelling is [`Metric::as_str`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
 pub enum Metric {
     /// `records_in_total{tenant, stage}`: records handed to a node.
     RecordsIn,
@@ -373,26 +373,26 @@ fn intern(name: &str) -> &'static str {
     }
 }
 
+/// The key a measurement is stored under: the metric plus its labels, owned.
+fn key(metric: Metric, labels: &Labels<'_>) -> Series {
+    (
+        metric,
+        labels.pairs().map(|(n, v)| (n, v.to_owned())).collect(),
+    )
+}
+
 impl Recorder for InMemoryRecorder {
     fn count(&self, metric: Metric, labels: &Labels<'_>, by: u64) {
-        let key = (
-            metric,
-            labels.pairs().map(|(n, v)| (n, v.to_owned())).collect(),
-        );
         *lock_unpoisoned(&self.observed)
             .counters
-            .entry(key)
+            .entry(key(metric, labels))
             .or_insert(0) += by;
     }
 
     fn observe(&self, metric: Metric, labels: &Labels<'_>, value: f64) {
-        let key = (
-            metric,
-            labels.pairs().map(|(n, v)| (n, v.to_owned())).collect(),
-        );
         lock_unpoisoned(&self.observed)
             .samples
-            .entry(key)
+            .entry(key(metric, labels))
             .or_default()
             .push(value);
     }
