@@ -5,10 +5,17 @@
 //! source message is acknowledged once all branches have ended without failure and
 //! negatively acknowledged otherwise. Because a worker walks the graph synchronously, the
 //! outstanding-branch count is the recursion itself: every branch runs to its end even after
-//! one has failed, so the nak fires once all of them have finished, as the spec asks.
+//! one has failed, so the nak fires once all of them have finished, as the spec asks. The
+//! one exception is a panic, which unwinds past the remaining branches; the record is still
+//! nakked, so the outcome is safe.
 //!
-//! Records are cloned per fan-out branch for now; the spec's copy-on-write sharing lands with
-//! the route ticket, which is the first to fan out.
+//! Records are copy-on-write across branches: a fan-out hands every branch the same
+//! `Arc<Record>`. A sink reads through the shared pointer; a stage takes ownership, which
+//! copies only while another branch still holds the record. A mutation on one branch is
+//! therefore never visible on another. The copy is per stage, not per mutation: a stage that
+//! would not have mutated the record still copies while a sibling holds it. Branches run in
+//! file order of the consumers, so with a sink and a stage on one label, listing the sink
+//! first means no copy at all.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
@@ -177,7 +184,8 @@ impl Walker<'_> {
         // A stage or sink that panics must not take the ack handle down with it: contain the
         // panic (in dev; release aborts) and settle the record as failed.
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-            self.fan_out(self.pipeline.dag().source_successors(), record, &mut walk);
+            let targets = self.pipeline.dag().source_successors().iter().copied();
+            self.fan_out(targets, Arc::new(record), &mut walk);
         }));
         if outcome.is_err() {
             walk.fail("<panic>", &"stage or sink panicked");
@@ -189,23 +197,30 @@ impl Walker<'_> {
         }
     }
 
-    /// Deliver `record` to every node in `targets`. The last target takes it by move.
-    fn fan_out(&self, targets: &[NodeIndex], record: Record, walk: &mut Walk) {
-        let Some((last, rest)) = targets.split_last() else {
-            return;
-        };
-        for &target in rest {
-            self.run_node(target, record.clone(), walk);
+    /// Deliver `record` to every node in `targets`, sharing it until a branch needs to own it.
+    /// The last target receives the walker's own reference, so a lone branch never copies.
+    fn fan_out(
+        &self,
+        targets: impl Iterator<Item = NodeIndex>,
+        record: Arc<Record>,
+        walk: &mut Walk,
+    ) {
+        let mut targets = targets.peekable();
+        while let Some(target) = targets.next() {
+            if targets.peek().is_none() {
+                self.run_node(target, record, walk);
+                return;
+            }
+            self.run_node(target, Arc::clone(&record), walk);
         }
-        self.run_node(*last, record, walk);
     }
 
-    fn run_node(&self, index: NodeIndex, record: Record, walk: &mut Walk) {
+    fn run_node(&self, index: NodeIndex, record: Arc<Record>, walk: &mut Walk) {
         let dag = self.pipeline.dag();
         let node_id = dag.node(index).id.as_str();
         match self.pipeline.node(index) {
             CompiledNode::Sink(sink) => {
-                if let Err(err) = sink.write(std::slice::from_ref(&record)) {
+                if let Err(err) = sink.write(std::slice::from_ref(&*record)) {
                     walk.fail(node_id, &err);
                 }
             }
@@ -214,20 +229,27 @@ impl Walker<'_> {
                     node_id,
                     record_id: walk.record_id,
                 };
-                match stage.process(record, &ctx) {
+                // Copies only if another branch still shares the record.
+                let owned = Arc::unwrap_or_clone(record);
+                match stage.process(owned, &ctx) {
                     StageOutput::Pass(record) => {
-                        self.fan_out(dag.successor_indices(index), record, walk)
+                        self.fan_out(dag.consumers(index, None), Arc::new(record), walk);
                     }
                     StageOutput::Split(records) => {
                         for record in records {
-                            self.fan_out(dag.successor_indices(index), record, walk);
+                            self.fan_out(dag.consumers(index, None), Arc::new(record), walk);
                         }
                     }
                     StageOutput::Drop(_reason) => {}
-                    // Route labels are wired in the route ticket. Until then a routed record
-                    // has nowhere correct to go, so it fails rather than flowing silently.
-                    StageOutput::Routed(label, _) => {
-                        walk.fail(node_id, &format!("route label `{label}` is not wired yet"));
+                    StageOutput::Routed(label, record) => {
+                        let mut targets = dag.consumers(index, Some(&label)).peekable();
+                        if targets.peek().is_none() {
+                            // Load validation guarantees every declared label a consumer, so
+                            // this is a stage emitting a label it never declared.
+                            walk.fail(node_id, &format!("no consumer for route label `{label}`"));
+                            return;
+                        }
+                        self.fan_out(targets, Arc::new(record), walk);
                     }
                     StageOutput::Error(err) => walk.fail(node_id, &err),
                 }

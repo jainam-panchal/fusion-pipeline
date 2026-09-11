@@ -13,7 +13,7 @@ Cargo workspace under `crates/`:
 | Crate | Contents |
 |---|---|
 | `core` | record model, config loader, DAG validation, engine, `Source`/`Sink`/`AckHandle` traits, in-memory fakes, condition grammar |
-| `stages` | built-in stages (`filter` so far) |
+| `stages` | built-in stages: `filter`, `route` |
 | `regex` | two-engine regex facade: linear `regex` first, PCRE2 fallback with configurable limits, load-time ReDoS lint and canary; the only crate with `unsafe` |
 | `nats` | NATS JetStream source (pull consumer, explicit ack) and sink (returns after `PubAck`); tenant stamped from the subject; `NATS_URL` overrides configured URLs |
 | `state` | state store implementations (placeholder) |
@@ -78,4 +78,31 @@ nodes:
     type: sink.nats     # reads from keep_errors, the previous node
     stream: PROCESSED
     subject: processed.logs
+```
+
+## Routing
+
+A `route` node has named outputs. Consumers read `<route>.<label>`; two nodes naming the
+same label fan out, and a node with `from: [a, b]` fans in. Every declared label, the default
+included, must have a consumer, or the config is rejected at load. The source message is
+acked once every branch has ended in a sink success or a drop, and nakked if any branch
+failed. Records are copy-on-write across branches.
+
+```yaml
+nodes:
+  - id: by_format
+    type: route
+    routes:                                 # ordered; first match wins
+      linux: resource["log.format"] == "Linux"
+      apache: resource["log.format"] == "Apache"
+    default: other                          # a label, or `drop`
+  - id: linux_out
+    type: sink.nats
+    from: by_format.linux
+  - id: linux_archive
+    type: sink.nats
+    from: by_format.linux                   # fan-out: same label twice
+  - id: rest
+    type: sink.nats
+    from: [by_format.apache, by_format.other]   # fan-in
 ```
