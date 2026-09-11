@@ -1,11 +1,17 @@
 # The pipeline the compose stack and the smoke test run: LOGS in, TRACE-level records
-# dropped, everything else to PROCESSED.
+# dropped, repeats of a body within 10s dropped, everything else to PROCESSED.
 #
 #   pipelined --config deploy/pipeline.yaml
 #
-# `url` here and on the sink is overridden by NATS_URL when set. The filter is the one stage
-# every record crosses, so stage latency and drops by reason are on the dashboard from the
-# first record; a record without `severity_text` is not TRACE and passes.
+# `url` here and on the sink is overridden by NATS_URL when set; the state store comes from
+# DRAGONFLY_URL (default redis://127.0.0.1:6379, the compose port). The filter is the one
+# stage every record crosses, so stage latency and drops by reason are on the dashboard from
+# the first record; a record without `severity_text` is not TRACE and passes. The dedupe
+# node gives the state-store panels a producer; its window is measured in ingestion time,
+# so a redelivered record is never mistaken for a repeat. `on_state_error: nak` (the default
+# is `pass`) because in the chaos test a paused Dragonfly must hold records back, not let
+# duplicates through: the redelivery lands after the pause is over.
+name: compose
 source:
   type: nats
   url: nats://127.0.0.1:4222
@@ -16,6 +22,11 @@ nodes:
     type: filter
     condition: severity_text == "TRACE"
     action: drop
+  - id: dedupe_body
+    type: dedupe
+    key: [body]
+    window: 10s
+    on_state_error: nak
   - id: out
     type: sink.nats
     url: nats://127.0.0.1:4222

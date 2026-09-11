@@ -64,7 +64,7 @@ stop_pipelined() {
 
 step "compose up (nats + nats-init; the compose pipeline stays down, this runs its own)"
 "${COMPOSE[@]}" stop pipeline >/dev/null 2>&1 || true
-"${COMPOSE[@]}" up -d --wait nats
+"${COMPOSE[@]}" up -d --wait nats dragonfly
 "${COMPOSE[@]}" run --rm nats-init >/dev/null
 wait_for 15 "the LOGS/pipeline consumer" nats consumer info LOGS pipeline
 

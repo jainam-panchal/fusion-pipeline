@@ -4,16 +4,16 @@
 # Brings up deploy/compose.yaml (pipeline included), drives traffic through it, and checks:
 #   1. every scrape target is up: the collector (pipeline metrics), NATS via
 #      prometheus-nats-exporter, Dragonfly, and the collector's self-metrics;
-#   2. traffic: 1,000 records, one TRACE record the filter drops, one record without an id
-#      and one sink failure;
+#   2. traffic: 1,000 records with distinct bodies, one repeated body the dedupe node drops,
+#      one TRACE record the filter drops, one record without an id and one sink failure;
 #   3. every metric with a producer is in Prometheus with the labels the spec gives it;
 #   4. the `reason` values seen on records_dropped_total are within the spec's closed set;
 #   5. the NATS exporter reports JetStream consumer pending, redelivered and ack floor;
 #   6. every pipeline series carries the instance id, and the pipeline, NATS and Dragonfly
 #      each report their own CPU and resident memory;
 #   7. Grafana serves the provisioned internal dashboard.
-# The state-store, Lua and dead-letter metrics have no producer until #6, #8 and #10; they
-# are reported as pending, not required.
+# The Lua and dead-letter metrics have no producer until #8 and #10; they are reported as
+# pending, not required.
 # Exits non-zero on the first failure. Needs docker compose, the `nats` CLI, curl and jq.
 set -euo pipefail
 
@@ -61,11 +61,13 @@ for job in pipeline nats dragonfly otel-collector prometheus; do
     echo "up: $job"
 done
 
-step "2. traffic: $RECORDS records, one TRACE (filtered), one without an id, one sink failure"
+step "2. traffic: $RECORDS records, one repeat (deduped), one TRACE (filtered), one without an id, one sink failure"
 nats stream purge LOGS -f >/dev/null
+# Distinct bodies, so the dedupe node lets every one of them through.
 nats pub logs.acme.syslog \
-    "{\"id\": {{Count}}, \"severity_text\": \"ERROR\", \"body\": \"disk full\", \"observed_time_unix_nano\": {{UnixNano}}}" \
+    "{\"id\": {{Count}}, \"severity_text\": \"ERROR\", \"body\": \"disk full {{Count}}\", \"observed_time_unix_nano\": {{UnixNano}}}" \
     --count "$RECORDS" >/dev/null
+nats pub logs.acme.syslog '{"id": 999999, "severity_text": "ERROR", "body": "disk full 1"}' >/dev/null
 nats pub logs.acme.syslog '{"id": 1000000, "severity_text": "TRACE", "body": "noise"}' >/dev/null
 nats pub logs.acme.syslog '{"body": "no id"}' >/dev/null
 # Sink failure: the PROCESSED stream is gone, so the write gets no PubAck, the source
@@ -89,20 +91,23 @@ SPEC_METRICS=(
     'records_out_total{tenant="acme",stage="out"}'
     'records_dropped_total{tenant="acme",stage="source",reason="missing_id"}'
     'records_dropped_total{tenant="acme",stage="drop_trace",reason="filter"}'
+    'records_dropped_total{tenant="acme",stage="dedupe_body",reason="dedupe"}'
     'records_errored_total{tenant="acme",stage="out"}'
     'stage_duration_seconds_bucket{tenant="acme",stage="drop_trace"}'
+    'state_ops_total{tenant="acme",stage="dedupe_body"}'
+    'state_op_duration_seconds_bucket{tenant="acme",stage="dedupe_body"}'
     'source_naks_total{tenant="acme"}'
     'source_redeliveries_total{tenant="acme"}'
     'sink_publish_duration_seconds_bucket{tenant="acme",stage="out"}'
     'sink_publish_errors_total{tenant="acme",stage="out"}'
     'pipeline_end_to_end_seconds_bucket{tenant="acme"}'
 )
-# Named in the spec, emitted by stages that do not exist yet (#6 state store, #8 Lua,
-# #10 dead-letter queue). Reported, not required, until their tickets land. Likewise the
-# `regex_limit` drop reason has no producer until the regex stages (#5).
+# Named in the spec, emitted by stages that do not exist yet (#8 Lua, #10 dead-letter
+# queue). Reported, not required, until their tickets land. `state_errors_total` has a
+# producer but a healthy run gives it nothing to count. Likewise the `regex_limit` drop
+# reason has no producer until the regex stages (#5).
 PENDING_METRICS=(
-    state_ops_total state_op_duration_seconds_bucket state_errors_total
-    lua_errors_total dlq_total
+    state_errors_total lua_errors_total dlq_total
 )
 for expr in "${SPEC_METRICS[@]}"; do
     wait_for 30 "$expr" prom_has "$expr"
