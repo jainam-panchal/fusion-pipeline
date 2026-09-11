@@ -11,7 +11,7 @@
   "graphTooltip": 1,
   "refresh": "5s",
   "schemaVersion": 39,
-  "version": 12,
+  "version": 13,
   "time": {
     "from": "now-15m",
     "to": "now"
@@ -256,7 +256,7 @@
       "id": 3,
       "type": "timeseries",
       "title": "How slow?  (end to end, and the slowest stage)",
-      "description": "End-to-end: observed time on the record to settlement. Slowest stage p99: the worst stage run or sink PubAck wait right now; find which in the per-stage rows below. Dashed lines: 1 s (watch), 5 s (problem). Gaps are minutes with no records: latency is undefined without them; the grey bars show how many records the number is based on.",
+      "description": "End-to-end: observed time on the record to settlement. Slowest stage p99: the worst stage run or sink PubAck wait right now; find which in the per-stage rows below. Rule of thumb: watch above 1 s, problem above 5 s. Gaps are minutes with no records: latency is undefined without them; the grey bars show how many records the number is based on.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -273,30 +273,10 @@
           "custom": {
             "lineWidth": 1,
             "fillOpacity": 12,
-            "showPoints": "never",
-            "thresholdsStyle": {
-              "mode": "dashed"
-            }
+            "showPoints": "never"
           },
           "min": 0,
-          "noValue": "no records in this window",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "transparent",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
-              }
-            ]
-          }
+          "noValue": "no records in this window"
         },
         "overrides": [
           {
@@ -399,7 +379,7 @@
       "id": 4,
       "type": "timeseries",
       "title": "Is NATS backing up?  (waiting, in flight, redelivered)",
-      "description": "Waiting grows when the pipeline is slower than the producer. In flight is what the workers hold. Redelivered means naks or lost acks. Dashed lines: 100 (watch), 1000 (problem).",
+      "description": "Waiting grows when the pipeline is slower than the producer. In flight is what the workers hold. Redelivered means naks or lost acks. Rule of thumb: watch above 100, problem above 1000.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -416,29 +396,9 @@
           "custom": {
             "lineWidth": 1,
             "fillOpacity": 12,
-            "showPoints": "never",
-            "thresholdsStyle": {
-              "mode": "dashed"
-            }
+            "showPoints": "never"
           },
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "transparent",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 100
-              },
-              {
-                "color": "red",
-                "value": 1000
-              }
-            ]
-          }
+          "min": 0
         },
         "overrides": [
           {
