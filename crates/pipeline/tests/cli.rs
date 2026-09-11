@@ -15,6 +15,14 @@ fn write_config(name: &str, yaml: &str) -> PathBuf {
     path
 }
 
+/// A one-node NATS config with the given source and sink URLs and source stream.
+fn nats_config(source_url: &str, sink_url: &str, stream: &str) -> String {
+    format!(
+        "source:\n  type: nats\n  url: {source_url}\n  stream: {stream}\n  consumer: pipeline\n\
+         nodes:\n  - id: out\n    type: sink.nats\n    url: {sink_url}\n    stream: PROCESSED\n    subject: processed.logs\n"
+    )
+}
+
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
@@ -62,7 +70,7 @@ fn config_without_a_source_block_is_rejected() {
 fn unreachable_server_fails_fast_naming_the_url() {
     let path = write_config(
         "unreachable.yaml",
-        "source:\n  type: nats\n  url: nats://127.0.0.1:1\n  stream: LOGS\n  consumer: pipeline\nnodes:\n  - id: out\n    type: sink.nats\n    stream: PROCESSED\n    subject: processed.logs\n",
+        &nats_config("nats://127.0.0.1:1", "nats://127.0.0.1:1", "LOGS"),
     );
 
     let output = pipelined()
@@ -83,7 +91,7 @@ fn unreachable_server_fails_fast_naming_the_url() {
 fn nats_url_env_overrides_the_yaml_url() {
     let path = write_config(
         "env-override.yaml",
-        "source:\n  type: nats\n  url: nats://127.0.0.1:4222\n  stream: LOGS\n  consumer: pipeline\nnodes:\n  - id: out\n    type: sink.nats\n    stream: PROCESSED\n    subject: processed.logs\n",
+        &nats_config("nats://127.0.0.1:4222", "nats://127.0.0.1:4222", "LOGS"),
     );
 
     let output = pipelined()
@@ -106,7 +114,11 @@ fn nats_url_env_overrides_the_yaml_url() {
 fn missing_stream_fails_fast_naming_the_stream() {
     let path = write_config(
         "missing-stream.yaml",
-        "source:\n  type: nats\n  stream: NO_SUCH_STREAM\n  consumer: pipeline\nnodes:\n  - id: out\n    type: sink.nats\n    stream: PROCESSED\n    subject: processed.logs\n",
+        &nats_config(
+            "nats://127.0.0.1:4222",
+            "nats://127.0.0.1:4222",
+            "NO_SUCH_STREAM",
+        ),
     );
 
     let output = pipelined()
@@ -119,5 +131,35 @@ fn missing_stream_fails_fast_naming_the_stream() {
         stderr(&output).contains("NO_SUCH_STREAM"),
         "{}",
         stderr(&output)
+    );
+}
+
+/// Needs the compose stack. Both YAML URLs are bogus and `NATS_URL` points at the real
+/// server: the sink (built first) connects fine, and the source then fails on its missing
+/// stream at the env URL. Neither bogus URL appears in the error.
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn nats_url_env_overrides_both_the_source_and_the_sink_url() {
+    let real = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_owned());
+    let path = write_config(
+        "env-override-both.yaml",
+        &nats_config("nats://127.0.0.1:1", "nats://127.0.0.1:2", "NO_SUCH_STREAM"),
+    );
+
+    let output = pipelined()
+        .args(["--config", path.to_str().expect("utf-8 path")])
+        .env("NATS_URL", &real)
+        .output()
+        .expect("binary runs");
+
+    assert!(!output.status.success());
+    let err = stderr(&output);
+    assert!(
+        err.contains("NO_SUCH_STREAM") && err.contains(&real),
+        "{err}"
+    );
+    assert!(
+        !err.contains("127.0.0.1:1") && !err.contains("127.0.0.1:2"),
+        "{err}"
     );
 }

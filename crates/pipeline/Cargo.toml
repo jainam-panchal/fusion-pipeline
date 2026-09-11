@@ -18,6 +18,7 @@ fusion-state.workspace = true
 fusion-otel.workspace = true
 mimalloc.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

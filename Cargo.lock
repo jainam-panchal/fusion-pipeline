@@ -350,6 +350,7 @@ dependencies = [
  "mimalloc",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

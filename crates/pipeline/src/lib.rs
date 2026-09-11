@@ -44,6 +44,35 @@ pub enum StartError {
     /// The engine could not start.
     #[error(transparent)]
     Engine(#[from] EngineError),
+    /// The Ctrl-C listener could not be set up.
+    #[error("could not set up the Ctrl-C handler: {0}")]
+    Signals(#[source] std::io::Error),
+}
+
+/// First Ctrl-C stops the source so the workers drain; a second one exits at once, since the
+/// drain can stall behind a sink that is not answering.
+fn stop_on_ctrl_c(nats: Arc<Nats>) -> Result<(), StartError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .map_err(StartError::Signals)?;
+    std::thread::Builder::new()
+        .name("pipeline-signals".to_owned())
+        .spawn(move || {
+            runtime.block_on(async {
+                if let Err(err) = tokio::signal::ctrl_c().await {
+                    eprintln!("pipelined: cannot listen for Ctrl-C: {err}");
+                    return;
+                }
+                eprintln!("pipelined: stopping on Ctrl-C; press again to exit without draining");
+                nats.shutdown();
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    std::process::exit(130);
+                }
+            });
+        })
+        .map_err(StartError::Signals)?;
+    Ok(())
 }
 
 /// Load `path`, connect the NATS source and sinks, and run the engine until the source is
@@ -69,7 +98,7 @@ pub fn run(path: &Path) -> Result<(), StartError> {
     let source = registry.build_source(source_config)?;
     let workers = pipeline.worker_count();
 
-    nats.shutdown_on_ctrl_c();
+    stop_on_ctrl_c(Arc::clone(&nats))?;
     let engine = Engine::start(pipeline, source, workers)?;
     eprintln!("pipelined: running with {workers} workers; Ctrl-C to stop");
     engine.join()?;

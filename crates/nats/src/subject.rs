@@ -5,6 +5,7 @@
 //! stream's subject filter covers a concrete subject, so a sink can fail at load instead of
 //! on its first publish.
 
+use async_nats::jetstream::stream::Stream;
 use fusion_core::record::Record;
 use serde_json::Value;
 
@@ -45,4 +46,15 @@ pub fn captures(pattern: &str, subject: &str) -> bool {
         }
     }
     tokens.next().is_none()
+}
+
+/// Whether any of `stream`'s configured subjects [`captures`] `subject`.
+#[must_use]
+pub fn stream_captures(stream: &Stream, subject: &str) -> bool {
+    stream
+        .cached_info()
+        .config
+        .subjects
+        .iter()
+        .any(|pattern| captures(pattern, subject))
 }

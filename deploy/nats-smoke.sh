@@ -5,7 +5,8 @@
 #   1. a record published to logs.acme.syslog appears on processed.logs with
 #      resource["tenant.id"] stamped as "acme" and the consumer shows it acknowledged;
 #   2. with the PROCESSED stream deleted, the record is nak'd and JetStream redelivers it;
-#   3. NATS_URL overrides the YAML URL (a bogus NATS_URL makes startup fail fast).
+#   3. NATS_URL overrides the YAML URL for both the source and the sink (a bogus NATS_URL
+#      makes startup fail fast; bogus YAML URLs with a real NATS_URL start fine).
 # Exits non-zero on the first failure. Needs docker compose, the `nats` CLI, jq and cargo.
 set -euo pipefail
 
@@ -106,6 +107,17 @@ if NATS_URL=nats://127.0.0.1:1 timeout 20 "$PIPELINED" --config "$CONFIG" 2>"$LO
 fi
 grep -q "127.0.0.1:1" "$LOG" || fail "startup error does not name the NATS_URL endpoint:"$'\n'"$(cat "$LOG")"
 echo "ok: $(head -1 "$LOG")"
+
+BOGUS_CONFIG=$(mktemp -t pipeline-bogus.XXXXXX.yaml)
+sed -e 's#url: nats://127.0.0.1:4222#url: nats://127.0.0.1:1#' "$CONFIG" >"$BOGUS_CONFIG"
+grep -q "127.0.0.1:1" "$BOGUS_CONFIG" || fail "could not rewrite the config URLs"
+: > "$LOG"
+NATS_URL=nats://127.0.0.1:4222 "$PIPELINED" --config "$BOGUS_CONFIG" 2>"$LOG" &
+PIPELINED_PID=$!
+wait_for 15 "pipelined to start with bogus YAML URLs and a real NATS_URL" grep -q "running with" "$LOG"
+stop_pipelined
+rm -f "$BOGUS_CONFIG"
+echo "ok: source and sink both took NATS_URL over the YAML url"
 
 echo
 echo "PASS"

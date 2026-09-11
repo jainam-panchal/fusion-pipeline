@@ -7,7 +7,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use async_nats::jetstream::consumer::pull;
+use async_nats::jetstream::consumer::{AckPolicy, pull};
 use async_nats::jetstream::{self, stream};
 use fusion_core::engine::Engine;
 use fusion_core::memory::MemorySinks;
@@ -36,13 +36,13 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}_{pid}_{n}_{nanos}")
 }
 
-/// Test-side JetStream access, independent of the crate under test.
-struct Server {
+/// Test-side JetStream client, independent of the crate under test.
+struct JetStreamClient {
     rt: tokio::runtime::Runtime,
     js: jetstream::Context,
 }
 
-impl Server {
+impl JetStreamClient {
     fn connect() -> Self {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -67,11 +67,11 @@ impl Server {
             .expect("stream created")
     }
 
-    fn create_pull_consumer(&self, stream: &stream::Stream, name: &str) {
+    fn create_pull_consumer(&self, stream: &stream::Stream, name: &str, ack_policy: AckPolicy) {
         self.rt
             .block_on(stream.create_consumer(pull::Config {
                 durable_name: Some(name.to_owned()),
-                ack_policy: jetstream::consumer::AckPolicy::Explicit,
+                ack_policy,
                 ack_wait: Duration::from_secs(30),
                 max_deliver: 5,
                 ..Default::default()
@@ -143,7 +143,7 @@ fn wait_until(timeout: Duration, mut check: impl FnMut() -> bool) -> bool {
 }
 
 struct Fixture {
-    server: Server,
+    server: JetStreamClient,
     in_stream: String,
     out_stream: String,
     consumer: String,
@@ -153,14 +153,14 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str) -> Self {
-        let server = Server::connect();
+        let server = JetStreamClient::connect();
         let in_stream = unique(&format!("LOGS_{tag}"));
         let out_stream = unique(&format!("PROCESSED_{tag}"));
         let consumer = "pipeline".to_owned();
         let tenant_prefix = unique("logs").to_ascii_lowercase();
         let out_subject = format!("{}.out", unique("processed").to_ascii_lowercase());
         let input = server.create_stream(&in_stream, &[&format!("{tenant_prefix}.>")]);
-        server.create_pull_consumer(&input, &consumer);
+        server.create_pull_consumer(&input, &consumer, AckPolicy::Explicit);
         server.create_stream(&out_stream, &[&out_subject]);
         Self {
             server,
@@ -190,6 +190,16 @@ impl Fixture {
 
     fn in_subject(&self, tenant: &str) -> String {
         format!("{}.{tenant}.syslog", self.tenant_prefix)
+    }
+
+    fn consumer_info(&self) -> jetstream::consumer::Info {
+        self.server.consumer_info(&self.in_stream, &self.consumer)
+    }
+
+    /// Whether every message the consumer has seen is acknowledged and none is waiting.
+    fn consumer_settled(&self) -> bool {
+        let info = self.consumer_info();
+        info.num_ack_pending == 0 && info.num_pending == 0
     }
 }
 
@@ -230,10 +240,7 @@ fn sink_fails_fast_when_its_stream_is_missing() {
         subject: "processed.nowhere".to_owned(),
     };
 
-    let err = match nats.sink(&params) {
-        Ok(_) => panic!("missing stream must be rejected"),
-        Err(err) => err,
-    };
+    let err = nats.sink(&params).expect_err("missing stream rejected");
 
     assert!(matches!(err, NatsError::StreamMissing { .. }), "{err}");
     assert!(err.to_string().contains(&params.stream), "{err}");
@@ -285,6 +292,33 @@ fn source_fails_fast_when_stream_or_consumer_is_missing() {
 
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
+fn source_fails_fast_when_the_consumer_does_not_ack_explicitly() {
+    let f = Fixture::new("ackpolicy");
+    let nats = Nats::new().expect("nats runtime");
+    let input = f
+        .server
+        .rt
+        .block_on(f.server.js.get_stream(&f.in_stream))
+        .expect("stream exists");
+    f.server
+        .create_pull_consumer(&input, "fire_and_forget", AckPolicy::None);
+    let params = SourceParams {
+        consumer: "fire_and_forget".to_owned(),
+        ..f.source_params()
+    };
+
+    let err = nats.source(&params).expect_err("ack policy none rejected");
+
+    assert!(
+        matches!(err, NatsError::ConsumerNotExplicitAck { .. }),
+        "{err}"
+    );
+    assert!(err.to_string().contains("fire_and_forget"), "{err}");
+    assert!(err.to_string().contains("none"), "{err}");
+}
+
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
 fn connect_fails_fast_when_the_server_is_unreachable() {
     let nats = Nats::new().expect("nats runtime");
     let params = SinkParams {
@@ -329,14 +363,10 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
     assert_eq!(records[0].id.map(|id| id.0), Some(42));
 
     assert!(
-        wait_until(WAIT, || {
-            let info = f.server.consumer_info(&f.in_stream, &f.consumer);
-            info.num_ack_pending == 0 && info.num_pending == 0
-        }),
+        wait_until(WAIT, || f.consumer_settled()),
         "consumer shows the message acknowledged"
     );
-    let info = f.server.consumer_info(&f.in_stream, &f.consumer);
-    assert_eq!(info.num_redelivered, 0);
+    assert_eq!(f.consumer_info().num_redelivered, 0);
 
     nats.shutdown();
     engine.join().expect("clean shutdown");
@@ -381,10 +411,11 @@ fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
     engine.join().expect("clean shutdown");
 }
 
-/// A payload that is not a record is terminated, and the source keeps serving the next one.
+/// A payload that is not a record is nak'd and redelivered, and the source keeps serving
+/// the next one meanwhile.
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
-fn undecodable_payload_is_terminated_and_the_source_keeps_going() {
+fn undecodable_payload_is_nakd_and_the_source_keeps_going() {
     let f = Fixture::new("garbage");
     let nats = Nats::new().expect("nats runtime");
     let sinks = MemorySinks::new();
@@ -407,18 +438,8 @@ fn undecodable_payload_is_terminated_and_the_source_keeps_going() {
     );
     assert_eq!(sinks.records("out")[0].id.map(|id| id.0), Some(44));
     assert!(
-        wait_until(WAIT, || {
-            let info = f.server.consumer_info(&f.in_stream, &f.consumer);
-            info.num_ack_pending == 0 && info.num_pending == 0
-        }),
-        "both messages are settled"
-    );
-    assert_eq!(
-        f.server
-            .consumer_info(&f.in_stream, &f.consumer)
-            .num_redelivered,
-        0,
-        "the garbage was terminated, not redelivered"
+        wait_until(WAIT, || f.consumer_info().num_redelivered > 0),
+        "the garbage is redelivered"
     );
 
     nats.shutdown();

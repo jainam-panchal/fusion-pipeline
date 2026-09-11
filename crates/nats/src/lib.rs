@@ -18,8 +18,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_nats::jetstream::consumer::{AckPolicy, PullConsumer};
 use async_nats::jetstream::context::{ConsumerInfoErrorKind, GetStreamErrorKind};
-use async_nats::jetstream::{self, ErrorCode, consumer::PullConsumer};
+use async_nats::jetstream::{self, ErrorCode};
 use fusion_core::config::{NodeConfig, SourceConfig};
 use fusion_core::io::{Sink, Source};
 use fusion_core::registry::Registry;
@@ -62,6 +63,21 @@ pub enum NatsError {
         /// The stream that was looked up.
         stream: String,
         /// The server it was looked up on.
+        url: String,
+    },
+    /// The named consumer exists but does not acknowledge explicitly, so the engine's ack
+    /// and nak would mean nothing.
+    #[error(
+        "consumer `{consumer}` on stream `{stream}` at {url} has ack policy `{policy}`; the pipeline needs `explicit`"
+    )]
+    ConsumerNotExplicitAck {
+        /// The stream the consumer is on.
+        stream: String,
+        /// The consumer.
+        consumer: String,
+        /// Its configured ack policy.
+        policy: String,
+        /// The server it lives on.
         url: String,
     },
     /// The named consumer does not exist on the stream.
@@ -161,35 +177,20 @@ impl Nats {
         self.shutdown.send_replace(true);
     }
 
-    /// Call [`Nats::shutdown`] on the first Ctrl-C (SIGINT). A second Ctrl-C exits the
-    /// process at once, since the drain can stall behind a sink that is not answering.
-    pub fn shutdown_on_ctrl_c(&self) {
-        let shutdown = self.shutdown.clone();
-        self.runtime.spawn(async move {
-            if let Err(err) = tokio::signal::ctrl_c().await {
-                eprintln!("nats source: cannot listen for Ctrl-C: {err}");
-                return;
-            }
-            eprintln!("nats source: stopping on Ctrl-C; press again to exit without draining");
-            shutdown.send_replace(true);
-            if tokio::signal::ctrl_c().await.is_ok() {
-                std::process::exit(130);
-            }
-        });
-    }
-
-    /// Build the source for `params`, failing if the server, stream or consumer is missing.
+    /// Build the source for `params`, failing if the server, stream or consumer is missing
+    /// or the consumer does not use explicit ack.
     ///
     /// # Errors
     ///
-    /// [`NatsError::Connect`], [`NatsError::StreamMissing`] or [`NatsError::ConsumerMissing`].
+    /// [`NatsError::Connect`], [`NatsError::StreamMissing`], [`NatsError::ConsumerMissing`]
+    /// or [`NatsError::ConsumerNotExplicitAck`].
     pub fn source(&self, params: &SourceParams) -> Result<NatsSource, NatsError> {
         let url = config::url_from_env(params.url.as_deref());
         let context = self.connect(&url)?;
         let consumer: PullConsumer = self.runtime.block_on(async {
             let stream = get_stream(&context, &params.stream, &url).await?;
             // `consumer_info` reports "not found" as a typed kind; `get_consumer` does not.
-            stream.consumer_info(&params.consumer).await.map_err(|e| {
+            let info = stream.consumer_info(&params.consumer).await.map_err(|e| {
                 if matches!(e.kind(), ConsumerInfoErrorKind::NotFound) {
                     NatsError::ConsumerMissing {
                         stream: params.stream.clone(),
@@ -200,6 +201,14 @@ impl Nats {
                     request_error(&url, &e)
                 }
             })?;
+            if info.config.ack_policy != AckPolicy::Explicit {
+                return Err(NatsError::ConsumerNotExplicitAck {
+                    stream: params.stream.clone(),
+                    consumer: params.consumer.clone(),
+                    policy: format!("{:?}", info.config.ack_policy).to_ascii_lowercase(),
+                    url: url.clone(),
+                });
+            }
             stream
                 .get_consumer(&params.consumer)
                 .await
