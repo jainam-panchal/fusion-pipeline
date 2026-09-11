@@ -7,6 +7,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+fusion-core.workspace = true
+redis.workspace = true
+
+[dev-dependencies]
+redis.workspace = true
 
 [lints]
 workspace = true
