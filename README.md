@@ -80,9 +80,19 @@ as before; point it at the compose collector with `OTEL_EXPORTER_OTLP_ENDPOINT=h
 
 Every metric carries `tenant`; per-node metrics carry `stage` (the node id, `source` for the
 engine's own decisions) and `records_dropped_total` carries `reason` from the spec's closed
-set. NATS is scraped through `prometheus-nats-exporter` (`jetstream_consumer_*` for pending,
-redelivered and ack floor) and Dragonfly at `:6379/metrics`. `deploy/nats-smoke.sh` runs
-its own `pipelined` on the host and stops the compose one first.
+set, and the collector adds `job="fusion-pipeline"` and `instance=<hostname>` from the
+resource, so `--scale pipeline=3` gives three series that the dashboard sums. NATS is scraped through `prometheus-nats-exporter`
+(`jetstream_consumer_*` for pending, redelivered and ack floor), Dragonfly at
+`:6379/metrics`. Each process reports its own CPU and memory: the pipeline exports OTel's
+`process.cpu.time`, `process.memory.usage` and `process.thread.count`, NATS its `varz`,
+Dragonfly its own gauges. `deploy/nats-smoke.sh` runs its own `pipelined` on the host and
+stops the compose one first.
+
+The dashboard is timeseries only, no gauges: an Overview row (throughput, latency, backlog,
+failures, CPU, memory) with Last/Max/Mean in every legend, then one row per stage that
+repeats for every `stage` the pipeline has reported (records, p50/p95/p99, drops by reason,
+state-store ops), and a collapsed Internals row. `Tenant` and `Stage` variables filter
+everything.
 
 A minimal config:
 

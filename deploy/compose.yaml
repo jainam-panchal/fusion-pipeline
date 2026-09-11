@@ -9,8 +9,10 @@
 # Metrics: the pipeline exports over OTLP to `otel-collector`, which serves them to
 # `prometheus` on :8889. `nats-exporter` scrapes the NATS monitoring port (JetStream
 # consumer pending, redelivered and ack floor included) and `dragonfly` serves its own
-# metrics at :6379/metrics. `grafana` provisions the Prometheus datasource and the internal
-# dashboard from `deploy/grafana`; open http://127.0.0.1:3000/d/fusion-internal.
+# metrics at :6379/metrics. Each process reports its own CPU and memory: the pipeline as
+# OTel `process.*` metrics, NATS through the exporter's `-varz`, Dragonfly on its own
+# endpoint. `grafana` provisions the Prometheus datasource and the internal dashboard from
+# `deploy/grafana`; open http://127.0.0.1:3000/d/fusion-internal.
 #
 # `deploy/metrics-check.sh` drives traffic through the stack and checks every metric the spec
 # names is in Prometheus with its labels.

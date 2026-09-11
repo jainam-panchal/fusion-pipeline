@@ -1,14 +1,21 @@
-# The one-node pipeline the smoke test runs: LOGS in, PROCESSED out.
+# The pipeline the compose stack and the smoke test run: LOGS in, TRACE-level records
+# dropped, everything else to PROCESSED.
 #
 #   pipelined --config deploy/pipeline.yaml
 #
-# `url` here and on the sink is overridden by NATS_URL when set.
+# `url` here and on the sink is overridden by NATS_URL when set. The filter is the one stage
+# every record crosses, so stage latency and drops by reason are on the dashboard from the
+# first record; a record without `severity_text` is not TRACE and passes.
 source:
   type: nats
   url: nats://127.0.0.1:4222
   stream: LOGS
   consumer: pipeline
 nodes:
+  - id: drop_trace
+    type: filter
+    condition: severity_text == "TRACE"
+    action: drop
   - id: out
     type: sink.nats
     url: nats://127.0.0.1:4222

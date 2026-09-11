@@ -4,11 +4,14 @@
 # Brings up deploy/compose.yaml (pipeline included), drives traffic through it, and checks:
 #   1. every scrape target is up: the collector (pipeline metrics), NATS via
 #      prometheus-nats-exporter, Dragonfly, and the collector's self-metrics;
-#   2. after 1,000 records, one record without an id and one sink failure, every metric the
-#      spec's Telemetry section names is in Prometheus, with the labels the spec gives it;
+#   2. after 1,000 records, one TRACE record the filter drops, one record without an id and
+#      one sink failure, every metric the spec's Telemetry section names is in Prometheus,
+#      with the labels the spec gives it;
 #   3. the `reason` values seen on records_dropped_total are within the spec's closed set;
 #   4. the NATS exporter reports JetStream consumer pending, redelivered and ack floor;
-#   5. Grafana serves the provisioned internal dashboard.
+#   5. every pipeline series carries the instance id, and the pipeline, NATS and Dragonfly
+#      each report their own CPU and resident memory;
+#   6. Grafana serves the provisioned internal dashboard.
 # Exits non-zero on the first failure. Needs docker compose, the `nats` CLI, curl and jq.
 set -euo pipefail
 
@@ -56,11 +59,12 @@ for job in pipeline nats dragonfly otel-collector prometheus; do
     echo "up: $job"
 done
 
-step "2. traffic: $RECORDS records, one without an id, one sink failure"
+step "2. traffic: $RECORDS records, one TRACE (filtered), one without an id, one sink failure"
 nats stream purge LOGS -f >/dev/null
 nats pub logs.acme.syslog \
     "{\"id\": {{Count}}, \"severity_text\": \"ERROR\", \"body\": \"disk full\", \"observed_time_unix_nano\": {{UnixNano}}}" \
     --count "$RECORDS" >/dev/null
+nats pub logs.acme.syslog '{"id": 1000000, "severity_text": "TRACE", "body": "noise"}' >/dev/null
 nats pub logs.acme.syslog '{"body": "no id"}' >/dev/null
 # Sink failure: the PROCESSED stream is gone, so the write gets no PubAck, the source
 # message is nakked and JetStream redelivers it; nats-init recreates the stream.
@@ -82,7 +86,9 @@ SPEC_METRICS=(
     'records_in_total{tenant="acme",stage="out"}'
     'records_out_total{tenant="acme",stage="out"}'
     'records_dropped_total{tenant="acme",stage="source",reason="missing_id"}'
+    'records_dropped_total{tenant="acme",stage="drop_trace",reason="filter"}'
     'records_errored_total{tenant="acme",stage="out"}'
+    'stage_duration_seconds_bucket{tenant="acme",stage="drop_trace"}'
     'source_naks_total{tenant="acme"}'
     'source_redeliveries_total{tenant="acme"}'
     'sink_publish_duration_seconds_bucket{tenant="acme",stage="out"}'
@@ -102,13 +108,6 @@ done
 for name in "${PENDING_METRICS[@]}"; do
     if prom_has "$name"; then echo "present: $name"; else echo "pending: $name (no producer yet)"; fi
 done
-# stage_duration_seconds needs a stage; deploy/pipeline.yaml has only a sink, so it shows
-# up only when a filter or route runs. Report rather than require it here.
-if prom_has 'stage_duration_seconds_bucket'; then
-    echo "present: stage_duration_seconds"
-else
-    echo "pending: stage_duration_seconds (no stage in deploy/pipeline.yaml)"
-fi
 
 step "4. records_dropped_total reasons within the closed set"
 CLOSED_SET="filter route_default_drop sample dedupe lua_drop lua_error regex_limit state_error invalid_record missing_id"
@@ -122,6 +121,17 @@ step "5. NATS exporter: JetStream consumer pending, redelivered, ack floor"
 for name in jetstream_consumer_num_pending jetstream_consumer_num_redelivered jetstream_consumer_ack_floor_stream_seq; do
     wait_for 30 "$name" prom_has "${name}{consumer_name=\"pipeline\"}"
     echo "present: $name = $(prom_value "${name}{consumer_name=\"pipeline\"}")"
+done
+
+step "5. instance id on every series, CPU and RSS per process"
+[[ "$(prom_query 'records_in_total{job!="fusion-pipeline"}' | jq 'length')" == 0 ]] \
+    || fail "pipeline series not labelled job=fusion-pipeline (honor_labels missing?)"
+[[ "$(prom_query 'records_in_total{instance=""}' | jq 'length')" == 0 ]] \
+    || fail "pipeline series without an instance id"
+echo "instances: $(curl -sf --get "$PROM/api/v1/label/instance/values" --data-urlencode 'match[]=records_in_total' | jq -r '.data | join(", ")')"
+for expr in 'process_cpu_time_seconds_total{job="fusion-pipeline"}' 'process_memory_usage_bytes{job="fusion-pipeline"}' 'process_thread_count{job="fusion-pipeline"}' 'gnatsd_varz_cpu' 'gnatsd_varz_mem' 'dragonfly_used_memory_rss_bytes'; do
+    wait_for 60 "$expr" prom_has "$expr"
+    echo "present: $expr"
 done
 
 step "6. Grafana provisioned the internal dashboard"

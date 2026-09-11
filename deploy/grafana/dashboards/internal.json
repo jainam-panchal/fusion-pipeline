@@ -1,7 +1,7 @@
 {
   "uid": "fusion-internal",
   "title": "fusion-pipeline internal",
-  "description": "Everything the pipeline exports, plus NATS and the collector. Spec: docs/specs/2026-09-08-observability-pipeline-poc.md, Telemetry.",
+  "description": "Overview (throughput, latency, backlog, failures, CPU, memory), one row per stage, Internals collapsed. Spec: docs/specs/2026-09-08-observability-pipeline-poc.md, Telemetry.",
   "tags": [
     "fusion-pipeline",
     "internal"
@@ -11,13 +11,70 @@
   "graphTooltip": 1,
   "refresh": "5s",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 7,
   "time": {
     "from": "now-15m",
     "to": "now"
   },
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "tenant",
+        "label": "Tenant",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": {
+          "query": "label_values(records_in_total, tenant)",
+          "refId": "tenant"
+        },
+        "definition": "label_values(records_in_total, tenant)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "stage",
+        "label": "Stage",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": {
+          "query": "label_values(records_in_total, stage)",
+          "refId": "stage"
+        },
+        "definition": "label_values(records_in_total, stage)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
   },
   "annotations": {
     "list": []
@@ -26,20 +83,21 @@
     {
       "id": 1,
       "type": "row",
-      "title": "Records per stage",
+      "title": "Overview",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 0
-      }
+      },
+      "panels": []
     },
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Records in",
-      "description": "",
+      "title": "Throughput",
+      "description": "in: records the source handed to the engine. out: sink writes with durable acceptance (PubAck). dropped: on purpose, see Drops by reason. errored: failed in a stage or a sink; each one naks its message.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -55,16 +113,84 @@
           "unit": "reqps",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10
-          }
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "out"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dropped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "errored"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -77,17 +203,44 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (stage) (rate(records_in_total[1m]))",
-          "legendFormat": "{{stage}}",
+          "expr": "sum(rate(records_in_total{tenant=~\"$tenant\",stage=\"source\"}[1m]))",
+          "legendFormat": "in",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(rate(sink_publish_duration_seconds_count{tenant=~\"$tenant\"}[1m])) - sum(rate(sink_publish_errors_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
+          "legendFormat": "out",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(records_dropped_total{tenant=~\"$tenant\"}[1m]))",
+          "legendFormat": "dropped",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(records_errored_total{tenant=~\"$tenant\"}[1m]))",
+          "legendFormat": "errored",
+          "refId": "D"
         }
       ]
     },
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Records out",
-      "description": "",
+      "title": "Latency",
+      "description": "End-to-end: observed time on the record to settlement. Slowest stage p99: the worst stage run or sink PubAck wait right now; find which in the per-stage rows below.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -100,19 +253,26 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
+          "unit": "s",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10
-          }
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0
         },
         "overrides": []
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -125,17 +285,35 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (stage) (rate(records_out_total[1m]))",
-          "legendFormat": "{{stage}}",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(pipeline_end_to_end_seconds_bucket{tenant=~\"$tenant\"}[1m])))",
+          "legendFormat": "end-to-end p50",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(pipeline_end_to_end_seconds_bucket{tenant=~\"$tenant\"}[1m])))",
+          "legendFormat": "end-to-end p99",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(histogram_quantile(0.99, sum by (le, stage) (rate(stage_duration_seconds_bucket{tenant=~\"$tenant\",stage=~\"$stage\"}[1m]) or rate(sink_publish_duration_seconds_bucket{tenant=~\"$tenant\",stage=~\"$stage\"}[1m]))))",
+          "legendFormat": "slowest stage p99",
+          "refId": "C"
         }
       ]
     },
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Dropped by stage and reason",
-      "description": "records_dropped_total, the spine metric. Reasons are the spec's closed set.",
+      "title": "Backlog (NATS consumer)",
+      "description": "Waiting grows when the pipeline is slower than the producer. In flight is what the workers hold. Redelivered means naks or lost acks.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -148,19 +326,25 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
+          "unit": "short",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10
-          }
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0
         },
         "overrides": []
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -173,17 +357,35 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (stage, reason) (rate(records_dropped_total[1m]))",
-          "legendFormat": "{{stage}} {{reason}}",
+          "expr": "sum(jetstream_consumer_num_pending{consumer_name=\"pipeline\"})",
+          "legendFormat": "waiting in NATS",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(jetstream_consumer_num_ack_pending{consumer_name=\"pipeline\"})",
+          "legendFormat": "in flight (unacked)",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(jetstream_consumer_num_redelivered{consumer_name=\"pipeline\"})",
+          "legendFormat": "redelivered",
+          "refId": "C"
         }
       ]
     },
     {
       "id": 5,
       "type": "timeseries",
-      "title": "Errored",
-      "description": "",
+      "title": "Failures",
+      "description": "Flat at zero is healthy. A failed record naks; JetStream redelivers up to max_deliver, then the dead-letter queue (#10) takes it.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -199,16 +401,22 @@
           "unit": "reqps",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10
-          }
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0
         },
         "overrides": []
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -221,29 +429,53 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (stage) (rate(records_errored_total[1m]))",
-          "legendFormat": "{{stage}}",
+          "expr": "sum by (stage) (rate(records_errored_total{tenant=~\"$tenant\"}[1m]))",
+          "legendFormat": "errored @ {{stage}}",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (stage) (rate(sink_publish_errors_total{tenant=~\"$tenant\"}[1m]))",
+          "legendFormat": "no PubAck @ {{stage}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(source_naks_total{tenant=~\"$tenant\"}[1m]))",
+          "legendFormat": "naks",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(source_redeliveries_total{tenant=~\"$tenant\"}[1m]))",
+          "legendFormat": "redeliveries",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(dlq_total{tenant=~\"$tenant\"}[1m]))",
+          "legendFormat": "dead-lettered",
+          "refId": "E"
         }
       ]
     },
     {
       "id": 6,
-      "type": "row",
-      "title": "Latency",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 17
-      }
-    },
-    {
-      "id": 7,
       "type": "timeseries",
-      "title": "Stage latency p50 / p99",
-      "description": "",
+      "title": "CPU per process",
+      "description": "Cores in use, self-reported. Pipeline: one line per instance from process.cpu.time. NATS: varz cpu. Dragonfly does not export CPU.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -252,23 +484,30 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 17
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
+          "unit": "short",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10
-          }
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0
         },
         "overrides": []
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -281,8 +520,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le, stage) (rate(stage_duration_seconds_bucket[1m])))",
-          "legendFormat": "p50 {{stage}}",
+          "expr": "sum by (instance) (rate(process_cpu_time_seconds_total{job=\"fusion-pipeline\"}[1m]))",
+          "legendFormat": "pipeline {{instance}}",
           "refId": "A"
         },
         {
@@ -290,17 +529,17 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(stage_duration_seconds_bucket[1m])))",
-          "legendFormat": "p99 {{stage}}",
+          "expr": "gnatsd_varz_cpu / 100",
+          "legendFormat": "nats",
           "refId": "B"
         }
       ]
     },
     {
-      "id": 8,
+      "id": 7,
       "type": "timeseries",
-      "title": "End-to-end p50 / p99 (observed time to settlement)",
-      "description": "",
+      "title": "Memory RSS per process",
+      "description": "Resident memory, self-reported: pipeline process.memory.usage per instance, NATS varz mem, Dragonfly used_memory_rss.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -309,23 +548,30 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 18
+        "y": 17
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
+          "unit": "bytes",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10
-          }
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0
         },
         "overrides": []
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -338,8 +584,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le, tenant) (rate(pipeline_end_to_end_seconds_bucket[1m])))",
-          "legendFormat": "p50 {{tenant}}",
+          "expr": "process_memory_usage_bytes{job=\"fusion-pipeline\"}",
+          "legendFormat": "pipeline {{instance}}",
           "refId": "A"
         },
         {
@@ -347,54 +593,133 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le, tenant) (rate(pipeline_end_to_end_seconds_bucket[1m])))",
-          "legendFormat": "p99 {{tenant}}",
+          "expr": "gnatsd_varz_mem",
+          "legendFormat": "nats",
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "dragonfly_used_memory_rss_bytes",
+          "legendFormat": "dragonfly",
+          "refId": "C"
         }
       ]
     },
     {
-      "id": 9,
+      "id": 8,
       "type": "row",
-      "title": "State store",
+      "title": "Stage: $stage",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 26
-      }
+        "y": 25
+      },
+      "panels": [],
+      "repeat": "stage"
     },
     {
-      "id": 10,
+      "id": 9,
       "type": "timeseries",
-      "title": "State ops",
-      "description": "Emitted by stateful stages; empty until a dedupe or Lua stage with state runs.",
+      "title": "Records",
+      "description": "What this node did with its records. For source: intake and the engine's own drops. For a sink: out means PubAck.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 6,
         "x": 0,
-        "y": 27
+        "y": 26
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
+          "unit": "reqps",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10
-          }
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "out"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dropped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "errored"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -407,42 +732,152 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (stage) (rate(state_ops_total[1m]))",
-          "legendFormat": "{{stage}}",
+          "expr": "sum(rate(records_in_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "legendFormat": "in",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(records_out_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "legendFormat": "out",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(records_dropped_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "legendFormat": "dropped",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(records_errored_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "legendFormat": "errored",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Latency",
+      "description": "Stage run time, or for a sink the wait for durable acceptance (PubAck). Includes any state-store round trip the stage makes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(stage_duration_seconds_bucket{tenant=~\"$tenant\",stage=\"$stage\"}[1m]) or rate(sink_publish_duration_seconds_bucket{tenant=~\"$tenant\",stage=\"$stage\"}[1m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(stage_duration_seconds_bucket{tenant=~\"$tenant\",stage=\"$stage\"}[1m]) or rate(sink_publish_duration_seconds_bucket{tenant=~\"$tenant\",stage=\"$stage\"}[1m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(stage_duration_seconds_bucket{tenant=~\"$tenant\",stage=\"$stage\"}[1m]) or rate(sink_publish_duration_seconds_bucket{tenant=~\"$tenant\",stage=\"$stage\"}[1m])))",
+          "legendFormat": "p99",
+          "refId": "C"
         }
       ]
     },
     {
       "id": 11,
       "type": "timeseries",
-      "title": "State op latency p99 / errors",
-      "description": "",
+      "title": "Drops by reason and failures",
+      "description": "Drop reasons are the spec's closed set. Errored and no-PubAck are failures, not drops.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 6,
         "x": 12,
-        "y": 27
+        "y": 26
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
+          "unit": "reqps",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10
-          }
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
         },
         "overrides": []
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -455,8 +890,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(state_op_duration_seconds_bucket[1m])))",
-          "legendFormat": "p99 {{stage}}",
+          "expr": "sum by (reason) (rate(records_dropped_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "legendFormat": "dropped: {{reason}}",
           "refId": "A"
         },
         {
@@ -464,162 +899,57 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (stage) (rate(state_errors_total[1m]))",
-          "legendFormat": "errors/s {{stage}}",
+          "expr": "sum(rate(records_errored_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "legendFormat": "errored",
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(sink_publish_errors_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "legendFormat": "no PubAck",
+          "refId": "C"
         }
       ]
     },
     {
       "id": 12,
-      "type": "row",
-      "title": "Lua and regex",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 35
-      }
-    },
-    {
-      "id": 13,
       "type": "timeseries",
-      "title": "Lua errors by kind",
-      "description": "Emitted by the Lua stage; empty until one runs.",
+      "title": "State store",
+      "description": "Dragonfly round trips this stage makes. Empty for stages without state; populated once the state-store ticket (#6) lands.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 36
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (kind) (rate(lua_errors_total[1m]))",
-          "legendFormat": "{{kind}}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 14,
-      "type": "timeseries",
-      "title": "Regex limit trips",
-      "description": "records_dropped_total with reason regex_limit: match, depth, heap, work and input-size limits.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 36
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (stage) (rate(records_dropped_total{reason=\"regex_limit\"}[1m]))",
-          "legendFormat": "{{stage}}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 15,
-      "type": "row",
-      "title": "NATS",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 44
-      }
-    },
-    {
-      "id": 16,
-      "type": "timeseries",
-      "title": "Consumer pending / redelivered",
-      "description": "",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 45
+        "w": 6,
+        "x": 18,
+        "y": 26
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10
-          }
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0
         },
         "overrides": []
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -632,8 +962,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "jetstream_consumer_num_pending",
-          "legendFormat": "pending {{stream_name}}/{{consumer_name}}",
+          "expr": "sum(rate(state_ops_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "legendFormat": "ops/s",
           "refId": "A"
         },
         {
@@ -641,8 +971,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "jetstream_consumer_num_redelivered",
-          "legendFormat": "redelivered {{stream_name}}/{{consumer_name}}",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(state_op_duration_seconds_bucket{tenant=~\"$tenant\",stage=\"$stage\"}[1m])))",
+          "legendFormat": "op p99 (s)",
           "refId": "B"
         },
         {
@@ -650,405 +980,499 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "jetstream_consumer_num_ack_pending",
-          "legendFormat": "ack pending {{stream_name}}/{{consumer_name}}",
+          "expr": "sum(rate(state_errors_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "legendFormat": "errors/s",
           "refId": "C"
         }
       ]
-    },
-    {
-      "id": 17,
-      "type": "timeseries",
-      "title": "Ack lag (delivered seq - ack floor)",
-      "description": "",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 45
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "jetstream_consumer_delivered_stream_seq - jetstream_consumer_ack_floor_stream_seq",
-          "legendFormat": "{{stream_name}}/{{consumer_name}}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 18,
-      "type": "timeseries",
-      "title": "Source naks / redeliveries (pipeline side)",
-      "description": "",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 53
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (tenant) (rate(source_naks_total[1m]))",
-          "legendFormat": "naks {{tenant}}",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (tenant) (rate(source_redeliveries_total[1m]))",
-          "legendFormat": "redeliveries {{tenant}}",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (tenant) (rate(dlq_total[1m]))",
-          "legendFormat": "dlq {{tenant}}",
-          "refId": "C"
-        }
-      ]
-    },
-    {
-      "id": 19,
-      "type": "timeseries",
-      "title": "Stream messages",
-      "description": "",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 53
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "jetstream_stream_total_messages",
-          "legendFormat": "{{stream_name}}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 20,
-      "type": "row",
-      "title": "Sinks",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 61
-      }
     },
     {
       "id": 21,
-      "type": "timeseries",
-      "title": "Sink PubAck latency p50 / p99",
-      "description": "",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 62
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.5, sum by (le, stage) (rate(sink_publish_duration_seconds_bucket[1m])))",
-          "legendFormat": "p50 {{stage}}",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(sink_publish_duration_seconds_bucket[1m])))",
-          "legendFormat": "p99 {{stage}}",
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "id": 22,
-      "type": "timeseries",
-      "title": "Sink publish errors",
-      "description": "",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 62
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (stage) (rate(sink_publish_errors_total[1m]))",
-          "legendFormat": "{{stage}}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 23,
       "type": "row",
-      "title": "Workers",
-      "collapsed": false,
+      "title": "Internals",
+      "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 70
-      }
-    },
-    {
-      "id": 24,
-      "type": "timeseries",
-      "title": "Busy workers",
-      "description": "Worker time spent inside stages and sink writes, in whole workers. Compare with the configured worker count.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
+        "y": 34
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 71
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
+      "panels": [
         {
+          "id": 13,
+          "type": "timeseries",
+          "title": "Intake per instance",
+          "description": "One line per pipeline process. After a restart the old instance goes stale and a new one appears; the Overview sums them.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(stage_duration_seconds_sum[1m])) + sum(rate(sink_publish_duration_seconds_sum[1m]))",
-          "legendFormat": "busy worker-seconds per second",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 25,
-      "type": "timeseries",
-      "title": "Collector accepted metric points",
-      "description": "",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 71
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 10
-          }
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 35
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 12,
+                "showPoints": "never"
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (instance) (rate(records_in_total{tenant=~\"$tenant\",stage=\"source\"}[1m]))",
+              "legendFormat": "{{instance}}",
+              "refId": "A"
+            }
+          ]
         },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
         {
+          "id": 14,
+          "type": "timeseries",
+          "title": "Busy workers",
+          "description": "Worker time inside stages and sink writes, in whole workers; compare with the configured worker count.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(otelcol_receiver_accepted_metric_points[1m]))",
-          "legendFormat": "accepted",
-          "refId": "A"
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 35
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 12,
+                "showPoints": "never"
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "(sum(rate(stage_duration_seconds_sum{tenant=~\"$tenant\"}[1m])) or vector(0)) + (sum(rate(sink_publish_duration_seconds_sum{tenant=~\"$tenant\"}[1m])) or vector(0))",
+              "legendFormat": "busy worker-seconds / s",
+              "refId": "A"
+            }
+          ]
         },
         {
+          "id": 15,
+          "type": "timeseries",
+          "title": "Lua errors by kind",
+          "description": "Populated once the Lua ticket (#8) lands.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(otelcol_receiver_refused_metric_points[1m]))",
-          "legendFormat": "refused",
-          "refId": "B"
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 35
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 12,
+                "showPoints": "never"
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (kind) (rate(lua_errors_total{tenant=~\"$tenant\"}[1m]))",
+              "legendFormat": "{{kind}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "Regex limit trips",
+          "description": "Drops with reason regex_limit: match, depth, heap, work or input-size limit tripped on the PCRE2 path.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 43
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 12,
+                "showPoints": "never"
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (stage) (rate(records_dropped_total{tenant=~\"$tenant\",reason=\"regex_limit\"}[1m]))",
+              "legendFormat": "{{stage}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "JetStream streams",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 43
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 12,
+                "showPoints": "never"
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "jetstream_stream_total_messages",
+              "legendFormat": "{{stream_name}} messages",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "jetstream_consumer_delivered_stream_seq{consumer_name=\"pipeline\"} - jetstream_consumer_ack_floor_stream_seq{consumer_name=\"pipeline\"}",
+              "legendFormat": "ack lag (seq)",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 18,
+          "type": "timeseries",
+          "title": "Dragonfly server",
+          "description": "Server side of the state store, from its own /metrics.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 43
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 12,
+                "showPoints": "never"
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(dragonfly_commands_processed_total[1m]))",
+              "legendFormat": "commands/s",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(dragonfly_connected_clients)",
+              "legendFormat": "clients",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(dragonfly_used_memory_rss_bytes)",
+              "legendFormat": "used memory (bytes)",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "Collector",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 51
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 12,
+                "showPoints": "never"
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(otelcol_receiver_accepted_metric_points[1m]))",
+              "legendFormat": "metric points accepted /s",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(otelcol_receiver_refused_metric_points[1m]))",
+              "legendFormat": "refused /s",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "Pipeline process threads",
+          "description": "Threads per instance: workers, source, NATS I/O, exporter. A steady climb is a leak.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 16,
+            "x": 8,
+            "y": 51
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 12,
+                "showPoints": "never"
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "process_thread_count{job=\"fusion-pipeline\"}",
+              "legendFormat": "{{instance}}",
+              "refId": "A"
+            }
+          ]
         }
       ]
     }
