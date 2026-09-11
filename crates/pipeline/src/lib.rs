@@ -8,6 +8,7 @@ use fusion_core::engine::{Engine, EngineError};
 use fusion_core::metrics::Metrics;
 use fusion_core::pipeline::Pipeline;
 use fusion_core::registry::Registry;
+use fusion_core::state::{StateError, StateStore, StateStoreFactory};
 use fusion_nats::{Nats, NatsError};
 use fusion_otel::OtelError;
 
@@ -52,6 +53,15 @@ pub enum StartError {
     /// The Ctrl-C listener could not be set up.
     #[error("could not set up the Ctrl-C handler: {0}")]
     Signals(#[source] std::io::Error),
+}
+
+/// Placeholder until the Dragonfly factory lands in this branch.
+struct NoStore;
+
+impl StateStoreFactory for NoStore {
+    fn open(&self) -> Result<Box<dyn StateStore>, StateError> {
+        Err(StateError::new("no state store configured"))
+    }
 }
 
 /// First Ctrl-C stops the source so the workers drain; a second one exits at once, since the
@@ -116,7 +126,7 @@ pub fn run(path: &Path) -> Result<(), StartError> {
     let workers = pipeline.worker_count();
 
     stop_on_ctrl_c(Arc::clone(&nats))?;
-    let engine = Engine::start(pipeline, source, workers, metrics)?;
+    let engine = Engine::start(pipeline, source, workers, metrics, Arc::new(NoStore))?;
     eprintln!(
         "pipelined: running with {workers} workers, metrics {}; Ctrl-C to stop",
         if telemetry.is_some() {

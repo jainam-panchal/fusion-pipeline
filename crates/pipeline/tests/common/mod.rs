@@ -1,13 +1,14 @@
 //! The engine harness the trait-boundary tests share: a YAML config compiled with the
 //! default registry plus an in-memory sink, an in-memory source to push envelopes through,
-//! and the sinks to assert on.
+//! an in-memory state store, and the sinks to assert on.
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use fusion_core::engine::Engine;
-use fusion_core::memory::{MemoryInput, MemorySinks, MemorySource};
+use fusion_core::memory::{MemoryInput, MemorySinks, MemorySource, MemoryStateStore};
 use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::registry::Registry;
@@ -16,11 +17,12 @@ use fusion_pipeline::default_registry;
 /// How long a test waits for an ack handle to settle.
 pub const WAIT: Duration = Duration::from_secs(5);
 
-/// A running engine with its in-memory source, sinks and metrics recorder.
+/// A running engine with its in-memory source, sinks, state store and metrics recorder.
 pub struct Harness {
     pub engine: Engine,
     pub source: MemoryInput,
     pub sinks: MemorySinks,
+    pub state: MemoryStateStore,
     pub recorder: InMemoryRecorder,
 }
 
@@ -42,17 +44,20 @@ pub fn start_with(yaml: &str, workers: usize, sinks: MemorySinks, registry: Regi
     let pipeline = Pipeline::from_yaml(yaml, &registry).expect("pipeline loads");
     let (source, input) = MemorySource::new();
     let recorder = InMemoryRecorder::new();
+    let state = MemoryStateStore::new();
     let engine = Engine::start(
         pipeline,
         Box::new(source),
         workers,
         Metrics::new(recorder.clone()),
+        Arc::new(state.clone()),
     )
     .expect("engine starts");
     Harness {
         engine,
         source: input,
         sinks,
+        state,
         recorder,
     }
 }

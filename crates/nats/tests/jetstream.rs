@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use async_nats::jetstream::consumer::{AckPolicy, pull};
 use async_nats::jetstream::{self, stream};
 use fusion_core::engine::Engine;
-use fusion_core::memory::MemorySinks;
+use fusion_core::memory::{MemorySinks, MemoryStateStore};
 use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
@@ -132,6 +132,11 @@ impl JetStreamClient {
             consumer.info().await.expect("consumer info").clone()
         })
     }
+}
+
+/// These pipelines have no stateful node; the engine never opens the store.
+fn no_state() -> std::sync::Arc<MemoryStateStore> {
+    std::sync::Arc::new(MemoryStateStore::new())
 }
 
 fn wait_until(timeout: Duration, mut check: impl FnMut() -> bool) -> bool {
@@ -352,8 +357,8 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
     let source = nats
         .source(&fixture.source_params())
         .expect("source builds");
-    let engine =
-        Engine::start(pipeline, Box::new(source), 2, Metrics::noop()).expect("engine starts");
+    let engine = Engine::start(pipeline, Box::new(source), 2, Metrics::noop(), no_state())
+        .expect("engine starts");
 
     fixture.client.publish(
         &fixture.in_subject("acme"),
@@ -400,7 +405,8 @@ fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
     let source = nats
         .source(&fixture.source_params())
         .expect("source builds");
-    let engine = Engine::start(pipeline, Box::new(source), 1, metrics).expect("engine starts");
+    let engine =
+        Engine::start(pipeline, Box::new(source), 1, metrics, no_state()).expect("engine starts");
 
     fixture.client.delete_stream(&fixture.out_stream);
     fixture.client.publish(
@@ -448,8 +454,8 @@ fn undecodable_payload_is_nakd_and_the_source_keeps_going() {
     let source = nats
         .source(&fixture.source_params())
         .expect("source builds");
-    let engine =
-        Engine::start(pipeline, Box::new(source), 1, Metrics::noop()).expect("engine starts");
+    let engine = Engine::start(pipeline, Box::new(source), 1, Metrics::noop(), no_state())
+        .expect("engine starts");
 
     fixture
         .client

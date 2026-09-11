@@ -3,6 +3,8 @@
 //! [`MemorySource`] forwards records pushed through a [`MemoryInput`]; every push returns an
 //! [`AckProbe`] that observes how the engine settled the record. [`MemorySinks`] is a
 //! [`SinkFactory`] whose sinks collect records per node id for later inspection.
+//! [`MemoryStateStore`] is the state store: one shared map behind every connection it
+//! opens, a clock the test advances by hand, and errors on demand.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex};
@@ -12,6 +14,7 @@ use crate::config::{ConfigError, NodeConfig};
 use crate::io::{AckHandle, Envelope, Intake, Sink, SinkError, Source, SourceError};
 use crate::record::Record;
 use crate::registry::SinkFactory;
+use crate::state::{StateError, StateStore, StateStoreFactory};
 
 /// How the engine settled a record's source message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,6 +200,160 @@ impl Sink for MemorySink {
             .or_default()
             .extend_from_slice(records);
         Ok(())
+    }
+}
+
+/// One stored value and when it expires on the fake clock.
+struct Entry {
+    value: Vec<u8>,
+    expires_at: Duration,
+}
+
+#[derive(Default)]
+struct StateData {
+    entries: BTreeMap<String, Entry>,
+    /// The fake clock: time since the store was created, moved only by
+    /// [`MemoryStateStore::advance`].
+    now: Duration,
+    failing: bool,
+}
+
+impl StateData {
+    fn live(&mut self, key: &str) -> Option<&mut Entry> {
+        let now = self.now;
+        if self.entries.get(key).is_some_and(|e| e.expires_at <= now) {
+            self.entries.remove(key);
+        }
+        self.entries.get_mut(key)
+    }
+
+    fn check(&self) -> Result<(), StateError> {
+        if self.failing {
+            Err(StateError::new(InjectedStateFailure.to_string()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// The error a failing memory state store returns.
+#[derive(Debug, thiserror::Error)]
+#[error("memory state store is set to fail")]
+pub struct InjectedStateFailure;
+
+/// A [`StateStore`] and [`StateStoreFactory`] over one shared map. Every connection it
+/// opens, and the store itself, read and write the same data, as workers on one Dragonfly
+/// do. Time is a fake clock that only [`MemoryStateStore::advance`] moves, so expiry is
+/// deterministic. [`MemoryStateStore::fail_all`] makes every operation fail, to exercise the
+/// engine's failure policy.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryStateStore {
+    data: Arc<Mutex<StateData>>,
+}
+
+impl std::fmt::Debug for StateData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateData")
+            .field("keys", &self.entries.keys().collect::<Vec<_>>())
+            .field("now", &self.now)
+            .field("failing", &self.failing)
+            .finish()
+    }
+}
+
+impl MemoryStateStore {
+    /// An empty store at time zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Move the fake clock forward, expiring whatever `ttl` has run out.
+    pub fn advance(&self, by: Duration) {
+        lock_unpoisoned(&self.data).now += by;
+    }
+
+    /// Make every operation fail (`true`) or succeed again (`false`). Opening a connection
+    /// still succeeds: an outage after startup is a different fault from a store that was
+    /// never reachable.
+    pub fn fail_all(&self, failing: bool) {
+        lock_unpoisoned(&self.data).failing = failing;
+    }
+
+    /// Every live key, sorted.
+    #[must_use]
+    pub fn keys(&self) -> Vec<String> {
+        let mut data = lock_unpoisoned(&self.data);
+        let now = data.now;
+        data.entries.retain(|_, e| e.expires_at > now);
+        data.entries.keys().cloned().collect()
+    }
+}
+
+impl StateStore for MemoryStateStore {
+    fn set_nx(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Duration,
+    ) -> Result<Option<Vec<u8>>, StateError> {
+        let mut data = lock_unpoisoned(&self.data);
+        data.check()?;
+        if let Some(existing) = data.live(key) {
+            return Ok(Some(existing.value.clone()));
+        }
+        let expires_at = data.now + ttl;
+        data.entries.insert(
+            key.to_owned(),
+            Entry {
+                value: value.to_vec(),
+                expires_at,
+            },
+        );
+        Ok(None)
+    }
+
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StateError> {
+        let mut data = lock_unpoisoned(&self.data);
+        data.check()?;
+        Ok(data.live(key).map(|e| e.value.clone()))
+    }
+
+    fn incr(&self, key: &str, by: i64, ttl: Duration) -> Result<i64, StateError> {
+        let mut data = lock_unpoisoned(&self.data);
+        data.check()?;
+        let current = match data.live(key) {
+            None => 0,
+            Some(entry) => std::str::from_utf8(&entry.value)
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .ok_or_else(|| StateError::new(format!("key `{key}` is not an integer")))?,
+        };
+        let next = current
+            .checked_add(by)
+            .ok_or_else(|| StateError::new(format!("key `{key}` would overflow")))?;
+        let expires_at = data.now + ttl;
+        data.entries.insert(
+            key.to_owned(),
+            Entry {
+                value: next.to_string().into_bytes(),
+                expires_at,
+            },
+        );
+        Ok(next)
+    }
+
+    fn del(&self, key: &str) -> Result<(), StateError> {
+        let mut data = lock_unpoisoned(&self.data);
+        data.check()?;
+        data.entries.remove(key);
+        Ok(())
+    }
+}
+
+impl StateStoreFactory for MemoryStateStore {
+    fn open(&self) -> Result<Box<dyn StateStore>, StateError> {
+        Ok(Box::new(self.clone()))
     }
 }
 

@@ -21,10 +21,9 @@ fn record(format: &str) -> Record {
     .expect("record parses")
 }
 
-const CTX: Context<'static> = Context {
-    node_id: "by_format",
-    record_id: RecordId(1),
-};
+fn ctx() -> Context<'static> {
+    Context::in_memory("by_format", RecordId(1))
+}
 
 const BY_FORMAT: &str = r#"    routes:
       linux: resource.log.format == "Linux"
@@ -36,7 +35,7 @@ const BY_FORMAT: &str = r#"    routes:
 fn record_goes_down_the_label_whose_condition_matches() {
     let route = route(BY_FORMAT);
 
-    let out = route.process(record("Apache"), &CTX);
+    let out = route.process(record("Apache"), &ctx());
 
     assert!(
         matches!(out, StageOutput::Routed(ref label, ref r) if label == "apache" && r.id == Some(RecordId(1))),
@@ -48,7 +47,7 @@ fn record_goes_down_the_label_whose_condition_matches() {
 fn unmatched_record_goes_down_the_default_label() {
     let route = route(BY_FORMAT);
 
-    let out = route.process(record("Mac"), &CTX);
+    let out = route.process(record("Mac"), &ctx());
 
     assert!(
         matches!(out, StageOutput::Routed(ref label, _) if label == "other"),
@@ -60,7 +59,7 @@ fn unmatched_record_goes_down_the_default_label() {
 fn default_drop_drops_unmatched_records_with_route_default_drop() {
     let route = route(&BY_FORMAT.replace("default: other", "default: drop"));
 
-    let out = route.process(record("Mac"), &CTX);
+    let out = route.process(record("Mac"), &ctx());
 
     assert!(
         matches!(out, StageOutput::Drop(DropReason::RouteDefaultDrop)),
@@ -78,7 +77,7 @@ fn first_matching_route_wins_in_declaration_order() {
 "#,
     );
 
-    let out = route.process(record("Linux"), &CTX);
+    let out = route.process(record("Linux"), &ctx());
 
     assert!(
         matches!(out, StageOutput::Routed(ref label, _) if label == "any"),
