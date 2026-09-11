@@ -11,6 +11,7 @@ use fusion_core::engine::Engine;
 use fusion_core::memory::{MemoryInput, MemorySinks, MemorySource, MemoryStateStore};
 use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
 use fusion_core::pipeline::Pipeline;
+use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_core::state::StateStoreFactory;
 use fusion_pipeline::default_registry;
@@ -43,18 +44,36 @@ pub fn start(yaml: &str, workers: usize) -> Harness {
 /// As [`start`], with a registry the caller has extended.
 pub fn start_with(yaml: &str, workers: usize, sinks: MemorySinks, registry: Registry) -> Harness {
     let state = MemoryStateStore::new();
-    start_with_state(yaml, workers, sinks, registry, Arc::new(state.clone()))
-        .with_memory_state(state)
+    let factory: Arc<dyn StateStoreFactory> = Arc::new(state.clone());
+    launch(yaml, workers, sinks, registry, state, factory)
 }
 
 /// As [`start_with`], with the state store the caller supplies (a real Dragonfly in the
-/// ignored tests). `Harness::state` is then an unused memory store.
+/// ignored tests). `Harness::state` is then a memory store nothing writes to.
 pub fn start_with_state(
     yaml: &str,
     workers: usize,
     sinks: MemorySinks,
     registry: Registry,
-    state: Arc<dyn StateStoreFactory>,
+    factory: Arc<dyn StateStoreFactory>,
+) -> Harness {
+    launch(
+        yaml,
+        workers,
+        sinks,
+        registry,
+        MemoryStateStore::new(),
+        factory,
+    )
+}
+
+fn launch(
+    yaml: &str,
+    workers: usize,
+    sinks: MemorySinks,
+    registry: Registry,
+    state: MemoryStateStore,
+    factory: Arc<dyn StateStoreFactory>,
 ) -> Harness {
     let pipeline = Pipeline::from_yaml(yaml, &registry).expect("pipeline loads");
     let (source, input) = MemorySource::new();
@@ -64,24 +83,34 @@ pub fn start_with_state(
         Box::new(source),
         workers,
         Metrics::new(recorder.clone()),
-        state,
+        factory,
     )
     .expect("engine starts");
     Harness {
         engine,
         source: input,
         sinks,
-        state: MemoryStateStore::new(),
+        state,
         recorder,
     }
 }
 
-impl Harness {
-    fn with_memory_state(mut self, state: MemoryStateStore) -> Self {
-        self.state = state;
-        self
-    }
+/// A tenant `acme` record with `id` and `body`, the shape the dedupe tests push.
+pub fn acme_record(id: u64, body: &str) -> Record {
+    Record::from_json(&format!(
+        r#"{{"id": {id}, "body": "{body}", "resource": {{"tenant.id": "acme"}}}}"#
+    ))
+    .expect("record parses")
+}
 
+/// The labels of a `dedupe` drop by the node `dedupe_body` for tenant `acme`.
+pub const DEDUPE_DROP: [(&str, &str); 3] = [
+    ("tenant", "acme"),
+    ("stage", "dedupe_body"),
+    ("reason", "dedupe"),
+];
+
+impl Harness {
     /// Close the source and wait for the workers to drain.
     pub fn finish(self) {
         drop(self.source);

@@ -122,10 +122,12 @@ impl Dedupe {
 
 impl Stage for Dedupe {
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
-        let ts = ingestion_time(&record);
+        let me = Holder {
+            id: ctx.record_id,
+            ts: ingestion_time(&record),
+        };
         let key = self.state_key(&record);
-        let value = format!("{} {ts}", ctx.record_id);
-        let existing = match ctx.state.set_nx(&key, value.as_bytes(), self.window) {
+        let existing = match ctx.state.set_nx(&key, &me.to_bytes(), self.window) {
             Ok(existing) => existing,
             Err(error) => return StageOutput::StateError { record, error },
         };
@@ -133,19 +135,16 @@ impl Stage for Dedupe {
             // Claimed: first sighting in this window.
             return StageOutput::Pass(record);
         };
-        let Some(owner) = Owner::parse(&existing) else {
+        let Some(holder) = Holder::parse(&existing) else {
             // Not a value this stage wrote. Passing is the safe reading: at worst one extra
             // copy, never a lost record.
             return StageOutput::Pass(record);
         };
-        let repeat = owner.id != ctx.record_id
-            && ts >= owner.ts
-            && ts.saturating_sub(owner.ts) < window_nanos(self.window);
-        if repeat {
+        if me.repeats(&holder, self.window) {
             StageOutput::Drop(DropReason::Dedupe)
         } else {
-            // The same record again (redelivery), a record older than the window's owner
-            // (an earlier record coming back), or the window is over in ingestion time.
+            // The same record again (redelivery), a record older than the holder (an
+            // earlier record coming back), or the window is over in ingestion time.
             StageOutput::Pass(record)
         }
     }
@@ -159,13 +158,18 @@ impl Stage for Dedupe {
     }
 }
 
-/// Who holds a dedupe key: the record that claimed it and its ingestion time.
-struct Owner {
+/// Who holds a dedupe key: the record that claimed it and its ingestion time. The state
+/// value is `"{id} {ts}"`, written and read here only.
+struct Holder {
     id: RecordId,
     ts: u64,
 }
 
-impl Owner {
+impl Holder {
+    fn to_bytes(&self) -> Vec<u8> {
+        format!("{} {}", self.id, self.ts).into_bytes()
+    }
+
     fn parse(value: &[u8]) -> Option<Self> {
         let text = std::str::from_utf8(value).ok()?;
         let (id, ts) = text.split_once(' ')?;
@@ -173,6 +177,14 @@ impl Owner {
             id: RecordId(id.parse().ok()?),
             ts: ts.parse().ok()?,
         })
+    }
+
+    /// Whether this record is a repeat of `holder`'s content inside `window`: a different
+    /// record whose ingestion time falls in the holder's window.
+    fn repeats(&self, holder: &Self, window: Duration) -> bool {
+        self.id != holder.id
+            && self.ts >= holder.ts
+            && self.ts.saturating_sub(holder.ts) < window_nanos(window)
     }
 }
 

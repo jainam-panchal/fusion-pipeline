@@ -66,7 +66,8 @@ services:
     # State for the pipeline's stateful nodes (dedupe windows). Memory is bounded and
     # eviction stays off: an evicted key would silently reopen a dedupe window, whereas
     # out-of-memory is an error the node's `on_state_error` policy handles visibly.
-    command: ["dragonfly", "--logtostderr", "--maxmemory=256mb", "--cache_mode=false"]
+    # Dragonfly wants 256 MiB per I/O thread, hence two threads for the 512 MiB cap.
+    command: ["dragonfly", "--logtostderr", "--proactor_threads=2", "--maxmemory=512mb", "--cache_mode=false"]
     ports:
       - "${DRAGONFLY_PORT:-6379}:6379"
     healthcheck:

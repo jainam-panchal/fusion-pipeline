@@ -53,7 +53,7 @@ pub fn url_from_env() -> String {
 }
 
 /// The factory: knows the URL, opens one connection per worker.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Dragonfly {
     client: Client,
     url: String,
@@ -115,10 +115,7 @@ impl StateStoreFactory for Dragonfly {
     fn open(&self) -> Result<Box<dyn StateStore>, StateError> {
         let connection = self.connect()?;
         Ok(Box::new(DragonflyStore {
-            factory: Dragonfly {
-                client: self.client.clone(),
-                url: self.url.clone(),
-            },
+            factory: self.clone(),
             connection: Mutex::new(Some(connection)),
             claim_with_set_get: AtomicBool::new(true),
         }))
@@ -159,7 +156,7 @@ impl DragonflyStore {
         match op(connection) {
             Ok(value) => Ok(value),
             Err(err) => {
-                if err.is_io_error() || err.is_timeout() || err.is_connection_dropped() {
+                if is_connection_fault(&err) {
                     *slot = None;
                 }
                 Err(StateError::new(format!(
@@ -170,13 +167,20 @@ impl DragonflyStore {
         }
     }
 
-    /// Whether `err` is the server refusing the command's syntax rather than failing to run
-    /// it, so the caller may try another spelling.
+    /// Whether `err` is the server refusing the command's syntax (it does not know
+    /// `SET ... NX ... GET`) rather than failing to run it, so the caller may try another
+    /// spelling. Any other server error (out of memory, loading, read-only) is reported as
+    /// is and changes nothing.
     fn refused_syntax(err: &RedisError) -> bool {
-        !(err.is_io_error() || err.is_timeout() || err.is_connection_dropped())
-            && (matches!(err.kind(), ErrorKind::Server(_))
-                || err.to_string().to_ascii_lowercase().contains("syntax"))
+        matches!(err.kind(), ErrorKind::Server(_))
+            && err.to_string().to_ascii_lowercase().contains("syntax")
     }
+}
+
+/// An error after which the connection cannot be trusted: the socket is gone, or a reply
+/// may still be in flight and would answer the next command.
+fn is_connection_fault(err: &RedisError) -> bool {
+    err.is_io_error() || err.is_timeout() || err.is_connection_dropped()
 }
 
 fn ttl_millis(ttl: Duration) -> i64 {

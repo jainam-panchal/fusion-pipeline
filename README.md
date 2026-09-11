@@ -126,7 +126,8 @@ replica; each worker holds its own connection, opened at startup with a ping whe
 uses state, so an unreachable store fails fast. Every key is `{pipeline}:{tenant}:{node}:...`:
 `name:` at the top of the config (default `pipeline`) is the first segment, so replicas of
 one pipeline share state and two different pipelines on one Dragonfly must be given
-different names. The tenant segment means no node can dedupe one tenant against another.
+different names. The tenant segment means no node can dedupe one tenant against another;
+records with no tenant fall under `unknown`, like their metrics.
 
 ```yaml
 name: ingest

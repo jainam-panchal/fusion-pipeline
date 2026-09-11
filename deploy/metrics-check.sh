@@ -114,7 +114,7 @@ for expr in "${SPEC_METRICS[@]}"; do
     echo "present: $expr"
 done
 for name in "${PENDING_METRICS[@]}"; do
-    if prom_has "$name"; then echo "present: $name"; else echo "pending: $name (no producer yet)"; fi
+    if prom_has "$name"; then echo "present: $name"; else echo "pending: $name (nothing to count in this run, or no producer yet)"; fi
 done
 
 step "4. records_dropped_total reasons within the closed set"

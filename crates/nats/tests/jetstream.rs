@@ -16,7 +16,8 @@ use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
-use fusion_nats::{Nats, NatsError, stamp_ingestion_time};
+use fusion_nats::source::stamp_ingestion_time;
+use fusion_nats::{Nats, NatsError};
 use futures::StreamExt;
 
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);

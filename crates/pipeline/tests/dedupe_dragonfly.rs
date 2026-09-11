@@ -6,7 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{WAIT, registry, start_with_state};
+use common::{DEDUPE_DROP, WAIT, acme_record as record, registry, start_with_state};
 use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
@@ -21,13 +21,6 @@ fn yaml(pipeline_name: &str) -> String {
 /// A pipeline name no other run shares, so keys from one test run never see another's.
 fn unique_name() -> String {
     format!("t{}", std::process::id())
-}
-
-fn record(id: u64, body: &str) -> Record {
-    Record::from_json(&format!(
-        r#"{{"id": {id}, "body": "{body}", "resource": {{"tenant.id": "acme"}}}}"#
-    ))
-    .expect("record parses")
 }
 
 #[test]
@@ -64,17 +57,7 @@ fn on_dragonfly_a_repeat_drops_a_redelivery_passes_and_workers_share_the_window(
 
     assert_eq!(h.ids("out"), vec![101, 101, 103]);
     let stage = [("tenant", "acme"), ("stage", "dedupe_body")];
-    assert_eq!(
-        h.counter(
-            Metric::RecordsDropped,
-            &[
-                ("tenant", "acme"),
-                ("stage", "dedupe_body"),
-                ("reason", "dedupe")
-            ]
-        ),
-        1
-    );
+    assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
     assert_eq!(h.counter(Metric::StateOps, &stage), 4);
     assert_eq!(h.counter(Metric::StateErrors, &stage), 0);
     h.finish();

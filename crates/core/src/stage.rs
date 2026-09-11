@@ -257,7 +257,8 @@ pub struct Context<'a> {
     pub node_id: &'a str,
     /// Id of the record being processed.
     pub record_id: RecordId,
-    /// The state store, scoped to this pipeline, tenant and node.
+    /// The state handle: the worker's store connection, scoped to this pipeline, tenant
+    /// and node.
     pub state: State,
 }
 

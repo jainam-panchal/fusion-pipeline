@@ -10,7 +10,7 @@ use fusion_core::memory::AckOutcome;
 use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
 
-use common::{WAIT, for_each_worker_count, start};
+use common::{DEDUPE_DROP, WAIT, acme_record as record, for_each_worker_count, start};
 
 const DEDUPE_BODY: &str = r#"
 name: ingest
@@ -22,13 +22,6 @@ nodes:
   - id: out
     type: sink.memory
 "#;
-
-fn record(id: u64, body: &str) -> Record {
-    Record::from_json(&format!(
-        r#"{{"id": {id}, "body": "{body}", "resource": {{"tenant.id": "acme"}}}}"#
-    ))
-    .expect("record parses")
-}
 
 #[test]
 fn two_different_records_with_the_same_key_inside_the_window_pass_once_and_drop_once() {
@@ -46,14 +39,7 @@ fn two_different_records_with_the_same_key_inside_the_window_pass_once_and_drop_
 
         assert_eq!(h.ids("out"), vec![101], "workers={workers}");
         assert_eq!(
-            h.counter(
-                Metric::RecordsDropped,
-                &[
-                    ("tenant", "acme"),
-                    ("stage", "dedupe_body"),
-                    ("reason", "dedupe")
-                ]
-            ),
+            h.counter(Metric::RecordsDropped, &DEDUPE_DROP),
             1,
             "workers={workers}"
         );
@@ -83,14 +69,7 @@ fn the_same_record_pushed_twice_passes_twice_because_redelivery_is_not_a_duplica
 
         assert_eq!(h.ids("out"), vec![101, 101], "workers={workers}");
         assert_eq!(
-            h.counter(
-                Metric::RecordsDropped,
-                &[
-                    ("tenant", "acme"),
-                    ("stage", "dedupe_body"),
-                    ("reason", "dedupe")
-                ]
-            ),
+            h.counter(Metric::RecordsDropped, &DEDUPE_DROP),
             0,
             "workers={workers}"
         );
@@ -146,17 +125,7 @@ fn a_record_redelivered_after_its_window_expired_and_a_newer_duplicate_took_the_
     );
 
     assert_eq!(h.ids("out"), vec![101, 101, 102]);
-    assert_eq!(
-        h.counter(
-            Metric::RecordsDropped,
-            &[
-                ("tenant", "acme"),
-                ("stage", "dedupe_body"),
-                ("reason", "dedupe")
-            ]
-        ),
-        1
-    );
+    assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
     h.finish();
 }
 
