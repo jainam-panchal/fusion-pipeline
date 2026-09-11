@@ -6,19 +6,33 @@ use fusion_core::metrics::{Labels, Metric, MetricKind, Metrics, Recorder};
 use fusion_core::stage::DropReason;
 use fusion_otel::OtlpRecorder;
 use opentelemetry::metrics::MeterProvider as _;
-use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
+// The SDK's `Metric` is the exported record; the pipeline's `Metric` is the name.
+use opentelemetry_sdk::metrics::data::{
+    AggregatedMetrics, Metric as ExportedMetric, MetricData, ResourceMetrics,
+};
 use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
 
-/// Run `emit` against a recorder on an in-memory provider and return what it exported.
+/// Run `emit` against a recorder on an in-memory provider carrying the pipeline's resource,
+/// and return what it exported.
 fn export(emit: impl FnOnce(&OtlpRecorder)) -> Vec<ResourceMetrics> {
     let exporter = InMemoryMetricExporter::default();
     let provider = SdkMeterProvider::builder()
+        .with_resource(fusion_otel::resource())
         .with_periodic_exporter(exporter.clone())
         .build();
     let recorder = OtlpRecorder::new(&provider.meter("fusion-pipeline"));
     emit(&recorder);
     provider.force_flush().expect("flush");
     exporter.get_finished_metrics().expect("exported")
+}
+
+/// The exported metric called `name`.
+fn find_metric<'a>(exported: &'a [ResourceMetrics], name: &str) -> Option<&'a ExportedMetric> {
+    exported
+        .iter()
+        .flat_map(|rm| rm.scope_metrics())
+        .flat_map(|sm| sm.metrics())
+        .find(|m| m.name() == name)
 }
 
 /// `(name, unit)` of every exported metric.
@@ -69,12 +83,8 @@ fn a_counter_exports_its_labels_as_attributes_and_its_running_total() {
         metrics.dropped("acme", "keep_errors", DropReason::RouteDefaultDrop);
     });
 
-    let dropped = exported
-        .iter()
-        .flat_map(|rm| rm.scope_metrics())
-        .flat_map(|sm| sm.metrics())
-        .find(|m| m.name() == "records_dropped_total")
-        .expect("records_dropped_total exported");
+    let dropped =
+        find_metric(&exported, "records_dropped_total").expect("records_dropped_total exported");
     let AggregatedMetrics::U64(MetricData::Sum(sum)) = dropped.data() else {
         panic!(
             "records_dropped_total is a u64 sum, got {:?}",
@@ -117,12 +127,8 @@ fn a_duration_histogram_has_sub_second_buckets_so_stage_latency_is_not_all_in_on
         metrics.stage_duration("acme", "keep_errors", std::time::Duration::from_micros(300));
     });
 
-    let duration = exported
-        .iter()
-        .flat_map(|rm| rm.scope_metrics())
-        .flat_map(|sm| sm.metrics())
-        .find(|m| m.name() == "stage_duration_seconds")
-        .expect("stage_duration_seconds exported");
+    let duration =
+        find_metric(&exported, "stage_duration_seconds").expect("stage_duration_seconds exported");
     let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = duration.data() else {
         panic!(
             "stage_duration_seconds is an f64 histogram, got {:?}",
@@ -149,15 +155,7 @@ fn a_duration_histogram_has_sub_second_buckets_so_stage_latency_is_not_all_in_on
 
 #[test]
 fn every_export_carries_the_service_name_and_an_instance_id() {
-    let exporter = InMemoryMetricExporter::default();
-    let provider = SdkMeterProvider::builder()
-        .with_resource(fusion_otel::resource())
-        .with_periodic_exporter(exporter.clone())
-        .build();
-    let metrics = Metrics::new(OtlpRecorder::new(&provider.meter("fusion-pipeline")));
-    metrics.records_in("acme", "out");
-    provider.force_flush().expect("flush");
-    let exported = exporter.get_finished_metrics().expect("exported");
+    let exported = export(|recorder| Metrics::new(recorder.clone()).records_in("acme", "out"));
 
     let resource = exported[0].resource();
     let name = resource
@@ -172,11 +170,7 @@ fn every_export_carries_the_service_name_and_an_instance_id() {
 
 /// Every metric with `name` in the export, with its unit and the sum of its data points.
 fn exported_sum(exported: &[ResourceMetrics], name: &str) -> Option<(String, f64)> {
-    let metric = exported
-        .iter()
-        .flat_map(|rm| rm.scope_metrics())
-        .flat_map(|sm| sm.metrics())
-        .find(|m| m.name() == name)?;
+    let metric = find_metric(exported, name)?;
     let total = match metric.data() {
         AggregatedMetrics::F64(MetricData::Sum(sum)) => {
             sum.data_points().map(|dp| dp.value()).sum()
@@ -233,11 +227,7 @@ fn the_end_to_end_histogram_reaches_past_the_redelivery_backoff() {
         Metrics::new(recorder.clone()).end_to_end("acme", std::time::Duration::from_secs(20));
     });
 
-    let e2e = exported
-        .iter()
-        .flat_map(|rm| rm.scope_metrics())
-        .flat_map(|sm| sm.metrics())
-        .find(|m| m.name() == "pipeline_end_to_end_seconds")
+    let e2e = find_metric(&exported, "pipeline_end_to_end_seconds")
         .expect("pipeline_end_to_end_seconds exported");
     let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = e2e.data() else {
         panic!("histogram expected, got {:?}", e2e.data());
