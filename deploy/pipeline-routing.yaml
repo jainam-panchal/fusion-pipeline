@@ -1,0 +1,49 @@
+# A routing pipeline over the same compose streams: LOGS in, PROCESSED out on three
+# subjects.
+#
+#   pipelined --config deploy/pipeline-routing.yaml
+#
+# DEBUG records are dropped and acked. What survives is routed by log format: Linux goes to
+# two sinks (fan-out), Apache and everything else share one (fan-in). A record is acked once
+# every branch it took has a PubAck.
+#
+# `url` here and on each sink is overridden by NATS_URL when set.
+workers: 4
+source:
+  type: nats
+  url: nats://127.0.0.1:4222
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: drop_debug
+    type: filter
+    condition: severity_text == "DEBUG"
+    action: drop
+
+  - id: by_format
+    type: route                             # reads from drop_debug, the previous node
+    routes:                                 # ordered; first match wins
+      linux: resource.log.format == "Linux"
+      apache: resource.log.format == "Apache"
+    default: other
+
+  - id: linux_out
+    type: sink.nats
+    from: by_format.linux
+    url: nats://127.0.0.1:4222
+    stream: PROCESSED
+    subject: processed.linux
+
+  - id: linux_archive
+    type: sink.nats
+    from: by_format.linux                   # fan-out: the same label twice
+    url: nats://127.0.0.1:4222
+    stream: PROCESSED
+    subject: processed.archive.linux
+
+  - id: rest_out
+    type: sink.nats
+    from: [by_format.apache, by_format.other]   # fan-in
+    url: nats://127.0.0.1:4222
+    stream: PROCESSED
+    subject: processed.rest
