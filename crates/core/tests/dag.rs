@@ -137,8 +137,8 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource["log.format"] == "Linux"
-      apache: resource["log.format"] == "Apache"
+      linux: resource.log.format == "Linux"
+      apache: resource.log.format == "Apache"
     default: other
   - id: linux_out
     type: sink.memory
@@ -176,8 +176,8 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource["log.format"] == "Linux"
-      apache: resource["log.format"] == "Apache"
+      linux: resource.log.format == "Linux"
+      apache: resource.log.format == "Apache"
     default: linux
   - id: linux_out
     type: sink.memory

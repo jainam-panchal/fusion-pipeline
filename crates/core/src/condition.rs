@@ -5,21 +5,21 @@
 //! or        := and ("or" and)*
 //! and       := not ("and" not)*
 //! not       := "not" not | primary
-//! primary   := "(" condition ")" | field op literal
-//! field     := ident ("." ident | "[" string "]")*
+//! primary   := "(" condition ")" | path op literal
+//! path      := root ("." segment)*          (see `crate::path`)
 //! op        := "==" | "!=" | "=~" | "!~" | "<" | ">" | "<=" | ">="
 //! literal   := string | number | "true" | "false" | "null"
 //! ```
 //!
-//! The first path segment names a top-level record field. Further segments index into
-//! `attributes`, `resource`, `scope` or a structured `body`. `=~` and `!~` parse here; the
-//! regex ticket wires their evaluation, so [`Condition::matches`] treats them as false and
-//! stages reject them at load through [`Condition::has_regex_ops`].
+//! A path is resolved by [`FieldPath`]: the root is a top-level record field and, under
+//! `attributes`, `resource` or `scope`, the segments joined with dots are the flat map key.
+//! `=~` and `!~` parse here; the regex ticket wires their evaluation, so
+//! [`Condition::matches`] treats them as false and stages reject them at load through
+//! [`Condition::has_regex_ops`].
 
 use std::cmp::Ordering;
 
-use serde_json::Value;
-
+use crate::path::{FieldPath, FieldValue, Num, PathError, quoted_end};
 use crate::record::Record;
 
 /// Errors from parsing a condition string.
@@ -59,186 +59,15 @@ pub enum ConditionError {
         /// Byte offset in the expression.
         offset: usize,
     },
-    /// The first path segment is not a record field.
-    #[error("unknown record field `{name}`")]
-    UnknownField {
-        /// The segment text.
-        name: String,
+    /// A field path that does not follow the path rule.
+    #[error("{source} (path at offset {offset})")]
+    Field {
+        /// Byte offset of the path in the expression.
+        offset: usize,
+        /// What was wrong with the path.
+        #[source]
+        source: PathError,
     },
-    /// A scalar record field was indexed further.
-    #[error("field `{field}` is not a map and cannot be indexed")]
-    NotAMap {
-        /// The scalar field name.
-        field: String,
-    },
-}
-
-/// Top-level record field a path starts at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Root {
-    Id,
-    Kind,
-    TimeUnixNano,
-    ObservedTimeUnixNano,
-    SeverityText,
-    SeverityNumber,
-    Body,
-    Attributes,
-    Resource,
-    Scope,
-    TraceId,
-    SpanId,
-}
-
-impl Root {
-    fn parse(name: &str) -> Option<Self> {
-        Some(match name {
-            "id" => Self::Id,
-            "kind" => Self::Kind,
-            "time_unix_nano" => Self::TimeUnixNano,
-            "observed_time_unix_nano" => Self::ObservedTimeUnixNano,
-            "severity_text" => Self::SeverityText,
-            "severity_number" => Self::SeverityNumber,
-            "body" => Self::Body,
-            "attributes" => Self::Attributes,
-            "resource" => Self::Resource,
-            "scope" => Self::Scope,
-            "trace_id" => Self::TraceId,
-            "span_id" => Self::SpanId,
-            _ => return None,
-        })
-    }
-
-    const fn is_indexable(self) -> bool {
-        matches!(
-            self,
-            Self::Body | Self::Attributes | Self::Resource | Self::Scope
-        )
-    }
-}
-
-/// A dotted or bracketed path into a record.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FieldPath {
-    root: Root,
-    keys: Vec<String>,
-}
-
-/// A number as seen by the grammar. Two integers compare exactly; when either side is a
-/// float both are compared as `f64`, which is lossy above 2^53 and never equal for NaN.
-#[derive(Debug, Clone, Copy)]
-enum Num {
-    Int(i128),
-    Float(f64),
-}
-
-impl Num {
-    fn from_value(v: &Value) -> Option<Self> {
-        let n = v.as_number()?;
-        if let Some(i) = n.as_i64() {
-            Some(Self::Int(i128::from(i)))
-        } else if let Some(u) = n.as_u64() {
-            Some(Self::Int(i128::from(u)))
-        } else {
-            n.as_f64().map(Self::Float)
-        }
-    }
-
-    fn as_f64(self) -> f64 {
-        match self {
-            Self::Int(i) => i as f64,
-            Self::Float(f) => f,
-        }
-    }
-}
-
-impl PartialEq for Num {
-    fn eq(&self, other: &Self) -> bool {
-        self.partial_cmp(other) == Some(Ordering::Equal)
-    }
-}
-
-impl PartialOrd for Num {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match (*self, *other) {
-            (Self::Int(a), Self::Int(b)) => Some(a.cmp(&b)),
-            (a, b) => a.as_f64().partial_cmp(&b.as_f64()),
-        }
-    }
-}
-
-/// A resolved field value, borrowed from the record where possible.
-#[derive(Debug, Clone, Copy)]
-enum FieldValue<'a> {
-    Null,
-    Bool(bool),
-    Num(Num),
-    Str(&'a str),
-    /// Arrays and objects: comparable to nothing.
-    Composite,
-}
-
-impl<'a> FieldValue<'a> {
-    fn from_json(v: &'a Value) -> Self {
-        match v {
-            Value::Null => Self::Null,
-            Value::Bool(b) => Self::Bool(*b),
-            Value::Number(_) => Num::from_value(v).map_or(Self::Null, Self::Num),
-            Value::String(s) => Self::Str(s),
-            Value::Array(_) | Value::Object(_) => Self::Composite,
-        }
-    }
-}
-
-impl FieldPath {
-    fn resolve<'a>(&self, record: &'a Record) -> FieldValue<'a> {
-        fn walk<'a>(mut v: &'a Value, keys: &[String]) -> FieldValue<'a> {
-            for k in keys {
-                match v.get(k.as_str()) {
-                    Some(next) => v = next,
-                    None => return FieldValue::Null,
-                }
-            }
-            FieldValue::from_json(v)
-        }
-        fn walk_map<'a>(
-            map: &'a serde_json::Map<String, Value>,
-            keys: &[String],
-        ) -> FieldValue<'a> {
-            match keys.split_first() {
-                None => FieldValue::Composite,
-                Some((first, rest)) => map.get(first).map_or(FieldValue::Null, |v| walk(v, rest)),
-            }
-        }
-        fn opt_u64(v: Option<u64>) -> FieldValue<'static> {
-            v.map_or(FieldValue::Null, |n| {
-                FieldValue::Num(Num::Int(i128::from(n)))
-            })
-        }
-        fn opt_str(v: Option<&str>) -> FieldValue<'_> {
-            v.map_or(FieldValue::Null, FieldValue::Str)
-        }
-
-        match self.root {
-            Root::Id => opt_u64(record.id.map(|id| id.0)),
-            Root::Kind => FieldValue::Str(record.kind.as_str()),
-            Root::TimeUnixNano => opt_u64(record.time_unix_nano),
-            Root::ObservedTimeUnixNano => opt_u64(record.observed_time_unix_nano),
-            Root::SeverityText => opt_str(record.severity_text.as_deref()),
-            Root::SeverityNumber => record.severity_number.map_or(FieldValue::Null, |n| {
-                FieldValue::Num(Num::Int(i128::from(n)))
-            }),
-            Root::Body => record
-                .body
-                .as_ref()
-                .map_or(FieldValue::Null, |b| walk(b, &self.keys)),
-            Root::Attributes => walk_map(&record.attributes, &self.keys),
-            Root::Resource => walk_map(&record.resource, &self.keys),
-            Root::Scope => walk_map(&record.scope, &self.keys),
-            Root::TraceId => opt_str(record.trace_id.as_deref()),
-            Root::SpanId => opt_str(record.span_id.as_deref()),
-        }
-    }
 }
 
 /// Comparison operator.
@@ -334,7 +163,7 @@ impl Condition {
     #[must_use]
     pub fn matches(&self, record: &Record) -> bool {
         match self {
-            Self::Compare { field, op, literal } => compare(field.resolve(record), *op, literal),
+            Self::Compare { field, op, literal } => compare(field.read(record), *op, literal),
             Self::And(a, b) => a.matches(record) && b.matches(record),
             Self::Or(a, b) => a.matches(record) || b.matches(record),
             Self::Not(inner) => !inner.matches(record),
@@ -377,16 +206,16 @@ fn order(value: FieldValue<'_>, literal: &Literal) -> Option<Ordering> {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
+    /// A bare word: a keyword, or a path with only a root.
     Ident(String),
+    /// A path with segments, kept as written for [`FieldPath::parse`].
+    Path(String),
     Str(String),
     Int(i128),
     Float(f64),
     Op(CompareOp),
     LParen,
     RParen,
-    LBracket,
-    RBracket,
-    Dot,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -424,18 +253,6 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
             b')' => {
                 i += 1;
                 Tok::RParen
-            }
-            b'[' => {
-                i += 1;
-                Tok::LBracket
-            }
-            b']' => {
-                i += 1;
-                Tok::RBracket
-            }
-            b'.' => {
-                i += 1;
-                Tok::Dot
             }
             b'=' | b'!' | b'<' | b'>' => {
                 let next = bytes.get(i + 1).copied();
@@ -489,7 +306,12 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
                 {
                     i += 1;
                 }
-                Tok::Ident(expr[start..i].to_owned())
+                if i < bytes.len() && matches!(bytes[i], b'.' | b'[') {
+                    i = lex_path_rest(expr, start, i)?;
+                    Tok::Path(expr[start..i].to_owned())
+                } else {
+                    Tok::Ident(expr[start..i].to_owned())
+                }
             }
             _ => {
                 let ch = expr[i..].chars().next().unwrap_or('?');
@@ -503,6 +325,69 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
         });
     }
     Ok(tokens)
+}
+
+/// Lex the segments of a path after its root, starting at `i` (a `.` or `[`), and return
+/// the offset just past them. The text is kept as written; [`FieldPath::parse`] judges it,
+/// so bracket syntax, bad characters, escapes and text glued to a closing quote get the
+/// path error and its hint. `start` is the root's offset, reported with an unclosed quote.
+fn lex_path_rest(expr: &str, start: usize, mut i: usize) -> Result<usize, ConditionError> {
+    let bytes = expr.as_bytes();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'.' => {
+                i += 1;
+                if bytes.get(i) == Some(&b'"') {
+                    i = quoted_end(expr, i).ok_or_else(|| ConditionError::Field {
+                        offset: start,
+                        source: PathError::UnterminatedQuote {
+                            path: expr[start..].to_owned(),
+                        },
+                    })?;
+                }
+                while i < bytes.len() && continues_bare_segment(bytes[i]) {
+                    i += 1;
+                }
+            }
+            b'[' => {
+                // Old bracket syntax: take the whole bracket, quotes honoured, so the path
+                // parser reports it with a dotted hint. An unclosed quote runs to the end.
+                i += 1;
+                while i < bytes.len() && bytes[i] != b']' {
+                    i = match bytes[i] {
+                        b'"' | b'\'' => quoted_end(expr, i).unwrap_or(bytes.len()),
+                        _ => i + 1,
+                    };
+                }
+                i = (i + 1).min(bytes.len());
+            }
+            _ => break,
+        }
+    }
+    Ok(i)
+}
+
+/// Bytes that keep a bare segment going in the lexer. Wider than the segment charset on
+/// purpose, so a stray `:` or `/` is reported as a path error with a hint instead of an
+/// unexpected token.
+const fn continues_bare_segment(b: u8) -> bool {
+    !matches!(
+        b,
+        b' ' | b'\t'
+            | b'\n'
+            | b'\r'
+            | b'.'
+            | b'('
+            | b')'
+            | b'['
+            | b']'
+            | b'='
+            | b'!'
+            | b'<'
+            | b'>'
+            | b'"'
+            | b'\''
+    )
 }
 
 /// Lex a quoted string starting at `start` (the quote). Returns the unescaped contents and
@@ -593,8 +478,11 @@ impl Parser {
                     other => Err(other.unexpected()),
                 }
             }
-            Tok::Ident(name) => {
-                let field = self.field_path(&name)?;
+            Tok::Ident(ref name) | Tok::Path(ref name) => {
+                let field = FieldPath::parse(name).map_err(|source| ConditionError::Field {
+                    offset: token.offset,
+                    source,
+                })?;
                 let op = match self.next()?.clone() {
                     Token {
                         tok: Tok::Op(op), ..
@@ -606,48 +494,6 @@ impl Parser {
             }
             _ => Err(token.unexpected()),
         }
-    }
-
-    fn field_path(&mut self, root_name: &str) -> Result<FieldPath, ConditionError> {
-        let root = Root::parse(root_name).ok_or_else(|| ConditionError::UnknownField {
-            name: root_name.to_owned(),
-        })?;
-        let mut keys = Vec::new();
-        loop {
-            match self.peek().map(|t| &t.tok) {
-                Some(Tok::Dot) => {
-                    self.pos += 1;
-                    match self.next()?.clone() {
-                        Token {
-                            tok: Tok::Ident(k), ..
-                        } => keys.push(k),
-                        other => return Err(other.unexpected()),
-                    }
-                }
-                Some(Tok::LBracket) => {
-                    self.pos += 1;
-                    match self.next()?.clone() {
-                        Token {
-                            tok: Tok::Str(k), ..
-                        } => keys.push(k),
-                        other => return Err(other.unexpected()),
-                    }
-                    match self.next()?.clone() {
-                        Token {
-                            tok: Tok::RBracket, ..
-                        } => {}
-                        other => return Err(other.unexpected()),
-                    }
-                }
-                _ => break,
-            }
-        }
-        if !keys.is_empty() && !root.is_indexable() {
-            return Err(ConditionError::NotAMap {
-                field: root_name.to_owned(),
-            });
-        }
-        Ok(FieldPath { root, keys })
     }
 
     fn literal(&mut self) -> Result<Literal, ConditionError> {

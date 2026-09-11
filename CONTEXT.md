@@ -21,7 +21,7 @@ A record paired with the ack handle that settles its message.
 The producer-supplied snowflake that is always present on a record. Records without one are nakked and counted.
 
 **Tenant**:
-The owner of a record, held at `resource["tenant.id"]` and stamped by the source from the subject when absent.
+The owner of a record, held at `resource.tenant.id` and stamped by the source from the subject when absent.
 _Avoid_: customer, org, namespace
 
 **Body**:
@@ -62,6 +62,10 @@ Two or more nodes consuming the same upstream output. The record is copy-on-writ
 
 **Fan-in**:
 One node with a list in `from`, consuming several upstream outputs.
+
+**Field path**:
+The one dotted path every stage uses to name a record field: `root ("." segment)*`. Under `attributes`, `resource` or `scope` the segments joined with dots are the flat map key (`attributes.http.status` is the `http.status` key). Segments with characters outside letters, digits, `_` and `-` are double-quoted.
+_Avoid_: selector, accessor, bracket path
 
 **Condition**:
 A `field op literal` expression with `and`, `or`, `not` and parentheses, evaluated against a record. Used by `filter` and `route`.

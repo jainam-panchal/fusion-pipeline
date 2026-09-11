@@ -24,7 +24,7 @@ Read first, in this order:
 
 - Drive behaviour through the trait boundary: load a YAML config, push envelopes through the in-memory `Source`, assert which records reached which in-memory `Sink` and which ack handles saw `ack` versus `nak`. Fakes live in `crates/core/src/memory.rs`.
 - Tests that touch real NATS are `#[ignore]` and need `deploy/compose.yaml` up. Commands are in the README.
-- The regex crate is the one place with unit tests below the trait boundary, on its safe API only.
+- Tests below the trait boundary, on the safe API only: the regex crate, and the core parsers `path` and `condition`, whose error variants, offsets and hints are not observable through `Source`/`Sink` beyond "config rejected".
 
 ## Workflow
 
