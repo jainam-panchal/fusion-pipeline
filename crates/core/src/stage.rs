@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::metrics::Metrics;
+use crate::metrics::{Labels, Metrics};
 use crate::record::{Record, RecordId};
 use crate::state::{StateError, StateErrorPolicy, StateStore};
 
@@ -191,10 +191,10 @@ impl State {
         }
         let started = Instant::now();
         let result = op();
-        self.metrics
-            .state_op(&self.tenant, &self.node, started.elapsed());
+        let labels = Labels::new(&self.tenant, &self.node);
+        self.metrics.state_op(&labels, started.elapsed());
         if result.is_err() {
-            self.metrics.state_error(&self.tenant, &self.node);
+            self.metrics.state_error(&labels);
         }
         result
     }
@@ -294,6 +294,29 @@ fn escape_segment(segment: &str) -> String {
     out
 }
 
+/// A stage's handle on the metrics for one record: the node's labels are fixed, and only
+/// the metrics a stage emits for itself are reachable, so the per-node series the engine
+/// owns (`records_in_total` and the rest) stay the engine's.
+#[derive(Debug, Clone, Copy)]
+pub struct StageMetrics<'a> {
+    metrics: &'a Metrics,
+    labels: Labels<'a>,
+}
+
+impl<'a> StageMetrics<'a> {
+    /// A handle emitting through `metrics` under `labels`, the node's labels as the engine
+    /// built them.
+    #[must_use]
+    pub const fn new(metrics: &'a Metrics, labels: Labels<'a>) -> Self {
+        Self { metrics, labels }
+    }
+
+    /// `regex_nonmatch_total`: the stage's pattern did not match this record.
+    pub fn regex_nonmatch(&self) {
+        self.metrics.regex_nonmatch(&self.labels);
+    }
+}
+
 /// Per-record context handed to a stage alongside the record.
 #[derive(Debug, Clone)]
 pub struct Context<'a> {
@@ -304,6 +327,30 @@ pub struct Context<'a> {
     /// The state handle: the worker's store connection, scoped to this pipeline, tenant
     /// and node.
     pub state: State,
+    /// The metrics a stage emits for itself, under the node's labels.
+    pub metrics: StageMetrics<'a>,
+}
+
+impl<'a> Context<'a> {
+    /// A context over an in-memory state store and a no-op recorder, for tests that call a
+    /// stage directly. `metrics` must outlive the context; pass a `&Metrics::noop()` the
+    /// test keeps.
+    #[must_use]
+    pub fn in_memory(node_id: &'a str, record_id: RecordId, metrics: &'a Metrics) -> Self {
+        Self {
+            node_id,
+            record_id,
+            state: State::new(
+                Arc::new(crate::memory::MemoryStateStore::new()),
+                metrics.clone(),
+                crate::config::DEFAULT_NAME,
+                Metrics::UNKNOWN_TENANT,
+                node_id,
+                false,
+            ),
+            metrics: StageMetrics::new(metrics, Labels::new(Metrics::UNKNOWN_TENANT, node_id)),
+        }
+    }
 }
 
 /// A pipeline stage. Shared across worker threads, so it must be `Send + Sync`; per-worker
@@ -311,6 +358,13 @@ pub struct Context<'a> {
 pub trait Stage: Send + Sync {
     /// Process one record.
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput;
+
+    /// The `engine` label for this node's metrics: `linear` or `backtracking` for a stage
+    /// that runs a regex, `None` for every other stage. Fixed at load, read by the engine
+    /// once per record.
+    fn engine_label(&self) -> Option<&'static str> {
+        None
+    }
 
     /// Whether this stage reaches the state store. The engine opens one connection per
     /// worker only when some node does.

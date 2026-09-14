@@ -41,6 +41,9 @@ pub enum Metric {
     StateErrors,
     /// `lua_errors_total{tenant, stage, kind}`: Lua stage errors by kind.
     LuaErrors,
+    /// `regex_nonmatch_total{tenant, stage, engine}`: records a regex stage's pattern did not
+    /// match, passed on unchanged. Emitted by the regex stages.
+    RegexNonmatch,
     /// `source_naks_total{tenant}`: messages the engine negatively acknowledged.
     SourceNaks,
     /// `source_redeliveries_total{tenant}`: messages the source saw more than once.
@@ -66,7 +69,7 @@ pub enum MetricKind {
 
 impl Metric {
     /// Every metric, for an exporter that creates its instruments up front.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::RecordsIn,
         Self::RecordsOut,
         Self::RecordsDropped,
@@ -76,6 +79,7 @@ impl Metric {
         Self::StateOpDuration,
         Self::StateErrors,
         Self::LuaErrors,
+        Self::RegexNonmatch,
         Self::SourceNaks,
         Self::SourceRedeliveries,
         Self::Dlq,
@@ -97,6 +101,7 @@ impl Metric {
             Self::StateOpDuration => "state_op_duration_seconds",
             Self::StateErrors => "state_errors_total",
             Self::LuaErrors => "lua_errors_total",
+            Self::RegexNonmatch => "regex_nonmatch_total",
             Self::SourceNaks => "source_naks_total",
             Self::SourceRedeliveries => "source_redeliveries_total",
             Self::Dlq => "dlq_total",
@@ -117,6 +122,7 @@ impl Metric {
             | Self::StateOps
             | Self::StateErrors
             | Self::LuaErrors
+            | Self::RegexNonmatch
             | Self::SourceNaks
             | Self::SourceRedeliveries
             | Self::Dlq
@@ -130,10 +136,13 @@ impl Metric {
 }
 
 /// The labels of one measurement. `tenant` is always set; the rest as the metric requires.
+/// `engine` is set on every per-node metric of a node whose stage runs a regex, and on no
+/// other node, so `sum by (stage)` is unchanged and a regex node can be split by engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Labels<'a> {
     tenant: &'a str,
     stage: Option<&'a str>,
+    engine: Option<&'a str>,
     reason: Option<DropReason>,
     kind: Option<&'a str>,
 }
@@ -145,6 +154,7 @@ impl<'a> Labels<'a> {
         Self {
             tenant,
             stage: Some(stage),
+            engine: None,
             reason: None,
             kind: None,
         }
@@ -156,9 +166,23 @@ impl<'a> Labels<'a> {
         Self {
             tenant,
             stage: None,
+            engine: None,
             reason: None,
             kind: None,
         }
+    }
+
+    /// The `stage` label, if set.
+    #[must_use]
+    pub const fn stage(&self) -> Option<&'a str> {
+        self.stage
+    }
+
+    /// Add the `engine` label, or leave it off for `None`.
+    #[must_use]
+    pub const fn with_engine(mut self, engine: Option<&'a str>) -> Self {
+        self.engine = engine;
+        self
     }
 
     /// Add the `reason` label.
@@ -180,6 +204,7 @@ impl<'a> Labels<'a> {
         [
             Some(("tenant", self.tenant)),
             self.stage.map(|s| ("stage", s)),
+            self.engine.map(|e| ("engine", e)),
             self.reason.map(|r| ("reason", r.as_str())),
             self.kind.map(|k| ("kind", k)),
         ]
@@ -232,69 +257,60 @@ impl Metrics {
         record.tenant().unwrap_or(Self::UNKNOWN_TENANT)
     }
 
-    /// `records_in_total`.
-    pub fn records_in(&self, tenant: &str, stage: &str) {
-        self.recorder
-            .count(Metric::RecordsIn, &Labels::new(tenant, stage), 1);
+    /// `records_in_total`. `labels` is the node's [`Labels::new`], with the engine label
+    /// when its stage declares one.
+    pub fn records_in(&self, labels: &Labels<'_>) {
+        self.recorder.count(Metric::RecordsIn, labels, 1);
     }
 
     /// `records_out_total`, by `count` records.
-    pub fn records_out(&self, tenant: &str, stage: &str, count: u64) {
-        self.recorder
-            .count(Metric::RecordsOut, &Labels::new(tenant, stage), count);
+    pub fn records_out(&self, labels: &Labels<'_>, count: u64) {
+        self.recorder.count(Metric::RecordsOut, labels, count);
     }
 
     /// `records_dropped_total`.
-    pub fn dropped(&self, tenant: &str, stage: &str, reason: DropReason) {
-        self.recorder.count(
-            Metric::RecordsDropped,
-            &Labels::new(tenant, stage).with_reason(reason),
-            1,
-        );
+    pub fn dropped(&self, labels: &Labels<'_>, reason: DropReason) {
+        self.recorder
+            .count(Metric::RecordsDropped, &labels.with_reason(reason), 1);
     }
 
     /// `records_errored_total`.
-    pub fn errored(&self, tenant: &str, stage: &str) {
-        self.recorder
-            .count(Metric::RecordsErrored, &Labels::new(tenant, stage), 1);
+    pub fn errored(&self, labels: &Labels<'_>) {
+        self.recorder.count(Metric::RecordsErrored, labels, 1);
     }
 
     /// `stage_duration_seconds`.
-    pub fn stage_duration(&self, tenant: &str, stage: &str, elapsed: Duration) {
-        self.recorder.observe(
-            Metric::StageDuration,
-            &Labels::new(tenant, stage),
-            elapsed.as_secs_f64(),
-        );
+    pub fn stage_duration(&self, labels: &Labels<'_>, elapsed: Duration) {
+        self.recorder
+            .observe(Metric::StageDuration, labels, elapsed.as_secs_f64());
     }
 
     /// `sink_publish_duration_seconds`.
-    pub fn sink_publish_duration(&self, tenant: &str, stage: &str, elapsed: Duration) {
-        self.recorder.observe(
-            Metric::SinkPublishDuration,
-            &Labels::new(tenant, stage),
-            elapsed.as_secs_f64(),
-        );
+    pub fn sink_publish_duration(&self, labels: &Labels<'_>, elapsed: Duration) {
+        self.recorder
+            .observe(Metric::SinkPublishDuration, labels, elapsed.as_secs_f64());
     }
 
     /// `sink_publish_errors_total`.
-    pub fn sink_publish_error(&self, tenant: &str, stage: &str) {
-        self.recorder
-            .count(Metric::SinkPublishErrors, &Labels::new(tenant, stage), 1);
+    pub fn sink_publish_error(&self, labels: &Labels<'_>) {
+        self.recorder.count(Metric::SinkPublishErrors, labels, 1);
     }
 
     /// `state_ops_total` and `state_op_duration_seconds`: one state store operation.
-    pub fn state_op(&self, tenant: &str, stage: &str, elapsed: Duration) {
-        let labels = Labels::new(tenant, stage);
-        self.recorder.count(Metric::StateOps, &labels, 1);
+    pub fn state_op(&self, labels: &Labels<'_>, elapsed: Duration) {
+        self.recorder.count(Metric::StateOps, labels, 1);
         self.recorder
-            .observe(Metric::StateOpDuration, &labels, elapsed.as_secs_f64());
+            .observe(Metric::StateOpDuration, labels, elapsed.as_secs_f64());
     }
 
     /// `state_errors_total`.
-    pub fn state_error(&self, tenant: &str, stage: &str) {
-        self.recorder
-            .count(Metric::StateErrors, &Labels::new(tenant, stage), 1);
+    pub fn state_error(&self, labels: &Labels<'_>) {
+        self.recorder.count(Metric::StateErrors, labels, 1);
+    }
+
+    /// `regex_nonmatch_total`.
+    pub fn regex_nonmatch(&self, labels: &Labels<'_>) {
+        self.recorder.count(Metric::RegexNonmatch, labels, 1);
     }
 
     /// `source_naks_total`.
@@ -381,6 +397,7 @@ fn intern(name: &str) -> &'static str {
     match name {
         "tenant" => "tenant",
         "stage" => "stage",
+        "engine" => "engine",
         "reason" => "reason",
         "kind" => "kind",
         other => panic!("`{other}` is not a label any metric carries"),

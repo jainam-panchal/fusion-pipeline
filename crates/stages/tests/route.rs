@@ -1,13 +1,12 @@
 //! The `route` stage through its public contract: a record in, `Routed(label, record)` or
 //! `Drop(route_default_drop)` out.
 
-use std::sync::Arc;
+use std::sync::LazyLock;
 
-use fusion_core::config::{Config, DEFAULT_NAME};
-use fusion_core::memory::MemoryStateStore;
+use fusion_core::config::Config;
 use fusion_core::metrics::Metrics;
 use fusion_core::record::{Record, RecordId};
-use fusion_core::stage::{Context, DropReason, Stage, StageOutput, State};
+use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use fusion_stages::Route;
 
 fn route(yaml_params: &str) -> Route {
@@ -25,19 +24,10 @@ fn record(format: &str) -> Record {
     .expect("record parses")
 }
 
+static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::noop);
+
 fn ctx() -> Context<'static> {
-    Context {
-        node_id: "by_format",
-        record_id: RecordId(1),
-        state: State::new(
-            Arc::new(MemoryStateStore::new()),
-            Metrics::noop(),
-            DEFAULT_NAME,
-            Metrics::UNKNOWN_TENANT,
-            "by_format",
-            false,
-        ),
-    }
+    Context::in_memory("by_format", RecordId(1), &METRICS)
 }
 
 const BY_FORMAT: &str = r#"    routes:

@@ -5,6 +5,7 @@
 mod common;
 
 use fusion_core::memory::AckOutcome;
+use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
 use serde_json::{Value, json};
 
@@ -67,4 +68,78 @@ fn named_groups_become_attributes_and_the_body_is_kept() {
         assert_eq!(body, Some(Value::String(line.to_owned())));
         h.finish();
     });
+}
+
+#[test]
+fn a_non_matching_line_passes_unchanged_and_is_counted() {
+    for_each_worker_count(|workers| {
+        let h = start(&extract_yaml(LINUX_PATTERN), workers);
+
+        let probe = h.source.push(record(7, "not a syslog line"));
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
+
+        let out = h.sinks.records("out");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], record(7, "not a syslog line"), "unchanged");
+        let labels = [
+            ("tenant", "acme"),
+            ("stage", "parse_linux"),
+            ("engine", "linear"),
+        ];
+        assert_eq!(
+            h.counter(Metric::RegexNonmatch, &labels),
+            1,
+            "workers={workers}"
+        );
+        assert_eq!(
+            h.counter(Metric::RecordsOut, &labels),
+            1,
+            "workers={workers}"
+        );
+        h.finish();
+    });
+}
+
+#[test]
+fn regex_node_metrics_carry_the_engine_label_and_other_nodes_do_not() {
+    let h = start(&extract_yaml(LINUX_PATTERN), 1);
+    assert_eq!(
+        h.source.push(record(1, "x")).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+    let linear = [
+        ("tenant", "acme"),
+        ("stage", "parse_linux"),
+        ("engine", "linear"),
+    ];
+    assert_eq!(h.counter(Metric::RecordsIn, &linear), 1);
+    assert_eq!(h.samples(Metric::StageDuration, &linear).len(), 1);
+    assert_eq!(
+        h.counter(Metric::RecordsIn, &linear[..2]),
+        0,
+        "no series without the label"
+    );
+    assert_eq!(
+        h.counter(Metric::RecordsIn, &[("tenant", "acme"), ("stage", "out")]),
+        1
+    );
+    h.finish();
+
+    // Lookbehind keeps the pattern off the linear engine.
+    let h = start(&extract_yaml(r"(?<=id=)(?<Id>\d+)"), 1);
+    assert_eq!(
+        h.source.push(record(2, "id=42")).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+    let backtracking = [
+        ("tenant", "acme"),
+        ("stage", "parse_linux"),
+        ("engine", "backtracking"),
+    ];
+    assert_eq!(h.counter(Metric::RecordsIn, &backtracking), 1);
+    assert_eq!(
+        attributes(&h, "out", 2),
+        json!({"Id": "42"}).as_object().cloned().expect("object")
+    );
+    h.finish();
 }

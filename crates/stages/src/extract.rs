@@ -83,6 +83,7 @@ impl Extract {
 impl Stage for Extract {
     fn process(&self, mut record: Record, ctx: &Context<'_>) -> StageOutput {
         let FieldValue::Str(haystack) = self.field.read(&record) else {
+            ctx.metrics.regex_nonmatch();
             return StageOutput::Pass(record);
         };
         let extracted: Vec<(usize, String)> = match self.regex.captures(haystack) {
@@ -92,7 +93,10 @@ impl Stage for Extract {
                 .enumerate()
                 .filter_map(|(i, (name, _))| Some((i, caps.name(name)?.to_owned())))
                 .collect(),
-            Ok(None) => return StageOutput::Pass(record),
+            Ok(None) => {
+                ctx.metrics.regex_nonmatch();
+                return StageOutput::Pass(record);
+            }
             Err(error) => return match_failure(ctx.node_id, error),
         };
         for (i, text) in extracted {
@@ -105,5 +109,9 @@ impl Stage for Extract {
             }
         }
         StageOutput::Pass(record)
+    }
+
+    fn engine_label(&self) -> Option<&'static str> {
+        Some(self.regex.engine().as_str())
     }
 }
