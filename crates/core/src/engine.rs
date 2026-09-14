@@ -199,8 +199,9 @@ impl Walk<'_> {
     }
 }
 
-/// The store a worker holds when no node uses state: every operation is a configuration
-/// error, which only a stage that lied about [`crate::stage::Stage::uses_state`] can reach.
+/// The store a worker holds when no node uses state. Unreachable in practice: the handle
+/// refuses an undeclared stage before the store, and a declared one means connections were
+/// opened. Kept so the worker always holds a store.
 struct NoStateStore;
 
 impl StateStore for NoStateStore {
@@ -226,7 +227,7 @@ impl StateStore for NoStateStore {
 }
 
 fn no_state_store() -> StateError {
-    StateError::new("no node declared that it uses state, so no connection was opened")
+    StateError::new("no state store connection was opened for this worker")
 }
 
 struct Walker<'p> {
@@ -345,6 +346,7 @@ impl<'p> Walker<'p> {
                         self.pipeline.name(),
                         &walk.tenant,
                         node_id,
+                        stage.uses_state(),
                     ),
                 };
                 // Copies only if another branch still shares the record.

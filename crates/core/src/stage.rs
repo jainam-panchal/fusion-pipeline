@@ -139,6 +139,10 @@ pub struct State {
     prefix: String,
     tenant: String,
     node: String,
+    /// Whether the node's stage declared [`Stage::uses_state`]. When it did not, no
+    /// connection was opened for it and every operation is refused before the store, and
+    /// before the metrics, so the store counters stay about the store.
+    declared: bool,
 }
 
 impl fmt::Debug for State {
@@ -151,7 +155,8 @@ impl fmt::Debug for State {
 
 impl State {
     /// A handle for one record: `store` is the worker's connection, `pipeline`, `tenant` and
-    /// `node` form the key prefix, and `metrics` receives the counts.
+    /// `node` form the key prefix, `metrics` receives the counts, and `declared` is the
+    /// node's [`Stage::uses_state`].
     #[must_use]
     pub fn new(
         store: Arc<dyn StateStore>,
@@ -159,6 +164,7 @@ impl State {
         pipeline: &str,
         tenant: &str,
         node: &str,
+        declared: bool,
     ) -> Self {
         Self {
             store,
@@ -166,6 +172,7 @@ impl State {
             prefix: format!("{pipeline}:{}:{node}:", escape_segment(tenant)),
             tenant: tenant.to_owned(),
             node: node.to_owned(),
+            declared,
         }
     }
 
@@ -176,6 +183,12 @@ impl State {
     }
 
     fn timed<T>(&self, op: impl FnOnce() -> Result<T, StateError>) -> Result<T, StateError> {
+        if !self.declared {
+            return Err(StateError::new(format!(
+                "node `{}` used the state store without declaring `uses_state`",
+                self.node
+            )));
+        }
         let started = Instant::now();
         let result = op();
         self.metrics

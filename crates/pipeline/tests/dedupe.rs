@@ -351,3 +351,93 @@ fn the_key_is_the_combination_of_every_listed_field() {
     assert_eq!(h.ids("out"), vec![1, 2]);
     h.finish();
 }
+
+/// A stage that reaches the state store without declaring `uses_state`. The handle refuses
+/// it naming the node, the policy applies, and the store metrics stay untouched, since no
+/// store was ever contacted.
+mod undeclared {
+    use fusion_core::config::{ConfigError, NodeConfig};
+    use fusion_core::record::Record;
+    use fusion_core::stage::{Context, Stage, StageOutput};
+    use fusion_core::state::StateErrorPolicy;
+    use std::time::Duration;
+
+    pub struct Liar(pub StateErrorPolicy);
+
+    impl Stage for Liar {
+        fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
+            match ctx.state.set_nx("k", b"v", Duration::from_secs(1)) {
+                Ok(_) => StageOutput::Pass(record),
+                Err(error) => StageOutput::StateError { record, error },
+            }
+        }
+        // `uses_state` deliberately left at its default of `false`.
+        fn on_state_error(&self) -> StateErrorPolicy {
+            self.0
+        }
+    }
+
+    pub fn build(
+        policy: StateErrorPolicy,
+    ) -> impl Fn(&NodeConfig) -> Result<Box<dyn Stage>, ConfigError> {
+        move |_: &NodeConfig| Ok(Box::new(Liar(policy)) as Box<dyn Stage>)
+    }
+}
+
+#[test]
+fn a_stage_that_uses_state_without_declaring_it_gets_an_error_naming_the_node_and_no_store_metrics()
+{
+    use fusion_core::memory::MemorySinks;
+    use fusion_core::state::StateErrorPolicy;
+
+    let yaml = "nodes:\n  - id: liar\n    type: liar\n  - id: out\n    type: sink.memory\n";
+    let sinks = MemorySinks::new();
+    let mut registry = common::registry(&sinks);
+    registry.register_stage("liar", undeclared::build(StateErrorPolicy::Nak));
+    let h = common::start_with(yaml, 1, sinks.clone(), registry);
+
+    let outcome = h.source.push(record(1, "x")).wait(WAIT);
+
+    assert!(matches!(outcome, Some(AckOutcome::Nak(_))), "{outcome:?}");
+    let stage = [("tenant", "acme"), ("stage", "liar")];
+    assert_eq!(
+        h.counter(Metric::StateOps, &stage),
+        0,
+        "no store was contacted"
+    );
+    assert_eq!(
+        h.counter(Metric::StateErrors, &stage),
+        0,
+        "not a store error"
+    );
+    assert_eq!(
+        h.counter(Metric::RecordsErrored, &stage),
+        1,
+        "policy still applied"
+    );
+    h.finish();
+}
+
+#[test]
+fn an_undeclared_stage_under_pass_forwards_the_record() {
+    use fusion_core::memory::MemorySinks;
+    use fusion_core::state::StateErrorPolicy;
+
+    let yaml = "nodes:\n  - id: liar\n    type: liar\n  - id: out\n    type: sink.memory\n";
+    let sinks = MemorySinks::new();
+    let mut registry = common::registry(&sinks);
+    registry.register_stage("liar", undeclared::build(StateErrorPolicy::Pass));
+    let h = common::start_with(yaml, 1, sinks.clone(), registry);
+
+    assert_eq!(
+        h.source.push(record(1, "x")).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+
+    assert_eq!(h.ids("out"), vec![1]);
+    assert_eq!(
+        h.counter(Metric::StateOps, &[("tenant", "acme"), ("stage", "liar")]),
+        0
+    );
+    h.finish();
+}

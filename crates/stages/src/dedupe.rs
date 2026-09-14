@@ -238,21 +238,21 @@ fn parse_window(text: &str) -> Result<Duration, String> {
     let count: u64 = digits
         .parse()
         .map_err(|_| "write `<integer><ms|s|m|h>`, e.g. `10s`".to_owned())?;
-    let per_unit = match unit {
-        "ms" => Duration::from_millis(1),
-        "s" => Duration::from_secs(1),
-        "m" => Duration::from_secs(60),
-        "h" => Duration::from_secs(3600),
+    let unit_millis: u64 = match unit {
+        "ms" => 1,
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
         "" => return Err("needs a unit: `ms`, `s`, `m` or `h`".to_owned()),
         other => return Err(format!("unknown unit `{other}`; use `ms`, `s`, `m` or `h`")),
     };
-    let window = per_unit
-        .checked_mul(u32::try_from(count).map_err(|_| "too large".to_owned())?)
+    let millis = count
+        .checked_mul(unit_millis)
         .ok_or_else(|| "too large".to_owned())?;
-    if window < Duration::from_millis(1) {
+    if millis < 1 {
         return Err("must be at least 1ms".to_owned());
     }
-    Ok(window)
+    Ok(Duration::from_millis(millis))
 }
 
 /// One key field as canonical JSON, so equal values hash equal whatever their source.

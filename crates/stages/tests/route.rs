@@ -35,6 +35,7 @@ fn ctx() -> Context<'static> {
             DEFAULT_NAME,
             Metrics::UNKNOWN_TENANT,
             "by_format",
+            false,
         ),
     }
 }

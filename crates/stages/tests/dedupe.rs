@@ -67,3 +67,10 @@ fn a_missing_window_is_rejected_naming_the_node() {
 
     assert!(err.contains("dd") && err.contains("window"), "{err}");
 }
+
+#[test]
+fn a_window_above_u32_units_is_accepted() {
+    // 5_000_000_000 ms is about 58 days: a valid Duration that a u32 unit count refuses.
+    assert!(build("    key: [body]\n    window: 5000000000ms\n").is_ok());
+    assert!(build("    key: [body]\n    window: 100000h\n").is_ok());
+}
