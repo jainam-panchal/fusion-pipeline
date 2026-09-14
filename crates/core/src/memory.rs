@@ -6,7 +6,7 @@
 //! [`MemoryStateStore`] is the state store: one shared map behind every connection it
 //! opens, a clock the test advances by hand, and errors on demand.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -227,6 +227,18 @@ impl StateData {
         self.entries.get_mut(key)
     }
 
+    /// Write `value` at `key`, its ttl starting now.
+    fn write(&mut self, key: &str, value: &[u8], ttl: Duration) {
+        let expires_at = self.now + ttl;
+        self.entries.insert(
+            key.to_owned(),
+            Entry {
+                value: value.to_vec(),
+                expires_at,
+            },
+        );
+    }
+
     fn check(&self) -> Result<(), StateError> {
         if self.failing {
             Err(StateError::new(INJECTED_STATE_FAILURE))
@@ -244,9 +256,24 @@ pub const INJECTED_STATE_FAILURE: &str = "memory state store is set to fail";
 /// do. Time is a fake clock that only [`MemoryStateStore::advance`] moves, so expiry is
 /// deterministic. [`MemoryStateStore::fail_all`] makes every operation fail, to exercise the
 /// engine's failure policy.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct MemoryStateStore {
     data: Arc<Mutex<StateData>>,
+    /// Closures to run, one per refused claim or takeover, in the gap between the store
+    /// answering and the caller reading the answer. See
+    /// [`MemoryStateStore::after_next_holder_reply`].
+    races: Arc<Mutex<VecDeque<Race>>>,
+}
+
+/// A test acting as another worker: gets the store and the key just refused.
+type Race = Box<dyn FnOnce(&MemoryStateStore, &str) + Send>;
+
+impl std::fmt::Debug for MemoryStateStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryStateStore")
+            .field("data", &self.data)
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for StateData {
@@ -278,6 +305,27 @@ impl MemoryStateStore {
         lock_unpoisoned(&self.data).failing = failing;
     }
 
+    /// Run `race` once, after the next claim or takeover the store refuses and before its
+    /// reply (the holder) reaches the caller. That gap is where another worker's write lands
+    /// in production, so the test plays that worker: write a different holder, expire the
+    /// key, whatever the scenario needs. Several calls queue up, one per refusal, in order.
+    /// The queue is one per store, not per key: the next refusal of any key runs the next
+    /// race, so a test that touches several keys must queue with that order in mind.
+    pub fn after_next_holder_reply(
+        &self,
+        race: impl FnOnce(&MemoryStateStore, &str) + Send + 'static,
+    ) {
+        lock_unpoisoned(&self.races).push_back(Box::new(race));
+    }
+
+    /// Run the next queued race for `key`, with no lock held.
+    fn holder_replied(&self, key: &str) {
+        let race = lock_unpoisoned(&self.races).pop_front();
+        if let Some(race) = race {
+            race(self, key);
+        }
+    }
+
     /// Every live key, sorted.
     #[must_use]
     pub fn keys(&self) -> Vec<String> {
@@ -298,31 +346,41 @@ impl StateStore for MemoryStateStore {
         let mut data = lock_unpoisoned(&self.data);
         data.check()?;
         if let Some(existing) = data.live(key) {
-            return Ok(Some(existing.value.clone()));
+            let existing = existing.value.clone();
+            drop(data);
+            self.holder_replied(key);
+            return Ok(Some(existing));
         }
-        let expires_at = data.now + ttl;
-        data.entries.insert(
-            key.to_owned(),
-            Entry {
-                value: value.to_vec(),
-                expires_at,
-            },
-        );
+        data.write(key, value, ttl);
         Ok(None)
     }
 
     fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), StateError> {
         let mut data = lock_unpoisoned(&self.data);
         data.check()?;
-        let expires_at = data.now + ttl;
-        data.entries.insert(
-            key.to_owned(),
-            Entry {
-                value: value.to_vec(),
-                expires_at,
-            },
-        );
+        data.write(key, value, ttl);
         Ok(())
+    }
+
+    fn compare_and_set(
+        &self,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: Duration,
+    ) -> Result<Option<Vec<u8>>, StateError> {
+        let mut data = lock_unpoisoned(&self.data);
+        data.check()?;
+        if let Some(current) = data.live(key) {
+            if current.value != expected {
+                let current = current.value.clone();
+                drop(data);
+                self.holder_replied(key);
+                return Ok(Some(current));
+            }
+        }
+        data.write(key, value, ttl);
+        Ok(None)
     }
 
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StateError> {

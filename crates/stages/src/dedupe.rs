@@ -28,6 +28,11 @@ use serde::Deserialize;
 /// The purpose segment of this stage's keys: `{prefix}dedupe:{hash}`.
 const PURPOSE: &str = "dedupe";
 
+/// How many times a record past the window tries to take the key over before passing
+/// without it. Each refusal means another worker wrote first; two is enough to survive one
+/// such write, and the bound keeps a busy key from holding a worker in a loop.
+const TAKEOVER_ATTEMPTS: usize = 2;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Params {
@@ -135,27 +140,31 @@ impl Stage for Dedupe {
             // Claimed: first sighting in this window.
             return StageOutput::Pass(record);
         };
-        let Some(holder) = Holder::parse(&existing) else {
-            // Not a value this stage wrote. Passing is the safe reading: at worst one extra
-            // copy, never a lost record.
-            return StageOutput::Pass(record);
-        };
-        match incoming.against(&holder, self.window) {
-            Verdict::Repeat => StageOutput::Drop(DropReason::Dedupe),
-            Verdict::WindowOver => {
-                // The holder's window is over in ingestion time but its key still lives on
-                // the server clock. Take the key over so the burst behind this record
-                // dedupes against a fresh window instead of passing until the old TTL runs
-                // out. Two workers doing this at once both pass: an extra copy, never a loss.
-                if let Err(error) = ctx.state.set(&key, &incoming.to_bytes(), self.window) {
-                    return StageOutput::StateError { record, error };
-                }
-                StageOutput::Pass(record)
+        // The holder's window may be over in ingestion time while its key still lives on
+        // the server clock. Then this record takes the key over, so the burst behind it
+        // dedupes against a fresh window instead of passing until the old TTL runs out.
+        // The takeover is conditional on the holder still being the one just read: another
+        // worker may have taken the key over meanwhile, and its record, not the stale one
+        // read here, decides. A refused takeover answers with the current holder, so the
+        // verdict is re-run against it without another round trip; `WindowOver` again is
+        // tried once more, and after that the record passes without holding the key: an
+        // extra copy rather than a loop other workers' writes could keep alive.
+        let mut holder = existing;
+        for _ in 0..TAKEOVER_ATTEMPTS {
+            let verdict = incoming.against_value(&holder, self.window);
+            if verdict != Verdict::WindowOver {
+                return verdict.settle(record);
             }
-            // The same record again (redelivery), or a record older than the holder (an
-            // earlier record coming back after its key expired).
-            Verdict::SameRecord | Verdict::OlderThanHolder => StageOutput::Pass(record),
+            let taken = ctx
+                .state
+                .compare_and_set(&key, &holder, &incoming.to_bytes(), self.window);
+            match taken {
+                Ok(None) => return StageOutput::Pass(record),
+                Ok(Some(current)) => holder = current,
+                Err(error) => return StageOutput::StateError { record, error },
+            }
         }
+        Verdict::WindowOver.settle(record)
     }
 
     fn uses_state(&self) -> bool {
@@ -167,6 +176,18 @@ impl Stage for Dedupe {
     }
 }
 
+/// The bytes this stage stores for the record `id` ingested at `ingestion_time_unix_nano`.
+/// For tests that play another worker writing a holder; the format is this stage's alone.
+#[doc(hidden)]
+#[must_use]
+pub fn holder_value(id: u64, ingestion_time_unix_nano: u64) -> Vec<u8> {
+    Holder {
+        id: RecordId(id),
+        ingestion_time: ingestion_time_unix_nano,
+    }
+    .to_bytes()
+}
+
 /// Who holds a dedupe key: the record that claimed it and its ingestion time. The state
 /// value is `"{id} {ingestion time}"`, written and read here only.
 struct Holder {
@@ -175,6 +196,7 @@ struct Holder {
 }
 
 /// How an incoming record relates to the record holding its key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     /// The holder itself, redelivered.
     SameRecord,
@@ -184,6 +206,25 @@ enum Verdict {
     Repeat,
     /// Ingested `window` or more after the holder: the window is over.
     WindowOver,
+    /// The key holds something this stage did not write.
+    Unreadable,
+}
+
+impl Verdict {
+    /// The output for a verdict: only a repeat drops. The same record again (redelivery)
+    /// and a record older than the holder (an earlier record coming back after its key
+    /// expired) pass, and so does a record facing a value the stage cannot read, since
+    /// passing is at worst one extra copy and never a lost record. `WindowOver` is settled
+    /// only once the takeover attempts are spent, and passes for the same reason: an extra
+    /// copy rather than a loop other workers' writes could keep alive.
+    fn settle(self, record: Record) -> StageOutput {
+        match self {
+            Self::Repeat => StageOutput::Drop(DropReason::Dedupe),
+            Self::SameRecord | Self::OlderThanHolder | Self::Unreadable | Self::WindowOver => {
+                StageOutput::Pass(record)
+            }
+        }
+    }
 }
 
 impl Holder {
@@ -198,6 +239,12 @@ impl Holder {
             id: RecordId(id.parse().ok()?),
             ingestion_time: ingestion_time.parse().ok()?,
         })
+    }
+
+    /// The verdict against the stored `value`; `Unreadable` when it is not a value this
+    /// stage wrote, so the stage never takes a key over from what it cannot read.
+    fn against_value(&self, value: &[u8], window: Duration) -> Verdict {
+        Self::parse(value).map_or(Verdict::Unreadable, |holder| self.against(&holder, window))
     }
 
     fn against(&self, holder: &Self, window: Duration) -> Verdict {

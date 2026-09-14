@@ -112,6 +112,40 @@ fn set_overwrites_the_holder_and_restarts_the_ttl() {
     let _ = store.del(&key);
 }
 
+/// The takeover as one `EVAL`: writes when the key holds what the caller read (or nothing),
+/// restarting the ttl; refuses and answers with the holder when another worker wrote first.
+#[test]
+#[ignore = "needs Dragonfly at DRAGONFLY_URL"]
+fn compare_and_set_writes_only_against_the_holder_it_was_given_and_answers_with_any_other() {
+    let store = store();
+    let key = unique("cas");
+    assert_eq!(
+        store.set_nx(&key, b"101 0", Duration::from_millis(300)),
+        Ok(None)
+    );
+
+    assert_eq!(
+        store.compare_and_set(&key, b"101 0", b"102 10", Duration::from_millis(300)),
+        Ok(None),
+        "the holder matched: written"
+    );
+    assert_eq!(
+        store.compare_and_set(&key, b"101 0", b"103 11", Duration::from_millis(300)),
+        Ok(Some(b"102 10".to_vec())),
+        "the holder moved on: refused, and it comes back"
+    );
+    assert_eq!(store.get(&key), Ok(Some(b"102 10".to_vec())), "untouched");
+
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        store.compare_and_set(&key, b"101 0", b"104 20", Duration::from_millis(300)),
+        Ok(None),
+        "expired meanwhile: nothing holds it, so it is claimed"
+    );
+    assert_eq!(store.get(&key), Ok(Some(b"104 20".to_vec())));
+    let _ = store.del(&key);
+}
+
 #[test]
 #[ignore = "needs Dragonfly at DRAGONFLY_URL"]
 fn a_key_expires_after_its_ttl_and_can_be_claimed_again() {

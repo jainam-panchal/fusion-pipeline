@@ -9,6 +9,8 @@ use std::time::Duration;
 use fusion_core::memory::AckOutcome;
 use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
+use fusion_core::state::StateStore as _;
+use fusion_stages::dedupe as dedupe_stage;
 
 use common::{
     DEDUPE_DROP, WAIT, acme_record as record, acme_record_observed_at, for_each_worker_count, start,
@@ -169,6 +171,190 @@ fn a_repeat_whose_ingestion_time_is_past_the_window_passes_even_while_the_key_is
 
     assert_eq!(h.ids("out"), vec![101, 102]);
     h.finish();
+}
+
+/// The value the stage stores for a record ingested at `observed_s` seconds.
+fn holder(id: u64, observed_s: u64) -> Vec<u8> {
+    dedupe_stage::holder_value(id, observed_s * 1_000_000_000)
+}
+
+/// The holder of the one dedupe key in the store.
+fn stored_holder(h: &common::Harness) -> Vec<u8> {
+    let keys = h.state.keys();
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    h.state
+        .get(&keys[0])
+        .expect("store answers")
+        .expect("key is live")
+}
+
+/// Two workers each hold a record past 101's window with the same content. Both read 101
+/// as the holder; worker B takes the key over with 102 first; worker A, with 103, finds 102
+/// there, is inside its window, and drops. Exactly one of the pair passes.
+#[test]
+fn two_records_past_the_window_racing_on_two_workers_pass_exactly_once() {
+    for_each_worker_count(|workers| {
+        let h = start(DEDUPE_BODY, workers);
+        assert_eq!(
+            h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+            Some(AckOutcome::Ack)
+        );
+        h.state.after_next_holder_reply(|data, key| {
+            data.set(key, &holder(102, 10), Duration::from_secs(10))
+                .expect("worker B takes the key over");
+        });
+
+        assert_eq!(
+            h.source.push(record_at(103, "disk full", 11)).wait(WAIT),
+            Some(AckOutcome::Ack)
+        );
+
+        assert_eq!(h.ids("out"), vec![101], "103 is a repeat of 102");
+        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        assert_eq!(stored_holder(&h), holder(102, 10), "102 keeps the key");
+        h.finish();
+    });
+}
+
+/// A slow worker read 101 as the holder for its record 102 (ingested at 10 s); by the time
+/// it takes over, 105 (ingested at 20 s) holds the key. 102 is older than 105, so it
+/// passes, and the key must stay with 105: a repeat at 25 s is inside 105's window and
+/// drops. A plain write would have moved the window back to 10 s and let it through.
+#[test]
+fn a_stale_takeover_against_a_newer_holder_does_not_move_the_window_back() {
+    for_each_worker_count(|workers| {
+        let h = start(DEDUPE_BODY, workers);
+        assert_eq!(
+            h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+            Some(AckOutcome::Ack)
+        );
+        h.state.after_next_holder_reply(|data, key| {
+            data.set(key, &holder(105, 20), Duration::from_secs(10))
+                .expect("a faster worker took the key over with a newer record");
+        });
+
+        assert_eq!(
+            h.source.push(record_at(102, "disk full", 10)).wait(WAIT),
+            Some(AckOutcome::Ack),
+            "102 is older than the holder 105: an extra copy, never a loss"
+        );
+        assert_eq!(
+            h.source.push(record_at(106, "disk full", 25)).wait(WAIT),
+            Some(AckOutcome::Ack),
+            "106 is inside 105's window"
+        );
+
+        assert_eq!(h.ids("out"), vec![101, 102]);
+        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        assert_eq!(
+            stored_holder(&h),
+            holder(105, 20),
+            "the window stayed at 20 s"
+        );
+        h.finish();
+    });
+}
+
+/// The key expired on the store's clock between the claim and the takeover. Nothing holds
+/// it, so the takeover claims it and the record passes.
+#[test]
+fn a_takeover_of_a_key_that_expired_since_the_claim_still_claims_it() {
+    for_each_worker_count(|workers| {
+        let h = start(DEDUPE_BODY, workers);
+        assert_eq!(
+            h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+            Some(AckOutcome::Ack)
+        );
+        h.state
+            .after_next_holder_reply(|data, _| data.advance(Duration::from_secs(10)));
+
+        assert_eq!(
+            h.source.push(record_at(102, "disk full", 10)).wait(WAIT),
+            Some(AckOutcome::Ack)
+        );
+        assert_eq!(
+            h.source.push(record_at(103, "disk full", 11)).wait(WAIT),
+            Some(AckOutcome::Ack),
+            "inside 102's window"
+        );
+
+        assert_eq!(h.ids("out"), vec![101, 102]);
+        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        h.finish();
+    });
+}
+
+/// The holder moved between the claim and the takeover, but to a record that is itself a
+/// full window older than this one (an old record claimed the expired key during a
+/// replay). The first takeover is refused; the verdict against the new holder is
+/// `WindowOver` again, so the stage tries once more against it and wins. The burst behind
+/// then dedupes against this record, not the old one.
+#[test]
+fn a_takeover_refused_by_a_holder_that_is_also_past_the_window_is_retried_once() {
+    for_each_worker_count(|workers| {
+        let h = start(DEDUPE_BODY, workers);
+        assert_eq!(
+            h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+            Some(AckOutcome::Ack)
+        );
+        h.state.after_next_holder_reply(|data, key| {
+            data.set(key, &holder(99, 0), Duration::from_secs(10))
+                .expect("an old record claimed the key meanwhile");
+        });
+
+        assert_eq!(
+            h.source.push(record_at(102, "disk full", 10)).wait(WAIT),
+            Some(AckOutcome::Ack)
+        );
+        assert_eq!(
+            h.source.push(record_at(103, "disk full", 11)).wait(WAIT),
+            Some(AckOutcome::Ack),
+            "inside 102's window"
+        );
+
+        assert_eq!(h.ids("out"), vec![101, 102], "workers={workers}");
+        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        assert_eq!(stored_holder(&h), holder(102, 10), "102 took the key over");
+        h.finish();
+    });
+}
+
+/// Refused twice, the stage stops: the record passes without holding the key, an extra
+/// copy rather than a loop another worker's writes could keep alive. The next record with
+/// this content takes the key over from what it then reads.
+#[test]
+fn a_takeover_refused_twice_passes_without_a_third_attempt() {
+    for_each_worker_count(|workers| {
+        let h = start(DEDUPE_BODY, workers);
+        assert_eq!(
+            h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+            Some(AckOutcome::Ack)
+        );
+        // After the claim is refused, and again after the first takeover is refused.
+        h.state.after_next_holder_reply(|data, key| {
+            data.set(key, &holder(99, 0), Duration::from_secs(10))
+                .expect("writes");
+        });
+        h.state.after_next_holder_reply(|data, key| {
+            data.set(key, &holder(98, 0), Duration::from_secs(10))
+                .expect("writes");
+        });
+
+        assert_eq!(
+            h.source.push(record_at(102, "disk full", 10)).wait(WAIT),
+            Some(AckOutcome::Ack)
+        );
+
+        assert_eq!(h.ids("out"), vec![101, 102], "workers={workers}");
+        assert_eq!(stored_holder(&h), holder(98, 0), "102 gave up the takeover");
+        let stage = [("tenant", "acme"), ("stage", "dedupe_body")];
+        assert_eq!(
+            h.counter(Metric::StateOps, &stage),
+            1 + 3,
+            "101's claim, then 102's claim and two takeovers"
+        );
+        h.finish();
+    });
 }
 
 #[test]

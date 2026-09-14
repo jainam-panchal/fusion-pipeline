@@ -229,6 +229,22 @@ impl State {
         self.timed(|| self.store.set(&key, value, ttl))
     }
 
+    /// [`StateStore::compare_and_set`] under this handle's prefix.
+    ///
+    /// # Errors
+    ///
+    /// The store's [`StateError`], already counted.
+    pub fn compare_and_set(
+        &self,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: Duration,
+    ) -> Result<Option<Vec<u8>>, StateError> {
+        let key = self.key(key);
+        self.timed(|| self.store.compare_and_set(&key, expected, value, ttl))
+    }
+
     /// [`StateStore::get`] under this handle's prefix.
     ///
     /// # Errors
