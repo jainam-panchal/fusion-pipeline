@@ -144,8 +144,9 @@ nodes:
 `dedupe` keeps one key per distinct content (the hash of the `key` values) holding the id
 and ingestion time of the record that claimed it, with `window` as its TTL. The first record
 passes; a different record with the same content inside the window drops with reason
-`dedupe` and is acked; after the window the next one passes and opens a new window. The
-window is measured in ingestion time (`observed_time_unix_nano`, which the NATS source
+`dedupe` and is acked; after the window the next one passes and takes the key over, so the
+records behind it dedupe against the new window even while the old key's TTL is still
+running. The window is measured in ingestion time (`observed_time_unix_nano`, which the NATS source
 fills from the JetStream publish time when a record has no timestamp), so a record
 redelivered after a crash carries the same time it had before and is recognised as itself
 however long the redelivery took, even if a newer duplicate claimed the key meanwhile.

@@ -1,7 +1,7 @@
 //! The state store contract against a real Dragonfly (`DRAGONFLY_URL`, default
 //! `redis://127.0.0.1:6379`): the same operations the in-memory store is held to, plus the
 //! things only a network store can get wrong. All but the unreachable-server test need
-//! `deploy/compose.yaml` up and are ignored by default.
+//! `deploy/compose.yaml` up and are ignored by default. URL resolution is in `url.rs`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -38,26 +38,6 @@ fn an_unreachable_server_fails_at_open_naming_the_url() {
 }
 
 #[test]
-fn a_malformed_url_is_rejected_before_any_connection() {
-    let err = Dragonfly::new("not a url").expect_err("rejected");
-
-    assert!(err.message().contains("not a url"), "{err}");
-}
-
-#[test]
-fn the_default_url_is_the_compose_port() {
-    assert_eq!(fusion_state::resolve_url(None), "redis://127.0.0.1:6379");
-    assert_eq!(
-        fusion_state::resolve_url(Some("")),
-        "redis://127.0.0.1:6379"
-    );
-    assert_eq!(
-        fusion_state::resolve_url(Some("redis://dragonfly:6379")),
-        "redis://dragonfly:6379"
-    );
-}
-
-#[test]
 #[ignore = "needs Dragonfly at DRAGONFLY_URL"]
 fn set_nx_claims_once_and_answers_with_the_holder_in_one_step() {
     let store = store();
@@ -74,6 +54,31 @@ fn set_nx_claims_once_and_answers_with_the_holder_in_one_step() {
     assert_eq!(store.get(&key), Ok(Some(b"101 0".to_vec())));
     assert_eq!(store.del(&key), Ok(()));
     assert_eq!(store.get(&key), Ok(None));
+}
+
+#[test]
+#[ignore = "needs Dragonfly at DRAGONFLY_URL"]
+fn set_overwrites_the_holder_and_restarts_the_ttl() {
+    let store = store();
+    let key = unique("set");
+    assert_eq!(
+        store.set_nx(&key, b"101 0", Duration::from_millis(300)),
+        Ok(None)
+    );
+    std::thread::sleep(Duration::from_millis(200));
+
+    assert_eq!(
+        store.set(&key, b"102 10", Duration::from_millis(300)),
+        Ok(())
+    );
+
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        store.get(&key),
+        Ok(Some(b"102 10".to_vec())),
+        "still alive 400ms after the claim: set restarted the ttl"
+    );
+    let _ = store.del(&key);
 }
 
 #[test]

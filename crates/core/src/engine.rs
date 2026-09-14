@@ -208,6 +208,10 @@ impl StateStore for NoStateStore {
         Err(no_state_store())
     }
 
+    fn set(&self, _: &str, _: &[u8], _: Duration) -> Result<(), StateError> {
+        Err(no_state_store())
+    }
+
     fn get(&self, _: &str) -> Result<Option<Vec<u8>>, StateError> {
         Err(no_state_store())
     }

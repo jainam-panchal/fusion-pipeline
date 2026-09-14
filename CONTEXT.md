@@ -125,7 +125,7 @@ The `stage` label on per-node metrics: the node id, or the reserved `source`, it
 ### State
 
 **State store**:
-The external key-value service behind stateful stages: `set_nx`, `get`, `incr`, `del`. One keyspace shared by every worker and every replica. Dragonfly in deploy, in-memory in tests.
+The external key-value service behind stateful stages: `set_nx`, `set`, `get`, `incr`, `del`. One keyspace shared by every worker and every replica. Dragonfly in deploy, in-memory in tests.
 _Avoid_: cache, Redis (the protocol, not the store)
 
 **State handle**:

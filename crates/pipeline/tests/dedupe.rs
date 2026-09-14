@@ -10,7 +10,9 @@ use fusion_core::memory::AckOutcome;
 use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
 
-use common::{DEDUPE_DROP, WAIT, acme_record as record, for_each_worker_count, start};
+use common::{
+    DEDUPE_DROP, WAIT, acme_record as record, acme_record_observed_at, for_each_worker_count, start,
+};
 
 const DEDUPE_BODY: &str = r#"
 name: ingest
@@ -49,12 +51,7 @@ fn two_different_records_with_the_same_key_inside_the_window_pass_once_and_drop_
 
 /// A record with an explicit ingestion time, in seconds.
 fn record_at(id: u64, body: &str, observed_s: u64) -> Record {
-    Record::from_json(&format!(
-        r#"{{"id": {id}, "body": "{body}", "observed_time_unix_nano": {},
-             "resource": {{"tenant.id": "acme"}}}}"#,
-        observed_s * 1_000_000_000
-    ))
-    .expect("record parses")
+    acme_record_observed_at(id, body, observed_s * 1_000_000_000)
 }
 
 #[test]
@@ -126,6 +123,33 @@ fn a_record_redelivered_after_its_window_expired_and_a_newer_duplicate_took_the_
 
     assert_eq!(h.ids("out"), vec![101, 101, 102]);
     assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+    h.finish();
+}
+
+/// The backlog-replay case: a burst arrives within wall-clock seconds whose ingestion times
+/// span several windows. The first record past the holder's window opens a new one, so the
+/// records after it inside that new window drop; passing them all until the old key's
+/// wall-clock TTL ran out would let a whole burst through.
+#[test]
+fn a_record_past_the_window_opens_a_new_one_so_the_burst_behind_it_still_dedupes() {
+    let h = start(DEDUPE_BODY, 1);
+
+    assert_eq!(
+        h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+    for (id, s) in [(102, 10), (103, 11), (104, 15), (105, 20), (106, 29)] {
+        assert_eq!(
+            h.source.push(record_at(id, "disk full", s)).wait(WAIT),
+            Some(AckOutcome::Ack),
+            "record {id}"
+        );
+    }
+
+    // 101 opens [0, 10); 102 at 10 opens [10, 20) and 103, 104 drop; 105 at 20 opens
+    // [20, 30) and 106 drops.
+    assert_eq!(h.ids("out"), vec![101, 102, 105]);
+    assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 3);
     h.finish();
 }
 

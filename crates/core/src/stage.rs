@@ -186,6 +186,11 @@ impl State {
         result
     }
 
+    /// `key` under this handle's prefix.
+    fn key(&self, key: &str) -> String {
+        format!("{}{key}", self.prefix)
+    }
+
     /// [`StateStore::set_nx`] under this handle's prefix.
     ///
     /// # Errors
@@ -197,8 +202,18 @@ impl State {
         value: &[u8],
         ttl: Duration,
     ) -> Result<Option<Vec<u8>>, StateError> {
-        let key = format!("{}{key}", self.prefix);
+        let key = self.key(key);
         self.timed(|| self.store.set_nx(&key, value, ttl))
+    }
+
+    /// [`StateStore::set`] under this handle's prefix.
+    ///
+    /// # Errors
+    ///
+    /// The store's [`StateError`], already counted.
+    pub fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), StateError> {
+        let key = self.key(key);
+        self.timed(|| self.store.set(&key, value, ttl))
     }
 
     /// [`StateStore::get`] under this handle's prefix.
@@ -207,7 +222,7 @@ impl State {
     ///
     /// The store's [`StateError`], already counted.
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StateError> {
-        let key = format!("{}{key}", self.prefix);
+        let key = self.key(key);
         self.timed(|| self.store.get(&key))
     }
 
@@ -217,7 +232,7 @@ impl State {
     ///
     /// The store's [`StateError`], already counted.
     pub fn incr(&self, key: &str, by: i64, ttl: Duration) -> Result<i64, StateError> {
-        let key = format!("{}{key}", self.prefix);
+        let key = self.key(key);
         self.timed(|| self.store.incr(&key, by, ttl))
     }
 
@@ -227,7 +242,7 @@ impl State {
     ///
     /// The store's [`StateError`], already counted.
     pub fn del(&self, key: &str) -> Result<(), StateError> {
-        let key = format!("{}{key}", self.prefix);
+        let key = self.key(key);
         self.timed(|| self.store.del(&key))
     }
 }
@@ -260,24 +275,6 @@ pub struct Context<'a> {
     /// The state handle: the worker's store connection, scoped to this pipeline, tenant
     /// and node.
     pub state: State,
-}
-
-impl<'a> Context<'a> {
-    /// A context over a fresh in-memory store and no metrics, for testing a stage on its own.
-    #[must_use]
-    pub fn in_memory(node_id: &'a str, record_id: RecordId) -> Self {
-        Self {
-            node_id,
-            record_id,
-            state: State::new(
-                Arc::new(crate::memory::MemoryStateStore::new()),
-                Metrics::noop(),
-                crate::config::DEFAULT_NAME,
-                Metrics::UNKNOWN_TENANT,
-                node_id,
-            ),
-        }
-    }
 }
 
 /// A pipeline stage. Shared across worker threads, so it must be `Send + Sync`; per-worker

@@ -122,12 +122,12 @@ impl Dedupe {
 
 impl Stage for Dedupe {
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
-        let me = Holder {
+        let incoming = Holder {
             id: ctx.record_id,
-            ts: ingestion_time(&record),
+            ingestion_time: ingestion_time(&record),
         };
         let key = self.state_key(&record);
-        let existing = match ctx.state.set_nx(&key, &me.to_bytes(), self.window) {
+        let existing = match ctx.state.set_nx(&key, &incoming.to_bytes(), self.window) {
             Ok(existing) => existing,
             Err(error) => return StageOutput::StateError { record, error },
         };
@@ -140,12 +140,21 @@ impl Stage for Dedupe {
             // copy, never a lost record.
             return StageOutput::Pass(record);
         };
-        if me.repeats(&holder, self.window) {
-            StageOutput::Drop(DropReason::Dedupe)
-        } else {
-            // The same record again (redelivery), a record older than the holder (an
-            // earlier record coming back), or the window is over in ingestion time.
-            StageOutput::Pass(record)
+        match incoming.against(&holder, self.window) {
+            Verdict::Repeat => StageOutput::Drop(DropReason::Dedupe),
+            Verdict::WindowOver => {
+                // The holder's window is over in ingestion time but its key still lives on
+                // the server clock. Take the key over so the burst behind this record
+                // dedupes against a fresh window instead of passing until the old TTL runs
+                // out. Two workers doing this at once both pass: an extra copy, never a loss.
+                if let Err(error) = ctx.state.set(&key, &incoming.to_bytes(), self.window) {
+                    return StageOutput::StateError { record, error };
+                }
+                StageOutput::Pass(record)
+            }
+            // The same record again (redelivery), or a record older than the holder (an
+            // earlier record coming back after its key expired).
+            Verdict::SameRecord | Verdict::OlderThanHolder => StageOutput::Pass(record),
         }
     }
 
@@ -159,32 +168,48 @@ impl Stage for Dedupe {
 }
 
 /// Who holds a dedupe key: the record that claimed it and its ingestion time. The state
-/// value is `"{id} {ts}"`, written and read here only.
+/// value is `"{id} {ingestion time}"`, written and read here only.
 struct Holder {
     id: RecordId,
-    ts: u64,
+    ingestion_time: u64,
+}
+
+/// How an incoming record relates to the record holding its key.
+enum Verdict {
+    /// The holder itself, redelivered.
+    SameRecord,
+    /// Ingested before the holder: an earlier record coming back.
+    OlderThanHolder,
+    /// A different record ingested inside the holder's window.
+    Repeat,
+    /// Ingested `window` or more after the holder: the window is over.
+    WindowOver,
 }
 
 impl Holder {
     fn to_bytes(&self) -> Vec<u8> {
-        format!("{} {}", self.id, self.ts).into_bytes()
+        format!("{} {}", self.id, self.ingestion_time).into_bytes()
     }
 
     fn parse(value: &[u8]) -> Option<Self> {
         let text = std::str::from_utf8(value).ok()?;
-        let (id, ts) = text.split_once(' ')?;
+        let (id, ingestion_time) = text.split_once(' ')?;
         Some(Self {
             id: RecordId(id.parse().ok()?),
-            ts: ts.parse().ok()?,
+            ingestion_time: ingestion_time.parse().ok()?,
         })
     }
 
-    /// Whether this record is a repeat of `holder`'s content inside `window`: a different
-    /// record whose ingestion time falls in the holder's window.
-    fn repeats(&self, holder: &Self, window: Duration) -> bool {
-        self.id != holder.id
-            && self.ts >= holder.ts
-            && self.ts.saturating_sub(holder.ts) < window_nanos(window)
+    fn against(&self, holder: &Self, window: Duration) -> Verdict {
+        if self.id == holder.id {
+            Verdict::SameRecord
+        } else if self.ingestion_time < holder.ingestion_time {
+            Verdict::OlderThanHolder
+        } else if self.ingestion_time - holder.ingestion_time < window_nanos(window) {
+            Verdict::Repeat
+        } else {
+            Verdict::WindowOver
+        }
     }
 }
 

@@ -8,8 +8,8 @@
 //! call after any I/O error or timeout. Reopening matters: a reply that arrives after a read
 //! timeout would otherwise be read as the answer to the *next* command. Every operation is
 //! one server-side atomic step: `SET NX PX GET` for the claim (an `EVAL` with the same
-//! meaning when the server refuses the combination), `MULTI INCRBY PEXPIRE EXEC` for the
-//! counter.
+//! meaning when the server refuses the combination), `SET PX` for the plain write,
+//! `MULTI INCRBY PEXPIRE EXEC` for the counter.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -230,6 +230,19 @@ impl StateStore for DragonflyStore {
                 .arg(millis)
                 .query::<Value>(connection)?;
             existing_from(reply)
+        })
+    }
+
+    fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), StateError> {
+        let millis = ttl_millis(ttl);
+        self.with_connection(|connection| {
+            redis::cmd("SET")
+                .arg(key)
+                .arg(value)
+                .arg("PX")
+                .arg(millis)
+                .query::<String>(connection)?;
+            Ok(())
         })
     }
 

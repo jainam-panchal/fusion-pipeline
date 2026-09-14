@@ -38,8 +38,9 @@ impl StateError {
     }
 }
 
-/// One worker's connection to the shared state store. The four operations the spec names.
-/// `Sync` because the handle a stage receives shares the worker's connection behind an
+/// One worker's connection to the shared state store: the four operations the spec names
+/// plus `set`, the unconditional write a stage needs to take over a key it has decided is
+/// stale. `Sync` because the handle a stage receives shares the worker's connection behind an
 /// `Arc`; implementations keep their connection behind a mutex.
 pub trait StateStore: Send + Sync {
     /// Set `key` to `value` with `ttl` only if it does not exist. `None` when this call
@@ -51,6 +52,14 @@ pub trait StateStore: Send + Sync {
     /// [`StateError`] when the store cannot answer.
     fn set_nx(&self, key: &str, value: &[u8], ttl: Duration)
     -> Result<Option<Vec<u8>>, StateError>;
+
+    /// Set `key` to `value` with `ttl` whether or not it exists. Last writer wins; use
+    /// [`StateStore::set_nx`] to claim.
+    ///
+    /// # Errors
+    ///
+    /// [`StateError`] when the store cannot answer.
+    fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), StateError>;
 
     /// The value of `key`, or `None` when it does not exist or has expired.
     ///

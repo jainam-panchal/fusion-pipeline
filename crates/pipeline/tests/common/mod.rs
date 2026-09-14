@@ -103,6 +103,15 @@ pub fn acme_record(id: u64, body: &str) -> Record {
     .expect("record parses")
 }
 
+/// [`acme_record`] with an explicit ingestion time (`observed_time_unix_nano`).
+pub fn acme_record_observed_at(id: u64, body: &str, observed_unix_nanos: u64) -> Record {
+    Record::from_json(&format!(
+        r#"{{"id": {id}, "body": "{body}", "observed_time_unix_nano": {observed_unix_nanos},
+             "resource": {{"tenant.id": "acme"}}}}"#
+    ))
+    .expect("record parses")
+}
+
 /// The labels of a `dedupe` drop by the node `dedupe_body` for tenant `acme`.
 pub const DEDUPE_DROP: [(&str, &str); 3] = [
     ("tenant", "acme"),

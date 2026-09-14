@@ -229,17 +229,15 @@ impl StateData {
 
     fn check(&self) -> Result<(), StateError> {
         if self.failing {
-            Err(StateError::new(InjectedStateFailure.to_string()))
+            Err(StateError::new(INJECTED_STATE_FAILURE))
         } else {
             Ok(())
         }
     }
 }
 
-/// The error a failing memory state store returns.
-#[derive(Debug, thiserror::Error)]
-#[error("memory state store is set to fail")]
-pub struct InjectedStateFailure;
+/// The message every operation fails with after [`MemoryStateStore::fail_all`].
+pub const INJECTED_STATE_FAILURE: &str = "memory state store is set to fail";
 
 /// A [`StateStore`] and [`StateStoreFactory`] over one shared map. Every connection it
 /// opens, and the store itself, read and write the same data, as workers on one Dragonfly
@@ -311,6 +309,20 @@ impl StateStore for MemoryStateStore {
             },
         );
         Ok(None)
+    }
+
+    fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), StateError> {
+        let mut data = lock_unpoisoned(&self.data);
+        data.check()?;
+        let expires_at = data.now + ttl;
+        data.entries.insert(
+            key.to_owned(),
+            Entry {
+                value: value.to_vec(),
+                expires_at,
+            },
+        );
+        Ok(())
     }
 
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StateError> {

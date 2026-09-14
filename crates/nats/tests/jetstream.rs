@@ -16,7 +16,6 @@ use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
-use fusion_nats::source::stamp_ingestion_time;
 use fusion_nats::{Nats, NatsError};
 use futures::StreamExt;
 
@@ -133,33 +132,6 @@ impl JetStreamClient {
             consumer.info().await.expect("consumer info").clone()
         })
     }
-}
-
-#[test]
-fn ingestion_time_is_stamped_only_when_the_record_has_no_timestamp_at_all() {
-    let mut bare = Record::from_json(r#"{"id": 1, "body": "x"}"#).expect("parses");
-    stamp_ingestion_time(&mut bare, 1_700_000_000_000_000_000);
-    assert_eq!(
-        bare.observed_time_unix_nano,
-        Some(1_700_000_000_000_000_000)
-    );
-
-    let mut observed = Record::from_json(r#"{"id": 1, "body": "x", "observed_time_unix_nano": 5}"#)
-        .expect("parses");
-    stamp_ingestion_time(&mut observed, 1_700_000_000_000_000_000);
-    assert_eq!(
-        observed.observed_time_unix_nano,
-        Some(5),
-        "its own word stands"
-    );
-
-    let mut event_timed =
-        Record::from_json(r#"{"id": 1, "body": "x", "time_unix_nano": 7}"#).expect("parses");
-    stamp_ingestion_time(&mut event_timed, 1_700_000_000_000_000_000);
-    assert_eq!(
-        event_timed.observed_time_unix_nano, None,
-        "a record with an event time is not given an observed time"
-    );
 }
 
 /// These pipelines have no stateful node; the engine never opens the store.
@@ -371,7 +343,8 @@ fn connect_fails_fast_when_the_server_is_unreachable() {
 }
 
 /// Source into the engine into an in-memory sink: the record arrives with the tenant stamped
-/// from the subject and the consumer shows it acknowledged.
+/// from the subject and the JetStream publish time as its ingestion time, a record that
+/// carries its own timestamp keeps it, and the consumer shows both acknowledged.
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
@@ -392,13 +365,21 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
         &fixture.in_subject("acme"),
         r#"{"id": 42, "body": "no tenant here"}"#,
     );
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
+        r#"{"id": 43, "body": "dated", "observed_time_unix_nano": 5}"#,
+    );
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
+        r#"{"id": 44, "body": "event timed", "time_unix_nano": 7}"#,
+    );
 
     assert!(
-        wait_until(SETTLE_TIMEOUT, || !sinks.records("out").is_empty()),
-        "record reaches the memory sink"
+        wait_until(SETTLE_TIMEOUT, || sinks.records("out").len() == 3),
+        "records reach the memory sink"
     );
-    let records = sinks.records("out");
-    assert_eq!(records.len(), 1);
+    let mut records = sinks.records("out");
+    records.sort_by_key(|r| r.id);
     assert_eq!(records[0].tenant(), Some("acme"));
     assert_eq!(records[0].id.map(|id| id.0), Some(42));
     let observed = records[0]
@@ -411,6 +392,15 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
     assert!(
         u128::from(observed) <= now && now - u128::from(observed) < 60_000_000_000,
         "publish time {observed} is recent"
+    );
+    assert_eq!(
+        records[1].observed_time_unix_nano,
+        Some(5),
+        "a record's own observed time stands"
+    );
+    assert_eq!(
+        records[2].observed_time_unix_nano, None,
+        "a record with an event time is not given an observed time"
     );
 
     assert!(

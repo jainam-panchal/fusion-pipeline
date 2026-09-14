@@ -16,8 +16,8 @@ The first stateful stage (`dedupe`, issue #6) fixed three things every later sta
 ## Consequences
 
 - `Context` is `Clone`, not `Copy`; the `Stage` trait gains `uses_state` and `on_state_error`, both with defaults, and `StageOutput` a sixth variant. CLAUDE.md's stage invariant lists it.
-- Two imperfections, both an extra copy and never a loss: an older record arriving after a newer one with the same content passes, and a duplicate delayed longer than the window passes. At-least-once prefers the copy.
+- Three imperfections, all an extra copy and never a loss: an older record arriving after a newer one with the same content passes, a duplicate delayed longer than the window passes, and two records past the window arriving on two workers at once both pass. At-least-once prefers the copy.
 - Producer clocks decide windows. A producer with a skewed clock affects dedupe only within its own tenant and only by its skew.
-- The four operations are the whole interface. `incr` sets the ttl on every call; the sample node's redelivery guard (#7) will need a plain `set`, to be added there.
+- Five operations: the spec's four plus `set`, the unconditional write. A record past the holder's window must take the key over, or the holder's key lives on until its server-side TTL and every record of a replayed burst passes; `set_nx` cannot do that and `del` then `set_nx` races (a second worker's `del` would erase the first's fresh claim). `incr` sets the ttl on every call.
 - A paused store (the chaos test) becomes a `StateError` within the 2 s operation timeout and the connection is reopened on the next call, because a reply that arrives after a timeout would otherwise answer the next command. The compose pipeline sets `on_state_error: nak` so the pause holds records back instead of forwarding duplicates.
 - Later modes (sliding, fixed buckets, count instead of drop) and a scope override are new fields with today's behaviour as the default; none changes the keys written now.

@@ -1,15 +1,18 @@
 //! The dedupe acceptance criteria through the engine on a real Dragonfly (`DRAGONFLY_URL`):
-//! the in-memory source and sink as in `dedupe.rs`, the store as in deploy. Needs
-//! `deploy/compose.yaml` up; ignored by default.
+//! the in-memory source and sink as in `dedupe.rs`, the store as in deploy. All but the
+//! unreachable-store test need `deploy/compose.yaml` up and are ignored by default.
 
 mod common;
 
 use std::sync::Arc;
 
-use common::{DEDUPE_DROP, WAIT, acme_record as record, registry, start_with_state};
-use fusion_core::memory::{AckOutcome, MemorySinks};
-use fusion_core::metrics::Metric;
-use fusion_core::record::Record;
+use common::{
+    DEDUPE_DROP, WAIT, acme_record as record, acme_record_observed_at, registry, start_with_state,
+};
+use fusion_core::engine::{Engine, EngineError};
+use fusion_core::memory::{AckOutcome, MemorySinks, MemorySource};
+use fusion_core::metrics::{Metric, Metrics};
+use fusion_core::pipeline::Pipeline;
 use fusion_state::Dragonfly;
 
 fn yaml(pipeline_name: &str) -> String {
@@ -63,6 +66,28 @@ fn on_dragonfly_a_repeat_drops_a_redelivery_passes_and_workers_share_the_window(
     h.finish();
 }
 
+/// The store is opened at engine start, once per worker; nothing listens on port 1, so the
+/// engine never starts and the error names the URL. No NATS involved.
+#[test]
+fn an_unreachable_store_stops_the_engine_before_any_worker_starts_naming_the_url() {
+    let sinks = MemorySinks::new();
+    let registry = registry(&sinks);
+    let pipeline = Pipeline::from_yaml(&yaml("t"), &registry).expect("pipeline loads");
+    let (source, _input) = MemorySource::new();
+    let unreachable = Arc::new(Dragonfly::new("redis://127.0.0.1:1").expect("url parses"));
+
+    let err = match Engine::start(pipeline, Box::new(source), 2, Metrics::noop(), unreachable) {
+        Ok(_) => panic!("nothing listens on port 1"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(err, EngineError::State { index: 0, .. }),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("127.0.0.1:1"), "{err}");
+}
+
 #[test]
 #[ignore = "needs Dragonfly at DRAGONFLY_URL"]
 fn on_dragonfly_a_repeat_after_the_window_passes_again() {
@@ -70,13 +95,7 @@ fn on_dragonfly_a_repeat_after_the_window_passes_again() {
     let state = Arc::new(Dragonfly::from_env().expect("url parses"));
     let short = yaml(&unique_name()).replace("window: 10s", "window: 300ms");
     let h = start_with_state(&short, 1, sinks.clone(), registry(&sinks), state);
-    let at = |id: u64, ms: u64| {
-        Record::from_json(&format!(
-            r#"{{"id": {id}, "body": "x", "observed_time_unix_nano": {}, "resource": {{"tenant.id": "acme"}}}}"#,
-            ms * 1_000_000
-        ))
-        .expect("record parses")
-    };
+    let at = |id: u64, ms: u64| acme_record_observed_at(id, "x", ms * 1_000_000);
 
     assert_eq!(h.source.push(at(1, 0)).wait(WAIT), Some(AckOutcome::Ack));
     assert_eq!(h.source.push(at(2, 100)).wait(WAIT), Some(AckOutcome::Ack));

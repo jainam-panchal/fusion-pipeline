@@ -23,6 +23,25 @@ fn set_nx_claims_a_key_once_and_then_answers_with_the_value_that_holds_it() {
 }
 
 #[test]
+fn set_overwrites_whatever_holds_the_key_and_restarts_its_ttl() {
+    let store = MemoryStateStore::new();
+    assert_eq!(store.set_nx("k", b"101", TTL), Ok(None));
+    store.advance(TTL - Duration::from_millis(1));
+
+    assert_eq!(store.set("k", b"102", TTL), Ok(()));
+
+    assert_eq!(store.get("k"), Ok(Some(b"102".to_vec())));
+    store.advance(TTL - Duration::from_millis(1));
+    assert_eq!(
+        store.get("k"),
+        Ok(Some(b"102".to_vec())),
+        "ttl restarted by set"
+    );
+    store.advance(Duration::from_millis(1));
+    assert_eq!(store.get("k"), Ok(None));
+}
+
+#[test]
 fn get_of_an_unknown_key_is_none() {
     let store = MemoryStateStore::new();
 
@@ -97,6 +116,7 @@ fn a_failing_store_returns_an_error_from_every_operation() {
     store.fail_all(true);
 
     assert!(store.set_nx("k", b"1", TTL).is_err());
+    assert!(store.set("k", b"1", TTL).is_err());
     assert!(store.get("k").is_err());
     assert!(store.incr("n", 1, TTL).is_err());
     assert!(store.del("k").is_err());
