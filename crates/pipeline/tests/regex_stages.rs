@@ -251,3 +251,117 @@ fn a_tripped_match_limit_drops_the_record_and_the_stage_keeps_serving() {
     assert_eq!(h.counter(Metric::RecordsDropped, &dropped), 1);
     h.finish();
 }
+
+const REDACT: &str = r#"
+nodes:
+  - id: mask_phones
+    type: redact
+    fields: [body, attributes.msg]
+    pattern: '\d{3}-\d{4}'
+    replace: '[phone]'
+  - id: out
+    type: sink.memory
+"#;
+
+fn redact_record(id: u64, body: &str, msg: Value, other: &str) -> Record {
+    Record::from_json(
+        &json!({
+            "id": id,
+            "body": body,
+            "attributes": {"msg": msg, "other": other},
+            "resource": {"tenant.id": "acme"},
+        })
+        .to_string(),
+    )
+    .expect("record parses")
+}
+
+#[test]
+fn redact_replaces_every_match_in_each_listed_field_and_nothing_else() {
+    for_each_worker_count(|workers| {
+        let h = start(REDACT, workers);
+        let probe = h.source.push(redact_record(
+            1,
+            "call 555-1234 or 555-9876",
+            json!("cell 555-0000"),
+            "555-1111 stays",
+        ));
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
+
+        let out = &h.sinks.records("out")[0];
+        assert_eq!(out.body, Some(json!("call [phone] or [phone]")));
+        assert_eq!(out.attributes["msg"], json!("cell [phone]"));
+        assert_eq!(out.attributes["other"], json!("555-1111 stays"));
+        let labels = [
+            ("tenant", "acme"),
+            ("stage", "mask_phones"),
+            ("engine", "linear"),
+        ];
+        assert_eq!(h.counter(Metric::RegexNonmatch, &labels), 0);
+        h.finish();
+    });
+}
+
+#[test]
+fn redact_counts_a_record_where_no_listed_field_matched_once_and_skips_non_strings() {
+    let h = start(REDACT, 1);
+    let probe = h
+        .source
+        .push(redact_record(1, "no phone", json!(42), "555-1111 stays"));
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+
+    let out = &h.sinks.records("out")[0];
+    assert_eq!(out.body, Some(json!("no phone")));
+    assert_eq!(out.attributes["msg"], json!(42));
+    let labels = [
+        ("tenant", "acme"),
+        ("stage", "mask_phones"),
+        ("engine", "linear"),
+    ];
+    assert_eq!(h.counter(Metric::RegexNonmatch, &labels), 1);
+    h.finish();
+}
+
+#[test]
+fn redact_over_input_bytes_drops_with_reason_regex_limit_before_touching_the_record() {
+    let yaml = REDACT.replace(
+        "    replace:",
+        "    limits: { input_bytes: 8 }\n    replace:",
+    );
+    let h = start(&yaml, 1);
+    let probe = h
+        .source
+        .push(redact_record(1, "555-1234 too long", json!("x"), "y"));
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+
+    assert!(h.ids("out").is_empty());
+    let dropped = [
+        ("tenant", "acme"),
+        ("stage", "mask_phones"),
+        ("engine", "linear"),
+        ("reason", "regex_limit"),
+    ];
+    assert_eq!(h.counter(Metric::RecordsDropped, &dropped), 1);
+    h.finish();
+}
+
+#[test]
+fn redact_rejects_read_only_and_malformed_fields_at_load_naming_the_node() {
+    let message = load_error(&REDACT.replace("[body, attributes.msg]", "[id]"));
+    assert!(
+        message.contains("mask_phones") && message.contains("id"),
+        "{message}"
+    );
+
+    let message = load_error(&REDACT.replace("[body, attributes.msg]", "[attributes]"));
+    assert!(
+        message.contains("mask_phones") && message.contains("attributes"),
+        "{message}"
+    );
+
+    let message = load_error(&REDACT.replace("[body, attributes.msg]", "[]"));
+    assert!(
+        message.contains("mask_phones") && message.contains("fields"),
+        "{message}"
+    );
+}
