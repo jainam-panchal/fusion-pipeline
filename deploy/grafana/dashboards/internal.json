@@ -1235,7 +1235,7 @@
       "id": 12,
       "type": "timeseries",
       "title": "Dragonfly calls (state store)",
-      "description": "Dragonfly round trips this stage makes. Empty for stages without state; populated once the state-store ticket (#6) lands.",
+      "description": "Dragonfly round trips this stage makes: ops/s, p99 per op, and errors/s (the store unreachable or timing out; what happens to the record then is the node's on_state_error). Empty for stages without state.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1255,7 +1255,7 @@
             "showPoints": "never"
           },
           "min": 0,
-          "noValue": "no state store yet (#6)"
+          "noValue": "no state ops from this stage"
         },
         "overrides": [
           {

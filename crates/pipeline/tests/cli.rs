@@ -163,3 +163,49 @@ fn nats_url_env_overrides_both_the_source_and_the_sink_url() {
         "{err}"
     );
 }
+
+/// A dedupe node makes the store required. Needs the compose NATS (the source and sink are
+/// set up before the store is opened); the store URL points nowhere.
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn unreachable_state_store_fails_fast_naming_its_url_when_a_node_uses_state() {
+    let path = write_config(
+        "state-unreachable.yaml",
+        &nats_config("nats://127.0.0.1:4222", "nats://127.0.0.1:4222", "LOGS").replace(
+            "nodes:\n",
+            "nodes:\n  - id: dd\n    type: dedupe\n    key: [body]\n    window: 10s\n",
+        ),
+    );
+
+    let output = pipelined()
+        .args(["--config", path.to_str().expect("utf-8 path")])
+        .env("DRAGONFLY_URL", "redis://127.0.0.1:1")
+        .output()
+        .expect("binary runs");
+
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("127.0.0.1:1"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_malformed_state_store_url_is_rejected_before_anything_connects() {
+    let path = write_config(
+        "state-bad-url.yaml",
+        &nats_config("nats://127.0.0.1:1", "nats://127.0.0.1:1", "LOGS"),
+    );
+
+    let output = pipelined()
+        .args(["--config", path.to_str().expect("utf-8 path")])
+        .env("DRAGONFLY_URL", "not a url")
+        .env_remove("NATS_URL")
+        .output()
+        .expect("binary runs");
+
+    assert!(!output.status.success());
+    let err = stderr(&output);
+    assert!(err.contains("not a url"), "{err}");
+}

@@ -1,8 +1,17 @@
 //! The stage contract: one record in, one [`StageOutput`] out.
+//!
+//! A stateful stage reaches the state store through [`State`], the handle on its
+//! [`Context`]. The handle prefixes every key with `{pipeline}:{tenant}:{node}:` so no stage
+//! can share state across tenants or pipelines, and counts every operation on
+//! `state_ops_total`, `state_op_duration_seconds` and `state_errors_total`.
 
 use std::fmt;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use crate::metrics::Metrics;
 use crate::record::{Record, RecordId};
+use crate::state::{StateError, StateErrorPolicy, StateStore};
 
 /// Why a record was intentionally dropped. Closed set: adding one is a spec amendment, and
 /// [`DropReason::ALL`] lists them all. It is the `reason` label on `records_dropped_total`.
@@ -110,15 +119,175 @@ pub enum StageOutput {
     Split(Vec<Record>),
     /// The stage failed; the source message is negatively acknowledged.
     Error(StageError),
+    /// The state store could not answer. The stage hands the record back unchanged and the
+    /// engine applies the node's [`StateErrorPolicy`]: forward it, or fail it.
+    StateError {
+        /// The record, unchanged.
+        record: Record,
+        /// What the store said.
+        error: StateError,
+    },
+}
+
+/// A stage's handle on the state store for one record: every key it names is prefixed with
+/// `{pipeline}:{tenant}:{node}:`, and every operation is timed and counted for that tenant
+/// and node. Owned, so a stage that needs a `'static` handle (a Lua VM) can keep it.
+#[derive(Clone)]
+pub struct State {
+    store: Arc<dyn StateStore>,
+    metrics: Metrics,
+    prefix: String,
+    tenant: String,
+    node: String,
+    /// Whether the node's stage declared [`Stage::uses_state`]. When it did not, no
+    /// connection was opened for it and every operation is refused before the store, and
+    /// before the metrics, so the store counters stay about the store.
+    declared: bool,
+}
+
+impl fmt::Debug for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("State")
+            .field("prefix", &self.prefix)
+            .finish_non_exhaustive()
+    }
+}
+
+impl State {
+    /// A handle for one record: `store` is the worker's connection, `pipeline`, `tenant` and
+    /// `node` form the key prefix, `metrics` receives the counts, and `declared` is the
+    /// node's [`Stage::uses_state`].
+    #[must_use]
+    pub fn new(
+        store: Arc<dyn StateStore>,
+        metrics: Metrics,
+        pipeline: &str,
+        tenant: &str,
+        node: &str,
+        declared: bool,
+    ) -> Self {
+        Self {
+            store,
+            metrics,
+            prefix: format!("{pipeline}:{}:{node}:", escape_segment(tenant)),
+            tenant: tenant.to_owned(),
+            node: node.to_owned(),
+            declared,
+        }
+    }
+
+    /// The prefix every key gets: `{pipeline}:{tenant}:{node}:`.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    fn timed<T>(&self, op: impl FnOnce() -> Result<T, StateError>) -> Result<T, StateError> {
+        if !self.declared {
+            return Err(StateError::new(format!(
+                "node `{}` used the state store without declaring `uses_state`",
+                self.node
+            )));
+        }
+        let started = Instant::now();
+        let result = op();
+        self.metrics
+            .state_op(&self.tenant, &self.node, started.elapsed());
+        if result.is_err() {
+            self.metrics.state_error(&self.tenant, &self.node);
+        }
+        result
+    }
+
+    /// `key` under this handle's prefix.
+    fn key(&self, key: &str) -> String {
+        format!("{}{key}", self.prefix)
+    }
+
+    /// [`StateStore::set_nx`] under this handle's prefix.
+    ///
+    /// # Errors
+    ///
+    /// The store's [`StateError`], already counted.
+    pub fn set_nx(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Duration,
+    ) -> Result<Option<Vec<u8>>, StateError> {
+        let key = self.key(key);
+        self.timed(|| self.store.set_nx(&key, value, ttl))
+    }
+
+    /// [`StateStore::set`] under this handle's prefix.
+    ///
+    /// # Errors
+    ///
+    /// The store's [`StateError`], already counted.
+    pub fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), StateError> {
+        let key = self.key(key);
+        self.timed(|| self.store.set(&key, value, ttl))
+    }
+
+    /// [`StateStore::get`] under this handle's prefix.
+    ///
+    /// # Errors
+    ///
+    /// The store's [`StateError`], already counted.
+    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StateError> {
+        let key = self.key(key);
+        self.timed(|| self.store.get(&key))
+    }
+
+    /// [`StateStore::incr`] under this handle's prefix.
+    ///
+    /// # Errors
+    ///
+    /// The store's [`StateError`], already counted.
+    pub fn incr(&self, key: &str, by: i64, ttl: Duration) -> Result<i64, StateError> {
+        let key = self.key(key);
+        self.timed(|| self.store.incr(&key, by, ttl))
+    }
+
+    /// [`StateStore::del`] under this handle's prefix.
+    ///
+    /// # Errors
+    ///
+    /// The store's [`StateError`], already counted.
+    pub fn del(&self, key: &str) -> Result<(), StateError> {
+        let key = self.key(key);
+        self.timed(|| self.store.del(&key))
+    }
+}
+
+/// A key segment with `:` and `%` escaped, so a tenant containing the separator cannot
+/// change which node or pipeline a key belongs to. Node ids and pipeline names are checked
+/// at load instead.
+fn escape_segment(segment: &str) -> String {
+    if !segment.contains([':', '%']) {
+        return segment.to_owned();
+    }
+    let mut out = String::with_capacity(segment.len() + 4);
+    for c in segment.chars() {
+        match c {
+            ':' => out.push_str("%3A"),
+            '%' => out.push_str("%25"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Per-record context handed to a stage alongside the record.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Context<'a> {
     /// Id of the node being run.
     pub node_id: &'a str,
     /// Id of the record being processed.
     pub record_id: RecordId,
+    /// The state handle: the worker's store connection, scoped to this pipeline, tenant
+    /// and node.
+    pub state: State,
 }
 
 /// A pipeline stage. Shared across worker threads, so it must be `Send + Sync`; per-worker
@@ -126,4 +295,18 @@ pub struct Context<'a> {
 pub trait Stage: Send + Sync {
     /// Process one record.
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput;
+
+    /// Whether this stage reaches the state store. The engine opens one connection per
+    /// worker only when some node does.
+    fn uses_state(&self) -> bool {
+        false
+    }
+
+    /// What the engine does with a record this stage returned as
+    /// [`StageOutput::StateError`]. Read from the node's `on_state_error` by the stage that
+    /// parsed it; the default is to fail the record, the safe choice for any stage that
+    /// would produce data from state.
+    fn on_state_error(&self) -> StateErrorPolicy {
+        StateErrorPolicy::Nak
+    }
 }

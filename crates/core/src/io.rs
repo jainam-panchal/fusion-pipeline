@@ -69,6 +69,13 @@ pub enum SourceError {
 }
 
 /// Produces envelopes until it is exhausted or the engine closes.
+///
+/// A source must stamp a record's ingestion time at decode (`observed_time_unix_nano`,
+/// from the transport's own timestamp) when the record carries neither
+/// `observed_time_unix_nano` nor `time_unix_nano`. Stateful stages measure windows in
+/// ingestion time, and a redelivered record must carry the same value it had the first
+/// time; a stage's fallback to the worker clock exists for records pushed in tests, not for
+/// sources.
 pub trait Source: Send {
     /// Run to completion, delivering every envelope into `intake`.
     ///

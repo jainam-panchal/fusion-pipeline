@@ -8,8 +8,10 @@ use fusion_core::engine::{Engine, EngineError};
 use fusion_core::metrics::Metrics;
 use fusion_core::pipeline::Pipeline;
 use fusion_core::registry::Registry;
+use fusion_core::state::StateError;
 use fusion_nats::{Nats, NatsError};
 use fusion_otel::OtelError;
+use fusion_state::Dragonfly;
 
 /// The registry the binary runs with: every built-in stage. Sinks and the source are
 /// registered by the caller, since they depend on the deployment (NATS in production, memory
@@ -49,6 +51,9 @@ pub enum StartError {
     /// The OTLP exporter could not start or flush.
     #[error(transparent)]
     Telemetry(#[from] OtelError),
+    /// The state store URL is malformed.
+    #[error(transparent)]
+    State(#[from] StateError),
     /// The Ctrl-C listener could not be set up.
     #[error("could not set up the Ctrl-C handler: {0}")]
     Signals(#[source] std::io::Error),
@@ -89,12 +94,14 @@ fn stop_on_ctrl_c(nats: Arc<Nats>) -> Result<(), StartError> {
 /// told to stop (Ctrl-C) and the workers have drained.
 ///
 /// Metrics go over OTLP to the collector `OTEL_EXPORTER_OTLP_ENDPOINT` names; with no
-/// endpoint in the environment nothing is exported.
+/// endpoint in the environment nothing is exported. State lives in the Dragonfly
+/// `DRAGONFLY_URL` names (default `redis://127.0.0.1:6379`); it is contacted, one
+/// connection per worker with a ping, only when a node uses state.
 ///
 /// # Errors
 ///
 /// Any [`StartError`]: an unreadable or invalid config, a missing stream or consumer, an
-/// unreachable server, an unusable OTLP configuration, or an engine failure.
+/// unreachable server or state store, an unusable OTLP configuration, or an engine failure.
 pub fn run(path: &Path) -> Result<(), StartError> {
     let yaml = std::fs::read_to_string(path).map_err(|source| StartError::ReadConfig {
         path: path.display().to_string(),
@@ -102,6 +109,9 @@ pub fn run(path: &Path) -> Result<(), StartError> {
     })?;
     let config = Config::from_yaml(&yaml)?;
     let source_config = config.source.as_ref().ok_or(StartError::NoSource)?;
+    // Only the URL is checked here; the store is contacted at engine start, and only when a
+    // node uses state.
+    let state = Dragonfly::from_env()?;
 
     let telemetry = fusion_otel::init()?;
     let metrics = telemetry
@@ -115,14 +125,22 @@ pub fn run(path: &Path) -> Result<(), StartError> {
     let source = registry.build_source(source_config)?;
     let workers = pipeline.worker_count();
 
+    let state_url = state.url().to_owned();
+    let uses_state = pipeline.uses_state();
+
     stop_on_ctrl_c(Arc::clone(&nats))?;
-    let engine = Engine::start(pipeline, source, workers, metrics)?;
+    let engine = Engine::start(pipeline, source, workers, metrics, Arc::new(state))?;
     eprintln!(
-        "pipelined: running with {workers} workers, metrics {}; Ctrl-C to stop",
+        "pipelined: running with {workers} workers, metrics {}, state {}; Ctrl-C to stop",
         if telemetry.is_some() {
             "over OTLP"
         } else {
             "off"
+        },
+        if uses_state {
+            format!("at {state_url}")
+        } else {
+            "unused".to_owned()
         }
     );
     engine.join()?;

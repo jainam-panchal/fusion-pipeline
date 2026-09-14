@@ -19,6 +19,7 @@ pub enum CompiledNode {
 
 /// A validated, compiled pipeline.
 pub struct Pipeline {
+    name: String,
     dag: Dag,
     nodes: Vec<CompiledNode>,
     workers: Option<usize>,
@@ -27,6 +28,7 @@ pub struct Pipeline {
 impl std::fmt::Debug for Pipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Pipeline")
+            .field("name", &self.name)
             .field("dag", &self.dag)
             .field("workers", &self.workers)
             .finish_non_exhaustive()
@@ -63,9 +65,25 @@ impl Pipeline {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
+            name: config.name.clone(),
             dag,
             nodes,
             workers: config.workers,
+        })
+    }
+
+    /// The pipeline name: the first segment of every state key.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether any node reaches the state store, so the engine knows to open connections.
+    #[must_use]
+    pub fn uses_state(&self) -> bool {
+        self.nodes.iter().any(|node| match node {
+            CompiledNode::Stage(stage) => stage.uses_state(),
+            CompiledNode::Sink(_) => false,
         })
     }
 

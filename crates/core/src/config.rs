@@ -1,5 +1,6 @@
-//! Pipeline config: an optional `source` block (`type` plus type-specific parameters) and a
-//! YAML list of `nodes`, each with `id`, `type`, optional `from`, and type-specific parameters.
+//! Pipeline config: an optional `name`, an optional `source` block (`type` plus type-specific
+//! parameters) and a YAML list of `nodes`, each with `id`, `type`, optional `from`, and
+//! type-specific parameters.
 //!
 //! Loading resolves the `from` default (the previous node in the file, or `source` for the
 //! first node) and rejects reserved or duplicate ids. Graph validation lives in [`crate::dag`].
@@ -11,6 +12,10 @@ use serde::de::DeserializeOwned;
 
 /// The reserved id of the implicit source node every pipeline starts from.
 pub const SOURCE_ID: &str = "source";
+
+/// The pipeline name when the config gives none. Two different pipelines on one state store
+/// must not share it: it is the first segment of every state key.
+pub const DEFAULT_NAME: &str = "pipeline";
 
 /// Errors raised while loading or validating a pipeline config.
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +35,22 @@ pub enum ConfigError {
     DottedId {
         /// The offending node id.
         node: String,
+    },
+    /// A node id contains a colon, the separator of state keys (`{pipeline}:{tenant}:{node}:...`).
+    #[error(
+        "node id `{node}` contains a colon; state keys are `{{pipeline}}:{{tenant}}:{{node}}:...`, so ids cannot"
+    )]
+    ColonId {
+        /// The offending node id.
+        node: String,
+    },
+    /// The pipeline name contains a colon, the separator of state keys.
+    #[error(
+        "pipeline name `{name}` contains a colon; state keys are `{{pipeline}}:{{tenant}}:{{node}}:...`, so names cannot"
+    )]
+    ColonName {
+        /// The offending name.
+        name: String,
     },
     /// Two nodes share an id.
     #[error("node id `{node}` is declared more than once")]
@@ -121,6 +142,9 @@ pub enum ConfigError {
 /// A whole pipeline config as loaded from YAML.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
+    /// The pipeline name: the first segment of every state key, so replicas of one pipeline
+    /// share state and different pipelines never do. [`DEFAULT_NAME`] when not given.
+    pub name: String,
     /// Number of worker threads, or `None` to use one per core.
     pub workers: Option<usize>,
     /// The source block, or `None` when the caller supplies the source (tests, embedding).
@@ -211,6 +235,8 @@ fn invalid_params(node: &str, message: impl Into<String>) -> ConfigError {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     workers: Option<usize>,
     #[serde(default)]
     source: Option<RawSource>,
@@ -259,10 +285,15 @@ impl Config {
     /// # Errors
     ///
     /// Returns [`ConfigError::Yaml`] for malformed YAML, [`ConfigError::ReservedId`] when a
-    /// node is called `source`, [`ConfigError::DottedId`] when an id contains a dot, and
-    /// [`ConfigError::DuplicateId`] when two nodes share an id.
+    /// node is called `source`, [`ConfigError::DottedId`] when an id contains a dot,
+    /// [`ConfigError::ColonId`] or [`ConfigError::ColonName`] when an id or the name contains
+    /// a colon, and [`ConfigError::DuplicateId`] when two nodes share an id.
     pub fn from_yaml(yaml: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = serde_yaml_ng::from_str(yaml)?;
+        let name = raw.name.unwrap_or_else(|| DEFAULT_NAME.to_owned());
+        if name.contains(':') {
+            return Err(ConfigError::ColonName { name });
+        }
         let mut seen = BTreeSet::new();
         let mut nodes = Vec::with_capacity(raw.nodes.len());
         let mut previous = SOURCE_ID.to_owned();
@@ -273,6 +304,9 @@ impl Config {
             }
             if node.id.contains('.') {
                 return Err(ConfigError::DottedId { node: node.id });
+            }
+            if node.id.contains(':') {
+                return Err(ConfigError::ColonId { node: node.id });
             }
             if !seen.insert(node.id.clone()) {
                 return Err(ConfigError::DuplicateId { node: node.id });
@@ -288,6 +322,7 @@ impl Config {
         }
 
         Ok(Self {
+            name,
             workers: raw.workers,
             source: raw.source.map(|source| SourceConfig {
                 kind: source.kind,

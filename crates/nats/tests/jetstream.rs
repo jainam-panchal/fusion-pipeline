@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use async_nats::jetstream::consumer::{AckPolicy, pull};
 use async_nats::jetstream::{self, stream};
 use fusion_core::engine::Engine;
-use fusion_core::memory::MemorySinks;
+use fusion_core::memory::{MemorySinks, MemoryStateStore};
 use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
@@ -132,6 +132,11 @@ impl JetStreamClient {
             consumer.info().await.expect("consumer info").clone()
         })
     }
+}
+
+/// These pipelines have no stateful node; the engine never opens the store.
+fn no_state() -> std::sync::Arc<MemoryStateStore> {
+    std::sync::Arc::new(MemoryStateStore::new())
 }
 
 fn wait_until(timeout: Duration, mut check: impl FnMut() -> bool) -> bool {
@@ -338,7 +343,8 @@ fn connect_fails_fast_when_the_server_is_unreachable() {
 }
 
 /// Source into the engine into an in-memory sink: the record arrives with the tenant stamped
-/// from the subject and the consumer shows it acknowledged.
+/// from the subject and the JetStream publish time as its ingestion time, a record that
+/// carries its own timestamp keeps it, and the consumer shows both acknowledged.
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
@@ -352,22 +358,50 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
     let source = nats
         .source(&fixture.source_params())
         .expect("source builds");
-    let engine =
-        Engine::start(pipeline, Box::new(source), 2, Metrics::noop()).expect("engine starts");
+    let engine = Engine::start(pipeline, Box::new(source), 2, Metrics::noop(), no_state())
+        .expect("engine starts");
 
     fixture.client.publish(
         &fixture.in_subject("acme"),
         r#"{"id": 42, "body": "no tenant here"}"#,
     );
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
+        r#"{"id": 43, "body": "dated", "observed_time_unix_nano": 5}"#,
+    );
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
+        r#"{"id": 44, "body": "event timed", "time_unix_nano": 7}"#,
+    );
 
     assert!(
-        wait_until(SETTLE_TIMEOUT, || !sinks.records("out").is_empty()),
-        "record reaches the memory sink"
+        wait_until(SETTLE_TIMEOUT, || sinks.records("out").len() == 3),
+        "records reach the memory sink"
     );
-    let records = sinks.records("out");
-    assert_eq!(records.len(), 1);
+    let mut records = sinks.records("out");
+    records.sort_by_key(|r| r.id);
     assert_eq!(records[0].tenant(), Some("acme"));
     assert_eq!(records[0].id.map(|id| id.0), Some(42));
+    let observed = records[0]
+        .observed_time_unix_nano
+        .expect("observed_time_unix_nano stamped from the JetStream publish time");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    assert!(
+        u128::from(observed) <= now && now - u128::from(observed) < 60_000_000_000,
+        "publish time {observed} is recent"
+    );
+    assert_eq!(
+        records[1].observed_time_unix_nano,
+        Some(5),
+        "a record's own observed time stands"
+    );
+    assert_eq!(
+        records[2].observed_time_unix_nano, None,
+        "a record with an event time is not given an observed time"
+    );
 
     assert!(
         wait_until(SETTLE_TIMEOUT, || fixture.consumer_settled()),
@@ -400,7 +434,8 @@ fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
     let source = nats
         .source(&fixture.source_params())
         .expect("source builds");
-    let engine = Engine::start(pipeline, Box::new(source), 1, metrics).expect("engine starts");
+    let engine =
+        Engine::start(pipeline, Box::new(source), 1, metrics, no_state()).expect("engine starts");
 
     fixture.client.delete_stream(&fixture.out_stream);
     fixture.client.publish(
@@ -448,8 +483,8 @@ fn undecodable_payload_is_nakd_and_the_source_keeps_going() {
     let source = nats
         .source(&fixture.source_params())
         .expect("source builds");
-    let engine =
-        Engine::start(pipeline, Box::new(source), 1, Metrics::noop()).expect("engine starts");
+    let engine = Engine::start(pipeline, Box::new(source), 1, Metrics::noop(), no_state())
+        .expect("engine starts");
 
     fixture
         .client

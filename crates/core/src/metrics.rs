@@ -283,6 +283,20 @@ impl Metrics {
             .count(Metric::SinkPublishErrors, &Labels::new(tenant, stage), 1);
     }
 
+    /// `state_ops_total` and `state_op_duration_seconds`: one state store operation.
+    pub fn state_op(&self, tenant: &str, stage: &str, elapsed: Duration) {
+        let labels = Labels::new(tenant, stage);
+        self.recorder.count(Metric::StateOps, &labels, 1);
+        self.recorder
+            .observe(Metric::StateOpDuration, &labels, elapsed.as_secs_f64());
+    }
+
+    /// `state_errors_total`.
+    pub fn state_error(&self, tenant: &str, stage: &str) {
+        self.recorder
+            .count(Metric::StateErrors, &Labels::new(tenant, stage), 1);
+    }
+
     /// `source_naks_total`.
     pub fn source_nak(&self, tenant: &str) {
         self.recorder

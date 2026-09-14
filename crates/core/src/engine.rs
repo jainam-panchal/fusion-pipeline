@@ -28,7 +28,8 @@ use crate::io::{Envelope, Intake, Source, SourceError};
 use crate::metrics::Metrics;
 use crate::pipeline::{CompiledNode, Pipeline};
 use crate::record::{Kind, Record, RecordId};
-use crate::stage::{Context, DropReason, StageOutput};
+use crate::stage::{Context, DropReason, StageOutput, State};
+use crate::state::{StateError, StateErrorPolicy, StateStore, StateStoreFactory};
 
 /// Envelopes buffered between the source and the workers, per worker.
 const INTAKE_DEPTH_PER_WORKER: usize = 64;
@@ -49,6 +50,15 @@ pub enum EngineError {
     /// The source returned an error.
     #[error(transparent)]
     Source(#[from] SourceError),
+    /// A worker's state store connection could not be opened.
+    #[error("could not open the state store for worker {index}: {source}")]
+    State {
+        /// Index of the worker whose connection failed.
+        index: usize,
+        /// What the store said.
+        #[source]
+        source: StateError,
+    },
     /// The source thread panicked.
     #[error("source thread panicked")]
     SourcePanicked,
@@ -73,24 +83,42 @@ impl Engine {
     ///
     /// `worker_count` of zero is treated as one. Use [`Pipeline::worker_count`] to honour the
     /// config's `workers` setting and its one-per-core default. Every measurement the engine
-    /// takes goes to `metrics`; [`Metrics::noop`] discards them.
+    /// takes goes to `metrics`; [`Metrics::noop`] discards them. When any node uses state,
+    /// one connection per worker is opened from `state` before the first thread starts, so
+    /// an unreachable store fails here; a pipeline with no stateful node never touches it.
     ///
     /// # Errors
     ///
+    /// [`EngineError::State`] when a state store connection cannot be opened,
     /// [`EngineError::Spawn`] when the OS refuses a thread.
     pub fn start(
         pipeline: Pipeline,
         source: Box<dyn Source>,
         worker_count: usize,
         metrics: Metrics,
+        state: Arc<dyn StateStoreFactory>,
     ) -> Result<Self, EngineError> {
         let worker_count = worker_count.max(1);
+        let stores = if pipeline.uses_state() {
+            (0..worker_count)
+                .map(|index| {
+                    state
+                        .open()
+                        .map(Arc::from)
+                        .map_err(|source| EngineError::State { index, source })
+                })
+                .collect::<Result<Vec<Arc<dyn StateStore>>, _>>()?
+        } else {
+            (0..worker_count)
+                .map(|_| Arc::new(NoStateStore) as Arc<dyn StateStore>)
+                .collect()
+        };
         let pipeline = Arc::new(pipeline);
         let (tx, rx) =
             crossbeam_channel::bounded::<Envelope>(worker_count * INTAKE_DEPTH_PER_WORKER);
 
         let mut workers = Vec::with_capacity(worker_count);
-        for i in 0..worker_count {
+        for (i, store) in stores.into_iter().enumerate() {
             let rx = rx.clone();
             let pipeline = Arc::clone(&pipeline);
             let metrics = metrics.clone();
@@ -100,6 +128,7 @@ impl Engine {
                     let walker = Walker {
                         pipeline: &pipeline,
                         metrics: &metrics,
+                        store,
                     };
                     for envelope in rx {
                         walker.handle(envelope);
@@ -170,9 +199,42 @@ impl Walk<'_> {
     }
 }
 
+/// The store a worker holds when no node uses state. Unreachable in practice: the handle
+/// refuses an undeclared stage before the store, and a declared one means connections were
+/// opened. Kept so the worker always holds a store.
+struct NoStateStore;
+
+impl StateStore for NoStateStore {
+    fn set_nx(&self, _: &str, _: &[u8], _: Duration) -> Result<Option<Vec<u8>>, StateError> {
+        Err(no_state_store())
+    }
+
+    fn set(&self, _: &str, _: &[u8], _: Duration) -> Result<(), StateError> {
+        Err(no_state_store())
+    }
+
+    fn get(&self, _: &str) -> Result<Option<Vec<u8>>, StateError> {
+        Err(no_state_store())
+    }
+
+    fn incr(&self, _: &str, _: i64, _: Duration) -> Result<i64, StateError> {
+        Err(no_state_store())
+    }
+
+    fn del(&self, _: &str) -> Result<(), StateError> {
+        Err(no_state_store())
+    }
+}
+
+fn no_state_store() -> StateError {
+    StateError::new("no state store connection was opened for this worker")
+}
+
 struct Walker<'p> {
     pipeline: &'p Pipeline,
     metrics: &'p Metrics,
+    /// This worker's connection to the shared state store.
+    store: Arc<dyn StateStore>,
 }
 
 impl<'p> Walker<'p> {
@@ -278,6 +340,14 @@ impl<'p> Walker<'p> {
                 let ctx = Context {
                     node_id,
                     record_id: walk.record_id,
+                    state: State::new(
+                        Arc::clone(&self.store),
+                        metrics.clone(),
+                        self.pipeline.name(),
+                        &walk.tenant,
+                        node_id,
+                        stage.uses_state(),
+                    ),
                 };
                 // Copies only if another branch still shares the record.
                 let owned = Arc::unwrap_or_clone(record);
@@ -289,6 +359,17 @@ impl<'p> Walker<'p> {
                         metrics.records_out(&walk.tenant, node_id, 1);
                         self.fan_out(dag.consumers(index, None), Arc::new(record), walk);
                     }
+                    // The stage could not reach the store and hands the record back. The
+                    // policy is the node's, applied here: `pass` forwards the record as if
+                    // the node were not there (the failed operation is already on
+                    // `state_errors_total`); `nak` fails it like any stage error.
+                    StageOutput::StateError { record, error } => match stage.on_state_error() {
+                        StateErrorPolicy::Pass => {
+                            metrics.records_out(&walk.tenant, node_id, 1);
+                            self.fan_out(dag.consumers(index, None), Arc::new(record), walk);
+                        }
+                        StateErrorPolicy::Nak => walk.fail(node_id, &error),
+                    },
                     StageOutput::Split(records) => {
                         metrics.records_out(&walk.tenant, node_id, records.len() as u64);
                         for record in records {
