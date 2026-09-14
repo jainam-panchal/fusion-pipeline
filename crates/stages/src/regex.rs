@@ -1,0 +1,139 @@
+//! What the regex stages share: the `limits` and `on_redos_risk` parameters, compiling a
+//! pattern through the facade at load, and turning a match error into a stage output.
+//!
+//! ```yaml
+//! limits:               # every key optional
+//!   match: 1000000      # PCRE2 backtracking steps per start position
+//!   depth: 1000000      # PCRE2 backtracking depth
+//!   heap_kib: 20000     # PCRE2 heap for backtracking frames
+//!   work: 10000000      # PCRE2 pattern items per call; 0 turns the count off
+//!   input_bytes: 65536  # largest field the pattern is run on, both engines
+//! on_redos_risk: reject # reject (default) | warn
+//! ```
+
+use std::num::NonZeroU32;
+
+use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::stage::{DropReason, StageError, StageOutput};
+use fusion_regex::{Limits, MatchError, Options, RedosPolicy, Regex};
+use serde::Deserialize;
+
+/// The `limits` block as written. Absent keys take the facade's defaults.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LimitsParams {
+    #[serde(rename = "match")]
+    match_limit: Option<u32>,
+    depth: Option<u32>,
+    heap_kib: Option<u32>,
+    work: Option<u32>,
+    input_bytes: Option<usize>,
+}
+
+impl LimitsParams {
+    fn to_limits(&self) -> Limits {
+        let defaults = Limits::default();
+        Limits {
+            match_limit: self.match_limit.unwrap_or(defaults.match_limit),
+            depth_limit: self.depth.unwrap_or(defaults.depth_limit),
+            heap_limit_kib: self.heap_kib.unwrap_or(defaults.heap_limit_kib),
+            work_limit: self.work.map_or(defaults.work_limit, NonZeroU32::new),
+            input_bytes: self.input_bytes.unwrap_or(defaults.input_bytes),
+            ..defaults
+        }
+    }
+}
+
+/// `on_redos_risk` as written.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RedosRiskParam {
+    /// Refuse to load a node whose pattern fails the lint or the canary.
+    #[default]
+    Reject,
+    /// Load it and log the findings.
+    Warn,
+}
+
+impl RedosRiskParam {
+    fn policy(self) -> RedosPolicy {
+        match self {
+            Self::Reject => RedosPolicy::Reject,
+            Self::Warn => RedosPolicy::Warn,
+        }
+    }
+}
+
+/// The two parameters every regex stage takes. Flattened into each stage's params.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub(crate) struct RegexParams {
+    #[serde(default)]
+    pub(crate) limits: LimitsParams,
+    #[serde(default)]
+    pub(crate) on_redos_risk: RedosRiskParam,
+}
+
+impl RegexParams {
+    /// The facade options these parameters select: lint and canary on, policy as written.
+    pub(crate) fn options(&self) -> Options {
+        Options {
+            limits: self.limits.to_limits(),
+            on_redos_risk: self.on_redos_risk.policy(),
+            ..Options::checked()
+        }
+    }
+
+    /// Compile `pattern` for `node` under these parameters and print the load-time line:
+    /// the node, its type, the engine the pattern landed on, and any lint or canary finding
+    /// kept under `warn`.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::InvalidParams`] naming the node with the facade's compile error: a
+    /// syntax error with its offset, a guard, or a lint or canary finding under `reject`.
+    pub(crate) fn compile(
+        &self,
+        node: &NodeConfig,
+        what: &str,
+        pattern: &str,
+    ) -> Result<Regex, ConfigError> {
+        let regex = Regex::with_options(pattern, &self.options())
+            .map_err(|e| node.invalid_params(format!("{what} `{pattern}`: {e}")))?;
+        // Structured logging over OTLP lands with the logs ticket; until then the load-time
+        // classification is at least visible on stderr.
+        eprintln!(
+            "pipeline: node `{}` type={} engine={} {what}={pattern:?}",
+            node.id,
+            node.kind,
+            regex.engine()
+        );
+        for risk in regex.redos_warnings() {
+            eprintln!(
+                "pipeline: node `{}` on_redos_risk=warn lint: {risk}",
+                node.id
+            );
+        }
+        if let Some(trip) = regex.canary_warning() {
+            eprintln!(
+                "pipeline: node `{}` on_redos_risk=warn canary: {trip}",
+                node.id
+            );
+        }
+        Ok(regex)
+    }
+}
+
+/// A match error as the spec classifies it: every tripped limit is a drop with reason
+/// `regex_limit`; anything else is a stage error.
+pub(crate) fn match_failure(node: &str, error: MatchError) -> StageOutput {
+    match error {
+        MatchError::MatchLimit
+        | MatchError::DepthLimit
+        | MatchError::HeapLimit
+        | MatchError::WorkLimit
+        | MatchError::InputTooLarge { .. } => StageOutput::Drop(DropReason::RegexLimit),
+        _ => StageOutput::Error(
+            StageError::new(format!("node `{node}`: regex engine failed")).with_source(error),
+        ),
+    }
+}
