@@ -57,6 +57,9 @@ pub fn url_from_env() -> String {
 pub struct Dragonfly {
     client: Client,
     url: String,
+    /// Start every connection on the `EVAL` claim instead of `SET NX GET`, so the fallback
+    /// can be tested against a server that accepts both.
+    eval_claim: bool,
 }
 
 impl Dragonfly {
@@ -71,7 +74,17 @@ impl Dragonfly {
         Ok(Self {
             client,
             url: url.to_owned(),
+            eval_claim: false,
         })
+    }
+
+    /// Every connection opened from this factory claims with the `EVAL` script from the
+    /// start, as if the server had refused `SET ... NX ... GET`. For testing the fallback.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_eval_claim(mut self) -> Self {
+        self.eval_claim = true;
+        self
     }
 
     /// A factory for the store [`url_from_env`] names.
@@ -117,7 +130,7 @@ impl StateStoreFactory for Dragonfly {
         Ok(Box::new(DragonflyStore {
             factory: self.clone(),
             connection: Mutex::new(Some(connection)),
-            claim_with_set_get: AtomicBool::new(true),
+            claim_with_set_get: AtomicBool::new(!self.eval_claim),
         }))
     }
 }

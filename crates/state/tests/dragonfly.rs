@@ -56,6 +56,37 @@ fn set_nx_claims_once_and_answers_with_the_holder_in_one_step() {
     assert_eq!(store.get(&key), Ok(None));
 }
 
+/// The claim through the `EVAL` script, the path a server that refuses `SET ... NX ... GET`
+/// falls back to. Same answers as the one-command form.
+#[test]
+#[ignore = "needs Dragonfly at DRAGONFLY_URL"]
+fn the_eval_claim_fallback_gives_the_same_answers_as_set_nx_get() {
+    let store = Dragonfly::from_env()
+        .expect("url parses")
+        .with_eval_claim()
+        .open()
+        .expect("test can reach Dragonfly at DRAGONFLY_URL");
+    let key = unique("eval");
+
+    assert_eq!(
+        store.set_nx(&key, b"101 0", Duration::from_millis(300)),
+        Ok(None),
+        "claimed"
+    );
+    assert_eq!(
+        store.set_nx(&key, b"102 4", Duration::from_millis(300)),
+        Ok(Some(b"101 0".to_vec())),
+        "not claimed: the holder comes back"
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        store.set_nx(&key, b"103 20", Duration::from_millis(300)),
+        Ok(None),
+        "the script set the ttl"
+    );
+    let _ = store.del(&key);
+}
+
 #[test]
 #[ignore = "needs Dragonfly at DRAGONFLY_URL"]
 fn set_overwrites_the_holder_and_restarts_the_ttl() {
