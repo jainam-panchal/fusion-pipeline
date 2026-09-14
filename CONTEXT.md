@@ -143,6 +143,10 @@ _Avoid_: arrival time, processing time
 How long a first sighting suppresses repeats, measured in ingestion time. The TTL of the state key, not part of its name.
 _Avoid_: bucket, slot
 
+**Holder**:
+The record a state key currently names as the owner of its window: for `dedupe`, the id and ingestion time stored in the value. Every verdict is made against the holder.
+_Avoid_: owner, winner
+
 **Takeover**:
 A record past the holder's window writing itself as the new holder, with a compare-and-set against the holder it read. Refused when another worker wrote first; the record is then judged against that holder instead.
 _Avoid_: overwrite, refresh

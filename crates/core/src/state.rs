@@ -40,8 +40,9 @@ impl StateError {
 
 /// One worker's connection to the shared state store: the four operations the spec names
 /// plus `set`, the unconditional write, and `compare_and_set`, the write a stage uses to
-/// take over a key it has decided is stale without racing another worker for it. `Sync` because the handle a stage receives shares the worker's connection behind an
-/// `Arc`; implementations keep their connection behind a mutex.
+/// take over a key it has decided is stale without racing another worker for it. `Sync`
+/// because the handle a stage receives shares the worker's connection behind an `Arc`;
+/// implementations keep their connection behind a mutex.
 pub trait StateStore: Send + Sync {
     /// Set `key` to `value` with `ttl` only if it does not exist. `None` when this call
     /// claimed the key; `Some(existing)` with the value already there when it did not. One
