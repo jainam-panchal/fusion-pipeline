@@ -200,15 +200,55 @@ fn single_quoted_strings_and_escapes() {
 }
 
 #[test]
-fn regex_operators_parse_but_are_not_wired_yet() {
-    let c = Condition::parse(r#"body =~ "disk""#).expect("parses");
+fn regex_operators_parse_and_list_their_patterns() {
+    let c = Condition::parse(r#"body =~ "disk" and (body !~ "ok" or severity_number > 1)"#)
+        .expect("parses");
     assert!(c.has_regex_ops());
-    let c = Condition::parse(r#"body !~ "disk""#).expect("parses");
-    assert!(c.has_regex_ops());
+    assert_eq!(c.regex_patterns(), vec!["disk", "ok"]);
+    let c = Condition::parse("severity_number > 1").expect("parses");
+    assert!(!c.has_regex_ops());
+    assert!(c.regex_patterns().is_empty());
+}
+
+#[test]
+fn regex_operators_need_a_string_literal() {
+    let err = Condition::parse("body =~ 42").expect_err("rejected");
     assert!(
-        !Condition::parse("severity_number > 1")
-            .expect("parses")
-            .has_regex_ops()
+        matches!(err, ConditionError::RegexNeedsString { offset: 8 }),
+        "{err:?}"
+    );
+    let err = Condition::parse("body !~ null").expect_err("rejected");
+    assert!(
+        matches!(err, ConditionError::RegexNeedsString { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn matches_with_hands_each_leaf_to_the_matcher_and_negates_not_match() {
+    let record = record();
+    let asked = std::cell::RefCell::new(Vec::new());
+    let mut substring = |pattern: &str, text: &str| {
+        asked.borrow_mut().push(pattern.to_owned());
+        Ok::<bool, ()>(text.contains(pattern))
+    };
+    let c = Condition::parse(r#"body =~ "disk" and body !~ "ok""#).expect("parses");
+    assert_eq!(c.matches_with(&record, &mut substring), Ok(true));
+    assert_eq!(*asked.borrow(), vec!["disk", "ok"]);
+
+    // A non-string field: `=~` is false and `!~` is true, without asking the matcher.
+    asked.borrow_mut().clear();
+    let c = Condition::parse(r#"severity_number =~ "1""#).expect("parses");
+    assert_eq!(c.matches_with(&record, &mut substring), Ok(false));
+    let c = Condition::parse(r#"severity_number !~ "1""#).expect("parses");
+    assert_eq!(c.matches_with(&record, &mut substring), Ok(true));
+    assert!(asked.borrow().is_empty());
+
+    // The matcher's error ends the evaluation.
+    let c = Condition::parse(r#"body =~ "disk""#).expect("parses");
+    assert_eq!(
+        c.matches_with(&record, &mut |_, _| Err("limit")),
+        Err("limit")
     );
 }
 

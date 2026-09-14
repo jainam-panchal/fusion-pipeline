@@ -4,16 +4,21 @@
 //! - id: keep_errors
 //!   type: filter
 //!   condition: severity_text == "ERROR"
-//!   action: keep   # or drop
+//!   action: keep                     # or drop
+//!   limits: { input_bytes: 65536 }   # for `=~` and `!~`; see the regex module
+//!   on_redos_risk: reject            # reject (default) | warn
 //! ```
+//!
+//! A tripped regex limit drops the record with reason `regex_limit`, whatever `action`
+//! says; any other engine failure is a stage error.
 
-use fusion_core::condition::Condition;
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use serde::Deserialize;
 
-use crate::condition::parse_condition;
+use crate::condition::CompiledCondition;
+use crate::regex::{RegexParams, match_failure};
 
 /// What to do with records the condition matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -30,12 +35,14 @@ pub enum Action {
 struct Params {
     condition: String,
     action: Action,
+    #[serde(flatten)]
+    regex: RegexParams,
 }
 
 /// The `filter` stage.
 #[derive(Debug)]
 pub struct Filter {
-    condition: Condition,
+    condition: CompiledCondition,
     action: Action,
 }
 
@@ -45,10 +52,11 @@ impl Filter {
     /// # Errors
     ///
     /// [`ConfigError::InvalidParams`] when a parameter is missing, the condition does not
-    /// parse, or it uses `=~`/`!~` (not wired until the regex ticket).
+    /// parse, or a pattern in it does not compile under the node's limits and ReDoS policy.
     pub fn from_node(node: &NodeConfig) -> Result<Self, ConfigError> {
         let params: Params = node.parse_params()?;
-        let condition = parse_condition(node, &params.condition, "condition")?;
+        let condition =
+            CompiledCondition::compile(node, &params.condition, "condition", &params.regex)?;
         Ok(Self {
             condition,
             action: params.action,
@@ -66,8 +74,11 @@ impl Filter {
 }
 
 impl Stage for Filter {
-    fn process(&self, record: Record, _ctx: &Context<'_>) -> StageOutput {
-        let matched = self.condition.matches(&record);
+    fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
+        let matched = match self.condition.matches(&record) {
+            Ok(matched) => matched,
+            Err(error) => return match_failure(ctx.node_id, error),
+        };
         let keep = match self.action {
             Action::Keep => matched,
             Action::Drop => !matched,
@@ -77,5 +88,9 @@ impl Stage for Filter {
         } else {
             StageOutput::Drop(DropReason::Filter)
         }
+    }
+
+    fn engine_label(&self) -> Option<&'static str> {
+        self.condition.engine_label()
     }
 }

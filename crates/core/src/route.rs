@@ -45,6 +45,13 @@ pub struct RouteSpec {
 struct Params {
     routes: serde_yaml_ng::Mapping,
     default: String,
+    /// Regex limits for `=~` and `!~` in the conditions; parsed by the stage, accepted
+    /// here so `deny_unknown_fields` lets them through.
+    #[serde(default, rename = "limits")]
+    _limits: Option<serde_yaml_ng::Value>,
+    /// Same as `limits`.
+    #[serde(default, rename = "on_redos_risk")]
+    _on_redos_risk: Option<serde_yaml_ng::Value>,
 }
 
 impl RouteSpec {
