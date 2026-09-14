@@ -23,6 +23,7 @@
 #
 # Host ports that commonly clash with other stacks can be moved: `GRAFANA_PORT` (3000) and
 # `DRAGONFLY_PORT` (6379), e.g. `GRAFANA_PORT=3001 docker compose -f deploy/compose.yaml up`.
+# Dragonfly's size is `DRAGONFLY_THREADS` (2) and `DRAGONFLY_MAXMEMORY` (512mb).
 
 services:
   nats:
@@ -66,8 +67,9 @@ services:
     # State for the pipeline's stateful nodes (dedupe windows). Memory is bounded and
     # eviction stays off: an evicted key would silently reopen a dedupe window, whereas
     # out-of-memory is an error the node's `on_state_error` policy handles visibly.
-    # Dragonfly wants 256 MiB per I/O thread, hence two threads for the 512 MiB cap.
-    command: ["dragonfly", "--logtostderr", "--proactor_threads=2", "--maxmemory=512mb", "--cache_mode=false"]
+    # Dragonfly wants 256 MiB per I/O thread; the defaults fit a laptop. Raise both together
+    # on a bigger host: `DRAGONFLY_THREADS=8 DRAGONFLY_MAXMEMORY=2gb`.
+    command: ["dragonfly", "--logtostderr", "--proactor_threads=${DRAGONFLY_THREADS:-2}", "--maxmemory=${DRAGONFLY_MAXMEMORY:-512mb}", "--cache_mode=false"]
     ports:
       - "${DRAGONFLY_PORT:-6379}:6379"
     healthcheck:

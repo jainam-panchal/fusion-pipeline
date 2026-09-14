@@ -136,7 +136,7 @@ _Avoid_: client, store (the handle is not the store)
 The top-level `name` in the config, default `pipeline`. First segment of every state key: replicas of one pipeline share state, different pipelines never do.
 
 **Ingestion time**:
-When a record entered: `observed_time_unix_nano`, else `time_unix_nano`, else the worker clock. The NATS source fills `observed_time_unix_nano` from the JetStream publish time when a record has neither. Unchanged by redelivery.
+When a record entered: `observed_time_unix_nano`, else `time_unix_nano`, else the worker clock. Every source must stamp `observed_time_unix_nano` at decode from its transport's timestamp when a record has neither (the NATS source uses the JetStream publish time); the worker-clock fallback is for records pushed in tests, not for sources. Unchanged by redelivery.
 _Avoid_: arrival time, processing time
 
 **Window**:
