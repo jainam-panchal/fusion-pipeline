@@ -227,6 +227,18 @@ impl StateData {
         self.entries.get_mut(key)
     }
 
+    /// Write `value` at `key`, its ttl starting now.
+    fn write(&mut self, key: &str, value: &[u8], ttl: Duration) {
+        let expires_at = self.now + ttl;
+        self.entries.insert(
+            key.to_owned(),
+            Entry {
+                value: value.to_vec(),
+                expires_at,
+            },
+        );
+    }
+
     fn check(&self) -> Result<(), StateError> {
         if self.failing {
             Err(StateError::new(INJECTED_STATE_FAILURE))
@@ -300,28 +312,14 @@ impl StateStore for MemoryStateStore {
         if let Some(existing) = data.live(key) {
             return Ok(Some(existing.value.clone()));
         }
-        let expires_at = data.now + ttl;
-        data.entries.insert(
-            key.to_owned(),
-            Entry {
-                value: value.to_vec(),
-                expires_at,
-            },
-        );
+        data.write(key, value, ttl);
         Ok(None)
     }
 
     fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), StateError> {
         let mut data = lock_unpoisoned(&self.data);
         data.check()?;
-        let expires_at = data.now + ttl;
-        data.entries.insert(
-            key.to_owned(),
-            Entry {
-                value: value.to_vec(),
-                expires_at,
-            },
-        );
+        data.write(key, value, ttl);
         Ok(())
     }
 
@@ -339,14 +337,7 @@ impl StateStore for MemoryStateStore {
                 return Ok(Some(current.value.clone()));
             }
         }
-        let expires_at = data.now + ttl;
-        data.entries.insert(
-            key.to_owned(),
-            Entry {
-                value: value.to_vec(),
-                expires_at,
-            },
-        );
+        data.write(key, value, ttl);
         Ok(None)
     }
 

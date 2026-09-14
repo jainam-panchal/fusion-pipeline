@@ -141,11 +141,11 @@ _Avoid_: arrival time, processing time
 
 **Window**:
 How long a first sighting suppresses repeats, measured in ingestion time. The TTL of the state key, not part of its name.
+_Avoid_: bucket, slot
 
 **Takeover**:
 A record past the holder's window writing itself as the new holder, with a compare-and-set against the holder it read. Refused when another worker wrote first; the record is then judged against that holder instead.
 _Avoid_: overwrite, refresh
-_Avoid_: bucket, slot
 
 **Dedupe key**:
 The `key` field paths of a `dedupe` node, whose values (a missing one is `null`) hashed together say "same content".

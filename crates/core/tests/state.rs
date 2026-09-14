@@ -1,6 +1,6 @@
-//! The state store contract on the in-memory implementation: the four operations, the
-//! `set_nx` claim, the `compare_and_set` takeover, and expiry driven by the fake clock. The Dragonfly implementation runs
-//! the same contract in its own crate.
+//! The state store contract on the in-memory implementation: the six operations, the
+//! `set_nx` claim, the `compare_and_set` takeover, and expiry driven by the fake clock. The
+//! Dragonfly implementation runs the same contract in its own crate.
 
 use std::time::Duration;
 

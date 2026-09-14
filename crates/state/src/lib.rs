@@ -209,7 +209,8 @@ fn ttl_millis(ttl: Duration) -> i64 {
     i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX).max(1)
 }
 
-/// The value a claim answered with: nil means claimed, bytes mean the current holder.
+/// The value a claim or a takeover answered with: nil means written, bytes mean the current
+/// holder that refused it.
 fn existing_from(value: Value) -> Result<Option<Vec<u8>>, RedisError> {
     match value {
         Value::Nil => Ok(None),
