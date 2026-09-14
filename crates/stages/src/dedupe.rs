@@ -164,7 +164,7 @@ impl Stage for Dedupe {
                 Err(error) => return StageOutput::StateError { record, error },
             }
         }
-        StageOutput::Pass(record)
+        Verdict::WindowOver.settle(record)
     }
 
     fn uses_state(&self) -> bool {
@@ -211,11 +211,12 @@ enum Verdict {
 }
 
 impl Verdict {
-    /// The output for a verdict that ends the decision: only a repeat drops. The same
-    /// record again (redelivery) and a record older than the holder (an earlier record
-    /// coming back after its key expired) pass, and so does a record facing a value the
-    /// stage cannot read, since passing is at worst one extra copy and never a lost record.
-    /// `WindowOver` does not end the decision and is not settled here.
+    /// The output for a verdict: only a repeat drops. The same record again (redelivery)
+    /// and a record older than the holder (an earlier record coming back after its key
+    /// expired) pass, and so does a record facing a value the stage cannot read, since
+    /// passing is at worst one extra copy and never a lost record. `WindowOver` is settled
+    /// only once the takeover attempts are spent, and passes for the same reason: an extra
+    /// copy rather than a loop other workers' writes could keep alive.
     fn settle(self, record: Record) -> StageOutput {
         match self {
             Self::Repeat => StageOutput::Drop(DropReason::Dedupe),

@@ -309,6 +309,8 @@ impl MemoryStateStore {
     /// reply (the holder) reaches the caller. That gap is where another worker's write lands
     /// in production, so the test plays that worker: write a different holder, expire the
     /// key, whatever the scenario needs. Several calls queue up, one per refusal, in order.
+    /// The queue is one per store, not per key: the next refusal of any key runs the next
+    /// race, so a test that touches several keys must queue with that order in mind.
     pub fn after_next_holder_reply(
         &self,
         race: impl FnOnce(&MemoryStateStore, &str) + Send + 'static,
