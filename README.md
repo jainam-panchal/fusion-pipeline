@@ -4,6 +4,8 @@ Observability pipeline proof of concept: a YAML-declared DAG of stages with Lua 
 
 Spec: `docs/specs/2026-09-08-observability-pipeline-poc.md`
 
+End-to-end overview for a first read: `docs/pipeline-overview.md`
+
 Feature catalogue the spec was derived from: `pipeline_atomic_features.csv`
 
 ## Layout
