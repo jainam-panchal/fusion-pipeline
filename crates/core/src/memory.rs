@@ -325,6 +325,31 @@ impl StateStore for MemoryStateStore {
         Ok(())
     }
 
+    fn compare_and_set(
+        &self,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: Duration,
+    ) -> Result<Option<Vec<u8>>, StateError> {
+        let mut data = lock_unpoisoned(&self.data);
+        data.check()?;
+        if let Some(current) = data.live(key) {
+            if current.value != expected {
+                return Ok(Some(current.value.clone()));
+            }
+        }
+        let expires_at = data.now + ttl;
+        data.entries.insert(
+            key.to_owned(),
+            Entry {
+                value: value.to_vec(),
+                expires_at,
+            },
+        );
+        Ok(None)
+    }
+
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StateError> {
         let mut data = lock_unpoisoned(&self.data);
         data.check()?;

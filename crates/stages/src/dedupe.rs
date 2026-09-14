@@ -135,22 +135,32 @@ impl Stage for Dedupe {
             // Claimed: first sighting in this window.
             return StageOutput::Pass(record);
         };
-        let Some(holder) = Holder::parse(&existing) else {
-            // Not a value this stage wrote. Passing is the safe reading: at worst one extra
-            // copy, never a lost record.
-            return StageOutput::Pass(record);
-        };
-        match incoming.against(&holder, self.window) {
+        match incoming.against_value(&existing, self.window) {
             Verdict::Repeat => StageOutput::Drop(DropReason::Dedupe),
             Verdict::WindowOver => {
                 // The holder's window is over in ingestion time but its key still lives on
                 // the server clock. Take the key over so the burst behind this record
                 // dedupes against a fresh window instead of passing until the old TTL runs
-                // out. Two workers doing this at once both pass: an extra copy, never a loss.
-                if let Err(error) = ctx.state.set(&key, &incoming.to_bytes(), self.window) {
-                    return StageOutput::StateError { record, error };
+                // out. Conditional on the holder still being the one just read: another
+                // worker may have taken the key over meanwhile, and its record, not the
+                // stale one read here, decides. A refused takeover answers with the
+                // current holder, so the verdict is re-run against it without another
+                // round trip. If that verdict is `WindowOver` again, the record passes
+                // without a second attempt: the next record with this content takes the
+                // key over from what it then reads.
+                let taken =
+                    ctx.state
+                        .compare_and_set(&key, &existing, &incoming.to_bytes(), self.window);
+                match taken {
+                    Ok(None) => StageOutput::Pass(record),
+                    Ok(Some(current)) => match incoming.against_value(&current, self.window) {
+                        Verdict::Repeat => StageOutput::Drop(DropReason::Dedupe),
+                        Verdict::SameRecord | Verdict::OlderThanHolder | Verdict::WindowOver => {
+                            StageOutput::Pass(record)
+                        }
+                    },
+                    Err(error) => StageOutput::StateError { record, error },
                 }
-                StageOutput::Pass(record)
             }
             // The same record again (redelivery), or a record older than the holder (an
             // earlier record coming back after its key expired).
@@ -197,6 +207,15 @@ impl Holder {
         Some(Self {
             id: RecordId(id.parse().ok()?),
             ingestion_time: ingestion_time.parse().ok()?,
+        })
+    }
+
+    /// The verdict against the stored `value`. A value this stage did not write reads as
+    /// `OlderThanHolder`: passing is the safe reading, at worst one extra copy, never a lost
+    /// record, and it never takes the key over from what it cannot read.
+    fn against_value(&self, value: &[u8], window: Duration) -> Verdict {
+        Self::parse(value).map_or(Verdict::OlderThanHolder, |holder| {
+            self.against(&holder, window)
         })
     }
 

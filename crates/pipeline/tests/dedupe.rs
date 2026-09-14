@@ -9,6 +9,7 @@ use std::time::Duration;
 use fusion_core::memory::AckOutcome;
 use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
+use fusion_core::state::StateStore as _;
 
 use common::{
     DEDUPE_DROP, WAIT, acme_record as record, acme_record_observed_at, for_each_worker_count, start,
@@ -168,6 +169,205 @@ fn a_repeat_whose_ingestion_time_is_past_the_window_passes_even_while_the_key_is
     );
 
     assert_eq!(h.ids("out"), vec![101, 102]);
+    h.finish();
+}
+
+/// A store that lets a test act as a second worker: after the next claim that fails (the
+/// stage has read the holder and is about to take the key over), `race` runs against the
+/// shared data before the answer reaches the stage. This is the gap between `set_nx` and
+/// the takeover, where another worker's write lands in production.
+mod racing {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use fusion_core::memory::MemoryStateStore;
+    use fusion_core::state::{StateError, StateStore, StateStoreFactory};
+
+    type Race = Box<dyn FnOnce(&MemoryStateStore, &str) + Send>;
+
+    #[derive(Clone)]
+    pub struct Racing {
+        pub data: MemoryStateStore,
+        race: Arc<Mutex<Option<Race>>>,
+    }
+
+    impl Racing {
+        pub fn new() -> Self {
+            Self {
+                data: MemoryStateStore::new(),
+                race: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        /// Run `race` on the shared data after the next failed claim, before it is answered.
+        pub fn after_next_failed_claim(
+            &self,
+            race: impl FnOnce(&MemoryStateStore, &str) + Send + 'static,
+        ) {
+            *self.race.lock().expect("unpoisoned") = Some(Box::new(race));
+        }
+
+        pub fn factory(&self) -> Arc<dyn StateStoreFactory> {
+            Arc::new(self.clone())
+        }
+    }
+
+    impl StateStoreFactory for Racing {
+        fn open(&self) -> Result<Box<dyn StateStore>, StateError> {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    impl StateStore for Racing {
+        fn set_nx(
+            &self,
+            key: &str,
+            value: &[u8],
+            ttl: Duration,
+        ) -> Result<Option<Vec<u8>>, StateError> {
+            let answer = self.data.set_nx(key, value, ttl)?;
+            if answer.is_some() {
+                if let Some(race) = self.race.lock().expect("unpoisoned").take() {
+                    race(&self.data, key);
+                }
+            }
+            Ok(answer)
+        }
+
+        fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), StateError> {
+            self.data.set(key, value, ttl)
+        }
+
+        fn compare_and_set(
+            &self,
+            key: &str,
+            expected: &[u8],
+            value: &[u8],
+            ttl: Duration,
+        ) -> Result<Option<Vec<u8>>, StateError> {
+            self.data.compare_and_set(key, expected, value, ttl)
+        }
+
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StateError> {
+            self.data.get(key)
+        }
+
+        fn incr(&self, key: &str, by: i64, ttl: Duration) -> Result<i64, StateError> {
+            self.data.incr(key, by, ttl)
+        }
+
+        fn del(&self, key: &str) -> Result<(), StateError> {
+            self.data.del(key)
+        }
+    }
+}
+
+/// Start the harness on a [`racing::Racing`] store.
+fn start_racing(yaml: &str) -> (common::Harness, racing::Racing) {
+    let store = racing::Racing::new();
+    let sinks = fusion_core::memory::MemorySinks::new();
+    let registry = common::registry(&sinks);
+    let h = common::start_with_state(yaml, 1, sinks, registry, store.factory());
+    (h, store)
+}
+
+/// The value the stage stores for a record: `"{id} {ingestion time}"`.
+fn holder(id: u64, observed_s: u64) -> Vec<u8> {
+    format!("{id} {}", observed_s * 1_000_000_000).into_bytes()
+}
+
+/// Two workers each hold a record past 101's window with the same content. Both read 101
+/// as the holder; worker B takes the key over with 102 first; worker A, with 103, finds 102
+/// there, is inside its window, and drops. Exactly one of the pair passes.
+#[test]
+fn two_records_past_the_window_racing_on_two_workers_pass_exactly_once() {
+    let (h, store) = start_racing(DEDUPE_BODY);
+    assert_eq!(
+        h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+    store.after_next_failed_claim(|data, key| {
+        data.set(key, &holder(102, 10), Duration::from_secs(10))
+            .expect("worker B takes the key over");
+    });
+
+    assert_eq!(
+        h.source.push(record_at(103, "disk full", 11)).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+
+    assert_eq!(h.ids("out"), vec![101], "103 is a repeat of 102");
+    assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+    let keys = store.data.keys();
+    assert_eq!(
+        store.data.get(&keys[0]),
+        Ok(Some(holder(102, 10))),
+        "102 keeps the key"
+    );
+    h.finish();
+}
+
+/// A slow worker read 101 as the holder for its record 102 (ingested at 10 s); by the time
+/// it takes over, 105 (ingested at 20 s) holds the key. 102 is older than 105, so it
+/// passes, and the key must stay with 105: a repeat at 25 s is inside 105's window and
+/// drops. A plain write would have moved the window back to 10 s and let it through.
+#[test]
+fn a_stale_takeover_against_a_newer_holder_does_not_move_the_window_back() {
+    let (h, store) = start_racing(DEDUPE_BODY);
+    assert_eq!(
+        h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+    store.after_next_failed_claim(|data, key| {
+        data.set(key, &holder(105, 20), Duration::from_secs(10))
+            .expect("a faster worker took the key over with a newer record");
+    });
+
+    assert_eq!(
+        h.source.push(record_at(102, "disk full", 10)).wait(WAIT),
+        Some(AckOutcome::Ack),
+        "102 is older than the holder 105: an extra copy, never a loss"
+    );
+    assert_eq!(
+        h.source.push(record_at(106, "disk full", 25)).wait(WAIT),
+        Some(AckOutcome::Ack),
+        "106 is inside 105's window"
+    );
+
+    assert_eq!(h.ids("out"), vec![101, 102]);
+    assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+    let keys = store.data.keys();
+    assert_eq!(
+        store.data.get(&keys[0]),
+        Ok(Some(holder(105, 20))),
+        "the window stayed at 20 s"
+    );
+    h.finish();
+}
+
+/// The key expired on the store's clock between the claim and the takeover. Nothing holds
+/// it, so the takeover claims it and the record passes.
+#[test]
+fn a_takeover_of_a_key_that_expired_since_the_claim_still_claims_it() {
+    let (h, store) = start_racing(DEDUPE_BODY);
+    assert_eq!(
+        h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+    store.after_next_failed_claim(|data, _| data.advance(Duration::from_secs(10)));
+
+    assert_eq!(
+        h.source.push(record_at(102, "disk full", 10)).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+    assert_eq!(
+        h.source.push(record_at(103, "disk full", 11)).wait(WAIT),
+        Some(AckOutcome::Ack),
+        "inside 102's window"
+    );
+
+    assert_eq!(h.ids("out"), vec![101, 102]);
+    assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
     h.finish();
 }
 

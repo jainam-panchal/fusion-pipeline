@@ -1,5 +1,5 @@
 //! The state store contract on the in-memory implementation: the four operations, the
-//! `set_nx` claim, and expiry driven by the fake clock. The Dragonfly implementation runs
+//! `set_nx` claim, the `compare_and_set` takeover, and expiry driven by the fake clock. The Dragonfly implementation runs
 //! the same contract in its own crate.
 
 use std::time::Duration;
@@ -39,6 +39,63 @@ fn set_overwrites_whatever_holds_the_key_and_restarts_its_ttl() {
     );
     store.advance(Duration::from_millis(1));
     assert_eq!(store.get("k"), Ok(None));
+}
+
+#[test]
+fn compare_and_set_writes_when_the_key_holds_the_expected_value_and_restarts_its_ttl() {
+    let store = MemoryStateStore::new();
+    assert_eq!(store.set_nx("k", b"101 0", TTL), Ok(None));
+    store.advance(TTL - Duration::from_millis(1));
+
+    assert_eq!(
+        store.compare_and_set("k", b"101 0", b"102 10", TTL),
+        Ok(None),
+        "written"
+    );
+
+    assert_eq!(store.get("k"), Ok(Some(b"102 10".to_vec())));
+    store.advance(TTL - Duration::from_millis(1));
+    assert_eq!(
+        store.get("k"),
+        Ok(Some(b"102 10".to_vec())),
+        "ttl restarted by the write"
+    );
+    store.advance(Duration::from_millis(1));
+    assert_eq!(store.get("k"), Ok(None));
+}
+
+#[test]
+fn compare_and_set_refuses_when_the_key_holds_something_else_and_answers_with_it() {
+    let store = MemoryStateStore::new();
+    assert_eq!(store.set_nx("k", b"101 0", TTL), Ok(None));
+    assert_eq!(
+        store.set("k", b"105 20", TTL),
+        Ok(()),
+        "another worker took over"
+    );
+
+    assert_eq!(
+        store.compare_and_set("k", b"101 0", b"102 10", TTL),
+        Ok(Some(b"105 20".to_vec())),
+        "refused: the current holder comes back"
+    );
+
+    assert_eq!(store.get("k"), Ok(Some(b"105 20".to_vec())), "untouched");
+}
+
+#[test]
+fn compare_and_set_claims_a_key_that_expired_since_it_was_read() {
+    let store = MemoryStateStore::new();
+    assert_eq!(store.set_nx("k", b"101 0", TTL), Ok(None));
+    store.advance(TTL);
+
+    assert_eq!(
+        store.compare_and_set("k", b"101 0", b"102 10", TTL),
+        Ok(None),
+        "absent counts as a match: the key is claimed"
+    );
+
+    assert_eq!(store.get("k"), Ok(Some(b"102 10".to_vec())));
 }
 
 #[test]
@@ -117,6 +174,7 @@ fn a_failing_store_returns_an_error_from_every_operation() {
 
     assert!(store.set_nx("k", b"1", TTL).is_err());
     assert!(store.set("k", b"1", TTL).is_err());
+    assert!(store.compare_and_set("k", b"0", b"1", TTL).is_err());
     assert!(store.get("k").is_err());
     assert!(store.incr("n", 1, TTL).is_err());
     assert!(store.del("k").is_err());

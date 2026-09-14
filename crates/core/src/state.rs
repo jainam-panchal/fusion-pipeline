@@ -39,8 +39,8 @@ impl StateError {
 }
 
 /// One worker's connection to the shared state store: the four operations the spec names
-/// plus `set`, the unconditional write a stage needs to take over a key it has decided is
-/// stale. `Sync` because the handle a stage receives shares the worker's connection behind an
+/// plus `set`, the unconditional write, and `compare_and_set`, the write a stage uses to
+/// take over a key it has decided is stale without racing another worker for it. `Sync` because the handle a stage receives shares the worker's connection behind an
 /// `Arc`; implementations keep their connection behind a mutex.
 pub trait StateStore: Send + Sync {
     /// Set `key` to `value` with `ttl` only if it does not exist. `None` when this call
@@ -60,6 +60,22 @@ pub trait StateStore: Send + Sync {
     ///
     /// [`StateError`] when the store cannot answer.
     fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), StateError>;
+
+    /// Set `key` to `value` with `ttl` only if it still holds `expected`, or holds nothing.
+    /// `None` when this call wrote; `Some(current)` with the value there instead when it did
+    /// not, so the caller can decide against the holder that beat it without another round
+    /// trip. One atomic step: the read and the write cannot be split by another worker.
+    ///
+    /// # Errors
+    ///
+    /// [`StateError`] when the store cannot answer.
+    fn compare_and_set(
+        &self,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: Duration,
+    ) -> Result<Option<Vec<u8>>, StateError>;
 
     /// The value of `key`, or `None` when it does not exist or has expired.
     ///

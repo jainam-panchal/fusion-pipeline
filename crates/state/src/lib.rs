@@ -8,8 +8,8 @@
 //! call after any I/O error or timeout. Reopening matters: a reply that arrives after a read
 //! timeout would otherwise be read as the answer to the *next* command. Every operation is
 //! one server-side atomic step: `SET NX PX GET` for the claim (an `EVAL` with the same
-//! meaning when the server refuses the combination), `SET PX` for the plain write,
-//! `MULTI INCRBY PEXPIRE EXEC` for the counter.
+//! meaning when the server refuses the combination), `SET PX` for the plain write, one
+//! `EVAL` for the compare-and-set, `MULTI INCRBY PEXPIRE EXEC` for the counter.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +36,15 @@ const CLAIM_SCRIPT: &str = "local v = redis.call('GET', KEYS[1]) \
 if v then return v end \
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2]) \
 return false";
+
+/// The compare-and-set as one `EVAL`: write with the ttl and return nil when the key holds
+/// the expected value or nothing, else return what it holds. `GET` answers `false` for an
+/// absent key in the server's Lua.
+const COMPARE_AND_SET_SCRIPT: &str = "local v = redis.call('GET', KEYS[1]) \
+if v == false or v == ARGV[1] then \
+redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3]) \
+return false end \
+return v";
 
 /// Pick the store URL: a non-empty `env` value wins, else [`DEFAULT_URL`].
 #[must_use]
@@ -256,6 +265,27 @@ impl StateStore for DragonflyStore {
                 .arg(millis)
                 .query::<String>(connection)?;
             Ok(())
+        })
+    }
+
+    fn compare_and_set(
+        &self,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: Duration,
+    ) -> Result<Option<Vec<u8>>, StateError> {
+        let millis = ttl_millis(ttl);
+        self.with_connection(|connection| {
+            let reply = redis::cmd("EVAL")
+                .arg(COMPARE_AND_SET_SCRIPT)
+                .arg(1)
+                .arg(key)
+                .arg(expected)
+                .arg(value)
+                .arg(millis)
+                .query::<Value>(connection)?;
+            existing_from(reply)
         })
     }
 
