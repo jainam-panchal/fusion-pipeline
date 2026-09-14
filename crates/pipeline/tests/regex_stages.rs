@@ -143,3 +143,111 @@ fn regex_node_metrics_carry_the_engine_label_and_other_nodes_do_not() {
     );
     h.finish();
 }
+
+fn extract_yaml_with(pattern: &str, extra: &str) -> String {
+    extract_yaml(pattern).replace("    pattern:", &format!("{extra}\n    pattern:"))
+}
+
+fn load_error(yaml: &str) -> String {
+    let registry = common::registry(&fusion_core::memory::MemorySinks::new());
+    fusion_core::pipeline::Pipeline::from_yaml(yaml, &registry)
+        .err()
+        .map(|e| e.to_string())
+        .expect("config rejected")
+}
+
+#[test]
+fn on_redos_risk_reject_refuses_a_pattern_the_lint_flags() {
+    // Nested unbounded quantifiers: the textbook shape, caught by the lint on any engine.
+    let message = load_error(&extract_yaml(r"(?<a>(a+)+)$"));
+    assert!(message.contains("parse_linux"), "{message}");
+    assert!(message.contains("ReDoS"), "{message}");
+}
+
+#[test]
+fn on_redos_risk_reject_refuses_a_pattern_the_canary_trips() {
+    // Passes the lint, lands on PCRE2 (lookahead) and is O(n²) unanchored: only the canary
+    // sees it. The default policy is `reject`.
+    let message = load_error(&extract_yaml(r"(?<x>(?:a|b)*)(?=c)"));
+    assert!(message.contains("parse_linux"), "{message}");
+    assert!(message.contains("canary"), "{message}");
+}
+
+#[test]
+fn on_redos_risk_warn_loads_the_pattern_and_serves_records() {
+    let yaml = extract_yaml_with(r"(?<x>(?:a|b)*)(?=c)", "    on_redos_risk: warn");
+    let h = start(&yaml, 1);
+    assert_eq!(
+        h.source.push(record(1, "abc")).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+    assert_eq!(
+        attributes(&h, "out", 1),
+        json!({"x": "ab"}).as_object().cloned().expect("object")
+    );
+    h.finish();
+}
+
+#[test]
+fn a_record_over_input_bytes_is_dropped_with_reason_regex_limit() {
+    for_each_worker_count(|workers| {
+        let yaml = extract_yaml_with(LINUX_PATTERN, "    limits: { input_bytes: 16 }");
+        let h = start(&yaml, workers);
+
+        let big = h.source.push(record(1, &"x".repeat(17)));
+        let fits = h.source.push(record(2, &"x".repeat(16)));
+        assert_eq!(big.wait(WAIT), Some(AckOutcome::Ack), "a drop acks");
+        assert_eq!(fits.wait(WAIT), Some(AckOutcome::Ack));
+
+        assert_eq!(h.ids("out"), vec![2], "workers={workers}");
+        let dropped = [
+            ("tenant", "acme"),
+            ("stage", "parse_linux"),
+            ("engine", "linear"),
+            ("reason", "regex_limit"),
+        ];
+        assert_eq!(
+            h.counter(Metric::RecordsDropped, &dropped),
+            1,
+            "workers={workers}"
+        );
+        assert_eq!(h.counter(Metric::RecordsErrored, &dropped[..3]), 0);
+        h.finish();
+    });
+}
+
+#[test]
+fn a_tripped_match_limit_drops_the_record_and_the_stage_keeps_serving() {
+    // Exponential on PCRE2; `warn` gets it past the lint and the canary so the runtime
+    // limit is what stops it.
+    let yaml = extract_yaml_with(
+        r"^(?=a)(?<run>(a+)+)$",
+        "    on_redos_risk: warn\n    limits: { match: 1000 }",
+    );
+    let h = start(&yaml, 1);
+    let mut adversarial = "a".repeat(30);
+    adversarial.push('!');
+
+    assert_eq!(
+        h.source.push(record(1, &adversarial)).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+    assert_eq!(
+        h.source.push(record(2, "aaaa")).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+
+    assert_eq!(h.ids("out"), vec![2]);
+    assert_eq!(
+        attributes(&h, "out", 2),
+        json!({"run": "aaaa"}).as_object().cloned().expect("object")
+    );
+    let dropped = [
+        ("tenant", "acme"),
+        ("stage", "parse_linux"),
+        ("engine", "backtracking"),
+        ("reason", "regex_limit"),
+    ];
+    assert_eq!(h.counter(Metric::RecordsDropped, &dropped), 1);
+    h.finish();
+}
