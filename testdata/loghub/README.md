@@ -4,7 +4,7 @@ Vendored from https://github.com/logpai/loghub-2.0 at commit
 `ac4aad2ea86f561e5a0acbc6587fa28b487259f9`, directory `2k_dataset/<Set>/`, unmodified.
 Three sets are here: `Linux`, `Apache` and `OpenSSH` (issue #5). `Mac` lands with the
 harness (issue #13). Each set is the raw log (2,000 lines), the `_structured_corrected.csv`
-ground truth (one row per `LineId`, the columns the `pcre2_extract` node must lift) and
+ground truth (one row per `LineId`, the columns the `extract` node must lift) and
 the `_templates_corrected.csv` event templates.
 
 | File | sha256 |
@@ -45,7 +45,7 @@ by that licence. The notice is reproduced verbatim as it requires:
 
 The structured CSV was written by pandas and differs from the raw line in three ways. The
 extraction tests in `crates/pipeline/tests/extract_loghub.rs` and the harness verifier
-(issue #13) apply these rules; the `pcre2_extract` patterns do not, so the attributes
+(issue #13) apply these rules; the `extract` patterns do not, so the attributes
 carry the text as it appears in the line.
 
 1. A cell matching `^\d+\.0$` compares as the integer. `PID` in Linux is `19939.0` for a
