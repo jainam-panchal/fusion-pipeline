@@ -21,25 +21,39 @@ fn yaml() -> String {
 
 #[test]
 #[ignore = "needs Dragonfly at DRAGONFLY_URL"]
-fn on_dragonfly_every_nth_keeps_exactly_one_in_ten_across_four_workers_and_counts_a_redelivery_again() {
+fn on_dragonfly_every_nth_keeps_one_thousand_of_ten_thousand_across_four_workers_and_counts_a_redelivery_again()
+ {
     let sinks = MemorySinks::new();
     let state = Arc::new(Dragonfly::from_env().expect("url parses"));
     let h = start_with_state(&yaml(), 4, sinks.clone(), registry(&sinks), state);
 
-    let probes: Vec<AckProbe> = (1..=1_000).map(|id| h.source.push(record(id, "x"))).collect();
+    let probes: Vec<AckProbe> = (1..=10_000)
+        .map(|id| h.source.push(record(id, "x")))
+        .collect();
     for probe in &probes {
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     }
-    assert_eq!(h.ids("out").len(), 100);
+    assert_eq!(h.ids("out").len(), 1_000);
 
-    // A redelivery is a new delivery: count 1001 for record 1, the first of the next ten.
-    assert_eq!(h.source.push(record(1, "x")).wait(WAIT), Some(AckOutcome::Ack));
-    assert_eq!(h.ids("out").len(), 101, "count 1001 is kept");
+    // A redelivery is a new delivery: count 10001 for record 1, the first of the next ten.
+    assert_eq!(
+        h.source.push(record(1, "x")).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+    assert_eq!(h.ids("out").len(), 1_001, "count 10001 is kept");
 
     let stage = [("tenant", "acme"), ("stage", "keep_some")];
-    let drop = [("tenant", "acme"), ("stage", "keep_some"), ("reason", "sample")];
-    assert_eq!(h.counter(Metric::RecordsDropped, &drop), 900);
-    assert_eq!(h.counter(Metric::StateOps, &stage), 1_001, "one incr per delivery");
+    let drop = [
+        ("tenant", "acme"),
+        ("stage", "keep_some"),
+        ("reason", "sample"),
+    ];
+    assert_eq!(h.counter(Metric::RecordsDropped, &drop), 9_000);
+    assert_eq!(
+        h.counter(Metric::StateOps, &stage),
+        10_001,
+        "one incr per delivery"
+    );
     assert_eq!(h.counter(Metric::StateErrors, &stage), 0);
     h.finish();
 }

@@ -36,10 +36,17 @@ fn registry(sinks: &MemorySinks) -> Registry {
     registry
 }
 
+/// `web-2` is on the kept side of the archive branch's 50% line (its hash sits at about
+/// 32%), so every Linux record here reaches `linux_archive`; the host test at the end
+/// proves the split itself.
 fn record(id: u64, severity: &str, format: &str) -> Record {
+    record_from_host(id, severity, format, "web-2")
+}
+
+fn record_from_host(id: u64, severity: &str, format: &str, host: &str) -> Record {
     Record::from_json(&format!(
         r#"{{"id": {id}, "body": "line", "severity_text": "{severity}",
-             "resource": {{"log.format": "{format}", "tenant.id": "acme"}}}}"#
+             "resource": {{"log.format": "{format}", "tenant.id": "acme", "host": "{host}"}}}}"#
     ))
     .expect("record parses")
 }
@@ -125,21 +132,32 @@ fn the_routing_example_archives_every_record_of_half_the_linux_hosts() {
     let probes: Vec<_> = (0..hosts)
         .flat_map(|host| (0..3).map(move |copy| (host, copy)))
         .map(|(host, copy)| {
-            let mut r = record(host * 10 + copy, "INFO", "Linux");
-            r.resource
-                .insert("host".to_owned(), serde_json::Value::String(format!("web-{host}")));
-            h.source.push(r)
+            let host_name = format!("web-{host}");
+            h.source.push(record_from_host(
+                host * 10 + copy,
+                "INFO",
+                "Linux",
+                &host_name,
+            ))
         })
         .collect();
     for probe in &probes {
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     }
 
-    assert_eq!(h.ids("linux_out").len() as u64, hosts * 3, "the main sink sees every record");
+    assert_eq!(
+        h.ids("linux_out").len() as u64,
+        hosts * 3,
+        "the main sink sees every record"
+    );
     let archived = h.ids("linux_archive");
     let mut archived_hosts: Vec<u64> = archived.iter().map(|id| id / 10).collect();
     archived_hosts.dedup();
-    assert_eq!(archived.len(), archived_hosts.len() * 3, "a host is archived whole or not at all");
+    assert_eq!(
+        archived.len(),
+        archived_hosts.len() * 3,
+        "a host is archived whole or not at all"
+    );
     assert!(
         !archived_hosts.is_empty() && (archived_hosts.len() as u64) < hosts,
         "{} of {hosts} hosts archived",
