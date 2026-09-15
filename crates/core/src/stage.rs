@@ -139,6 +139,9 @@ pub struct State {
     prefix: String,
     tenant: String,
     node: String,
+    /// The node's `engine` label, so its state-store series carry it like every other
+    /// per-node metric.
+    engine: Option<&'static str>,
     /// Whether the node's stage declared [`Stage::uses_state`]. When it did not, no
     /// connection was opened for it and every operation is refused before the store, and
     /// before the metrics, so the store counters stay about the store.
@@ -155,8 +158,9 @@ impl fmt::Debug for State {
 
 impl State {
     /// A handle for one record: `store` is the worker's connection, `pipeline`, `tenant` and
-    /// `node` form the key prefix, `metrics` receives the counts, and `declared` is the
-    /// node's [`Stage::uses_state`].
+    /// `node` form the key prefix, `metrics` receives the counts under the node's labels
+    /// (`engine` is the stage's [`Stage::engine_label`]), and `declared` is the node's
+    /// [`Stage::uses_state`].
     #[must_use]
     pub fn new(
         store: Arc<dyn StateStore>,
@@ -164,6 +168,7 @@ impl State {
         pipeline: &str,
         tenant: &str,
         node: &str,
+        engine: Option<&'static str>,
         declared: bool,
     ) -> Self {
         Self {
@@ -172,6 +177,7 @@ impl State {
             prefix: format!("{pipeline}:{}:{node}:", escape_segment(tenant)),
             tenant: tenant.to_owned(),
             node: node.to_owned(),
+            engine,
             declared,
         }
     }
@@ -191,7 +197,7 @@ impl State {
         }
         let started = Instant::now();
         let result = op();
-        let labels = Labels::new(&self.tenant, &self.node);
+        let labels = Labels::new(&self.tenant, &self.node).with_engine(self.engine);
         self.metrics.state_op(&labels, started.elapsed());
         if result.is_err() {
             self.metrics.state_error(&labels);
@@ -346,6 +352,7 @@ impl<'a> Context<'a> {
                 crate::config::DEFAULT_NAME,
                 Metrics::UNKNOWN_TENANT,
                 node_id,
+                None,
                 false,
             ),
             metrics: StageMetrics::new(metrics, Labels::new(Metrics::UNKNOWN_TENANT, node_id)),

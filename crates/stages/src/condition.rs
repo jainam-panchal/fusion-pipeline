@@ -62,17 +62,19 @@ impl CompiledCondition {
         })
     }
 
-    /// The `engine` label for a node running this condition: `None` without regex
-    /// operators; otherwise `backtracking` if any pattern needs PCRE2, else `linear`.
+    /// The engine a node running this condition reports: `None` without regex operators;
+    /// otherwise the worst across its patterns.
+    pub(crate) fn engine(&self) -> Option<Engine> {
+        worst_engine(self.patterns.values().map(Regex::engine))
+    }
+
+    /// [`CompiledCondition::engine`] as the metric label.
     pub(crate) fn engine_label(&self) -> Option<&'static str> {
-        engine_label(self.patterns.values())
+        self.engine().map(Engine::as_str)
     }
 }
 
-/// The worst engine among `regexes`, as a label, or `None` when there are none.
-pub(crate) fn engine_label<'a>(regexes: impl Iterator<Item = &'a Regex>) -> Option<&'static str> {
-    regexes
-        .map(Regex::engine)
-        .max_by_key(|engine| matches!(engine, Engine::Backtracking))
-        .map(Engine::as_str)
+/// The worst of `engines`: `Backtracking` if any is, else `Linear`; `None` when empty.
+pub(crate) fn worst_engine(engines: impl Iterator<Item = Engine>) -> Option<Engine> {
+    engines.max_by_key(|engine| matches!(engine, Engine::Backtracking))
 }

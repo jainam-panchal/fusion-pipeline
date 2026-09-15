@@ -11,8 +11,10 @@ use fusion_core::record::Record;
 use fusion_core::route::{Fallback, RouteSpec};
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 
-use crate::condition::CompiledCondition;
-use crate::regex::{RegexParams, match_failure};
+use fusion_regex::Engine;
+
+use crate::condition::{CompiledCondition, worst_engine};
+use crate::regex::{RegexParams, log_node_engine, match_failure};
 
 /// A compiled rule: the label and the condition that selects it.
 #[derive(Debug)]
@@ -55,10 +57,9 @@ impl Route {
             })
             .collect::<Result<Vec<_>, ConfigError>>()?;
         // The node's label is its worst engine across every rule.
-        let engine = routes
-            .iter()
-            .filter_map(|rule| rule.condition.engine_label())
-            .max_by_key(|label| *label == "backtracking");
+        let engine = worst_engine(routes.iter().filter_map(|rule| rule.condition.engine()))
+            .map(Engine::as_str);
+        log_node_engine(node, engine);
         Ok(Self {
             routes,
             fallback: spec.fallback().clone(),

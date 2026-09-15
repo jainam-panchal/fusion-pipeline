@@ -85,6 +85,10 @@ extern "C" fn count_work(_block: *mut c_void, _data: *mut c_void) -> c_int {
         .unwrap_or(PCRE2_ERROR_CALLOUT)
 }
 
+/// One match call's result: the group spans on a match (`None` on no match) and the work
+/// budget left for the next call of the same iteration (`None` when the count is off).
+pub(crate) type MatchFrom = (Option<Vec<Option<Span>>>, Option<u64>);
+
 /// A compiled PCRE2 pattern plus the match context carrying its runtime limits.
 pub(crate) struct Pcre2Regex {
     code: Code,
@@ -277,12 +281,6 @@ impl Pcre2Regex {
         self.work_limit.map(|w| u64::from(w.get()))
     }
 
-    /// Work budget left on this thread after the last match call. Meaningful only
-    /// immediately after a call made with a budget, on the same thread.
-    pub(crate) fn work_remaining() -> u64 {
-        WORK_REMAINING.with(Cell::get)
-    }
-
     /// [`Pcre2Regex::is_match`] for the canary: optionally anchored at the start of the
     /// input, under its own work budget. The budget only counts when the pattern was
     /// compiled with `work_limit` set, which is what compiles the callouts in.
@@ -299,22 +297,23 @@ impl Pcre2Regex {
     /// Runs the interpreter over `haystack`. Returns the group spans on a match, `None` on
     /// no match, and a typed error when a limit trips.
     pub(crate) fn captures(&self, haystack: &str) -> Result<Option<Vec<Option<Span>>>, MatchError> {
-        self.captures_from(haystack, 0, self.budget())
+        Ok(self.captures_from(haystack, 0, self.budget())?.0)
     }
 
     /// [`Pcre2Regex::captures`] for the leftmost match starting at or after byte `start`,
     /// under `budget` pattern items (`None` for no count). Anchors and lookbehind still see
-    /// the whole haystack. The budget left afterwards is [`Pcre2Regex::work_remaining`].
+    /// the whole haystack. Returns the spans and the budget left, for the caller to hand to
+    /// the next call of the same iteration.
     pub(crate) fn captures_from(
         &self,
         haystack: &str,
         start: usize,
         budget: Option<u64>,
-    ) -> Result<Option<Vec<Option<Span>>>, MatchError> {
-        let Some((match_data, rc)) =
-            self.exec(haystack, start, false, budget, self.capture_count + 1)?
-        else {
-            return Ok(None);
+    ) -> Result<MatchFrom, MatchError> {
+        let found = self.exec(haystack, start, false, budget, self.capture_count + 1)?;
+        let remaining = budget.map(|_| WORK_REMAINING.with(Cell::get));
+        let Some((match_data, rc)) = found else {
+            return Ok((None, remaining));
         };
         // SAFETY: the match data block is live; the ovector pointer PCRE2 returns is valid
         // for `2 * ovector_count` `usize`s for as long as the block lives, and the slice is
@@ -347,7 +346,7 @@ impl Pcre2Regex {
                 }
             })
             .collect();
-        Ok(Some(spans))
+        Ok((Some(spans), remaining))
     }
 
     /// One `pcre2_match` call from byte `start` with a match data block of `pairs` offset

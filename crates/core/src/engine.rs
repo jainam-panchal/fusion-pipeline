@@ -366,6 +366,7 @@ impl<'p> Walker<'p> {
                         self.pipeline.name(),
                         walk.tenant,
                         node_id,
+                        engine,
                         stage.uses_state(),
                     ),
                     metrics: StageMetrics::new(metrics, labels),

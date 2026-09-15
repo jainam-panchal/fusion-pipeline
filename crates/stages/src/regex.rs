@@ -83,9 +83,10 @@ impl RegexParams {
         }
     }
 
-    /// Compile `pattern` for `node` under these parameters and print the load-time line:
-    /// the node, its type, the engine the pattern landed on, and any lint or canary finding
-    /// kept under `warn`.
+    /// Compile `pattern` for `node` under these parameters and print the load-time line
+    /// for it: the node, its type, the engine the pattern landed on, and any lint or
+    /// canary finding kept under `warn`. A node with several patterns also logs its own
+    /// engine through [`log_node_engine`].
     ///
     /// # Errors
     ///
@@ -120,6 +121,18 @@ impl RegexParams {
             );
         }
         Ok(regex)
+    }
+}
+
+/// The load-time line for a node whose metrics carry `engine`: the worst engine across its
+/// patterns, the value the `engine` label takes. Nothing is printed for `None`, a node
+/// without a regex.
+pub(crate) fn log_node_engine(node: &NodeConfig, engine: Option<&'static str>) {
+    if let Some(engine) = engine {
+        eprintln!(
+            "pipeline: node `{}` type={} engine={engine}",
+            node.id, node.kind
+        );
     }
 }
 

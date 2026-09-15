@@ -18,7 +18,7 @@ use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use serde::Deserialize;
 
 use crate::condition::CompiledCondition;
-use crate::regex::{RegexParams, match_failure};
+use crate::regex::{RegexParams, log_node_engine, match_failure};
 
 /// What to do with records the condition matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -57,6 +57,7 @@ impl Filter {
         let params: Params = node.parse_params()?;
         let condition =
             CompiledCondition::compile(node, &params.condition, "condition", &params.regex)?;
+        log_node_engine(node, condition.engine_label());
         Ok(Self {
             condition,
             action: params.action,

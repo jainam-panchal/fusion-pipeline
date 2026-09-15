@@ -525,11 +525,9 @@ impl Regex {
         let spans = match &self.inner {
             Inner::Linear(re) => re.captures_at(haystack, start).map(Spans::Linear),
             Inner::Backtracking(re) => {
-                let found = re.captures_from(haystack, start, *budget);
-                if budget.is_some() {
-                    *budget = Some(pcre2::Pcre2Regex::work_remaining());
-                }
-                found?.map(Spans::Backtracking)
+                let (found, remaining) = re.captures_from(haystack, start, *budget)?;
+                *budget = remaining;
+                found.map(Spans::Backtracking)
             }
         };
         Ok(spans.map(|spans| Captures {
