@@ -37,9 +37,14 @@ fn registry(sinks: &MemorySinks) -> Registry {
     registry
 }
 
+/// How many Linux hosts [`archived_host`] tries. At `percent: 50` about half are kept; any
+/// `percent` that keeps one host in this many still finds one.
+const FIXTURE_HOSTS: u64 = 256;
+
 /// A Linux host the routing example's archive branch keeps, found by running the example
-/// once over sixteen hosts, so the fan-out and nak tests below hold whatever `percent` the
-/// archive branch is set to. The host test at the end proves the split itself.
+/// once over [`FIXTURE_HOSTS`] hosts, so the fan-out and nak tests below do not depend on
+/// one host's hash: they hold for any archive `percent` that keeps at least one of those
+/// hosts. The host test at the end proves the split itself.
 fn archived_host() -> &'static str {
     static HOST: OnceLock<String> = OnceLock::new();
     HOST.get_or_init(|| {
@@ -50,20 +55,32 @@ fn archived_host() -> &'static str {
             sinks.clone(),
             registry(&sinks),
         );
-        let hosts: Vec<String> = (1..=16).map(|i| format!("web-{i}")).collect();
-        for (i, host) in hosts.iter().enumerate() {
-            let id = u64::try_from(i).expect("small") + 1;
-            assert_eq!(
+        let probes: Vec<_> = (1..=FIXTURE_HOSTS)
+            .map(|id| {
                 h.source
-                    .push(record_from_host(id, "INFO", "Linux", host))
-                    .wait(WAIT),
-                Some(AckOutcome::Ack)
-            );
+                    .push(record_from_host(id, "INFO", "Linux", &format!("web-{id}")))
+            })
+            .collect();
+        for probe in &probes {
+            assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
         }
+        // Routing first, so a routing regression fails here with its own message rather
+        // than as "no host archived".
+        assert_eq!(
+            h.ids("linux_out").len() as u64,
+            FIXTURE_HOSTS,
+            "routing no longer sends every Linux record to linux_out"
+        );
         let archived = h.ids("linux_archive");
         h.finish();
-        let id = archived.first().expect("one of sixteen hosts is archived");
-        hosts[usize::try_from(id - 1).expect("small")].clone()
+        let id = archived.first().unwrap_or_else(|| {
+            panic!(
+                "none of {FIXTURE_HOSTS} Linux hosts reached linux_archive: the `percent` of \
+                 `half_the_hosts` in deploy/pipeline-routing.yaml keeps too few hosts for this \
+                 fixture, or routing no longer reaches the archive branch"
+            )
+        });
+        format!("web-{id}")
     })
 }
 
