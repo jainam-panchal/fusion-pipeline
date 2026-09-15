@@ -272,6 +272,17 @@ impl Pcre2Regex {
         self.probe(haystack, false, self.work_limit)
     }
 
+    /// The pattern's work budget for one match call, or `None` when the count is off.
+    pub(crate) fn budget(&self) -> Option<u64> {
+        self.work_limit.map(|w| u64::from(w.get()))
+    }
+
+    /// Work budget left on this thread after the last match call. Meaningful only
+    /// immediately after a call made with a budget, on the same thread.
+    pub(crate) fn work_remaining() -> u64 {
+        WORK_REMAINING.with(Cell::get)
+    }
+
     /// [`Pcre2Regex::is_match`] for the canary: optionally anchored at the start of the
     /// input, under its own work budget. The budget only counts when the pattern was
     /// compiled with `work_limit` set, which is what compiles the callouts in.
@@ -281,14 +292,27 @@ impl Pcre2Regex {
         anchored: bool,
         work_limit: Option<NonZeroU32>,
     ) -> Result<bool, MatchError> {
-        Ok(self.exec(haystack, anchored, work_limit, 1)?.is_some())
+        let budget = work_limit.map(|w| u64::from(w.get()));
+        Ok(self.exec(haystack, 0, anchored, budget, 1)?.is_some())
     }
 
     /// Runs the interpreter over `haystack`. Returns the group spans on a match, `None` on
     /// no match, and a typed error when a limit trips.
     pub(crate) fn captures(&self, haystack: &str) -> Result<Option<Vec<Option<Span>>>, MatchError> {
+        self.captures_from(haystack, 0, self.budget())
+    }
+
+    /// [`Pcre2Regex::captures`] for the leftmost match starting at or after byte `start`,
+    /// under `budget` pattern items (`None` for no count). Anchors and lookbehind still see
+    /// the whole haystack. The budget left afterwards is [`Pcre2Regex::work_remaining`].
+    pub(crate) fn captures_from(
+        &self,
+        haystack: &str,
+        start: usize,
+        budget: Option<u64>,
+    ) -> Result<Option<Vec<Option<Span>>>, MatchError> {
         let Some((match_data, rc)) =
-            self.exec(haystack, false, self.work_limit, self.capture_count + 1)?
+            self.exec(haystack, start, false, budget, self.capture_count + 1)?
         else {
             return Ok(None);
         };
@@ -326,34 +350,40 @@ impl Pcre2Regex {
         Ok(Some(spans))
     }
 
-    /// One `pcre2_match` call with a match data block of `pairs` offset pairs. `None` on no
-    /// match; on a match, the block and PCRE2's return code (the highest group number that
-    /// matched plus one).
+    /// One `pcre2_match` call from byte `start` with a match data block of `pairs` offset
+    /// pairs. `None` on no match, and when `start` is past the end; on a match, the block
+    /// and PCRE2's return code (the highest group number that matched plus one). `budget`
+    /// is the work the call may spend, when the pattern was compiled with callouts.
     fn exec(
         &self,
         haystack: &str,
+        start: usize,
         anchored: bool,
-        work_limit: Option<NonZeroU32>,
+        budget: Option<u64>,
         pairs: usize,
     ) -> Result<Option<(MatchData, c_int)>, MatchError> {
+        if start > haystack.len() {
+            return Ok(None);
+        }
         let match_data = MatchData::new(pairs)?;
         let mut options = PCRE2_NO_UTF_CHECK;
         if anchored {
             options |= PCRE2_ANCHORED;
         }
-        if let Some(budget) = work_limit {
-            WORK_REMAINING.with(|remaining| remaining.set(u64::from(budget.get())));
+        if let Some(budget) = budget {
+            WORK_REMAINING.with(|remaining| remaining.set(budget));
         }
         // SAFETY: `haystack` is valid UTF-8 (it is a `&str`), which is what
         // `PCRE2_NO_UTF_CHECK` requires; it is valid for `haystack.len()` bytes for the
-        // duration of the call; `code` and `match_context` are live and immutable; the match
-        // data block is live and exclusively owned by this call.
+        // duration of the call and `start` is at most its length; `code` and
+        // `match_context` are live and immutable; the match data block is live and
+        // exclusively owned by this call.
         let rc = unsafe {
             pcre2_match_8(
                 self.code.0.as_ptr(),
                 haystack.as_ptr(),
                 haystack.len(),
-                0,
+                start,
                 options,
                 match_data.0.as_ptr(),
                 self.match_context.0.as_ptr(),
