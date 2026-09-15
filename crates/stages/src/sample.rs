@@ -113,14 +113,16 @@ const COUNT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The modes as an error message lists them: "`random`, `every_nth` or `consistent`".
 fn modes() -> String {
-    let names: Vec<String> = MODE_FIELDS
+    let last = MODE_FIELDS.len() - 1;
+    MODE_FIELDS
         .iter()
-        .map(|(name, _)| format!("`{name}`"))
-        .collect();
-    match names.split_last() {
-        Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
-        _ => names.concat(),
-    }
+        .enumerate()
+        .map(|(i, (name, _))| match i {
+            0 => format!("`{name}`"),
+            i if i == last => format!(" or `{name}`"),
+            _ => format!(", `{name}`"),
+        })
+        .collect()
 }
 
 impl Sample {
@@ -194,7 +196,13 @@ impl Sample {
                     key: parse_key_fields(node, key)?,
                 }
             }
-            other => unreachable!("mode `{other}` was checked against MODE_FIELDS above"),
+            // Reached only if a row is added to `MODE_FIELDS` without an arm here: a config
+            // error naming the mode, not a panic at load.
+            other => {
+                return Err(node.invalid_params(format!(
+                    "mode `{other}` is listed but not built; this is a bug in the sample stage"
+                )));
+            }
         };
         Ok(Self { mode })
     }
