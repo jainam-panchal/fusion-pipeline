@@ -234,7 +234,7 @@ Amended 2026-09-11 (issue #11): The internal dashboard ships with #11; the tenan
 
 Vendored data lives under `testdata/loghub/<Set>/` (raw log, structured CSV, templates CSV; about 300 KB per set).
 
-Amended 2026-09-14 (issue #5): Linux, Apache and OpenSSH are vendored with the regex stages; Mac lands with the harness (#13). `testdata/loghub/README.md` carries the loghub-2.0 licence notice (research and academic use, citation required, not the workspace's Apache-2.0), the upstream commit and per-file checksums, and the three rules for comparing extracted attributes with the structured CSV (a `N.0` cell is the integer `N`, an empty cell means the attribute is absent, trailing whitespace is trimmed). The patterns lift the text as it is in the line; the normalisation is the comparer's.
+Amended 2026-09-14 (issue #5): Linux, Apache and OpenSSH are vendored with the regex stages; Mac lands with the harness (#13). `testdata/loghub/README.md` carries the loghub-2.0 licence notice (research and academic use, citation required, not the workspace's Apache-2.0), the upstream commit and per-file checksums, and the three rules for comparing extracted attributes with the structured CSV (a `N.0` cell is the integer `N`, an empty cell means the attribute is absent, trailing whitespace is trimmed on both sides, since some raw lines end in a space the CSV does not keep). The patterns lift the text as it is in the line, trailing space included; the normalisation is the comparer's.
 
 Compose services: `nats`, `dragonfly`, `otel-collector`, `prometheus`, `loki`, `tempo`, `grafana`, `pipeline`, `producer`, `verifier`, `nats-exporter`.
 
