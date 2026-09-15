@@ -13,7 +13,7 @@ Cargo workspace under `crates/`:
 | Crate | Contents |
 |---|---|
 | `core` | record model, field paths (read, write, remove), config loader, DAG validation, engine, `Source`/`Sink`/`AckHandle` traits, in-memory fakes, condition grammar |
-| `stages` | built-in stages: `filter`, `route`, `dedupe`, `pcre2_extract`, `redact` |
+| `stages` | built-in stages: `filter`, `route`, `dedupe`, `extract`, `redact` |
 | `regex` | two-engine regex facade: linear `regex` first, PCRE2 fallback with configurable limits, load-time ReDoS lint and canary; the only crate with `unsafe` |
 | `nats` | NATS JetStream source (pull consumer, explicit ack) and sink (returns after `PubAck`); tenant stamped from the subject; `NATS_URL` overrides configured URLs |
 | `state` | Dragonfly state store over the Redis protocol: one sync connection per worker, timeouts and reconnect, `DRAGONFLY_URL` |
@@ -176,7 +176,7 @@ condition: resource.k8s.pod-name == "web-0" and attributes."something something"
 
 ## Regex stages
 
-`pcre2_extract` lifts a pattern's named groups out of one string field into `attributes`;
+`extract` lifts a pattern's named groups out of one string field into `attributes`;
 `redact` replaces every match in the listed fields in place, with `replace` taken literally.
 Both, and any `filter` or `route` condition using `=~` or `!~`, compile through the regex
 facade: linear engine first, PCRE2 only when the syntax needs it, with per-node `limits`
@@ -188,7 +188,7 @@ record is served. Every metric of a regex node carries `engine=linear|backtracki
 ```yaml
 nodes:
   - id: parse_linux
-    type: pcre2_extract
+    type: extract
     field: body
     pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$'
     limits: { input_bytes: 8192 }
