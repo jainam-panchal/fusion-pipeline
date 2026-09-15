@@ -43,3 +43,15 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 - **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
 - **Claim**: `gh issue edit <n> --add-assignee @me`, the session's first write.
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
+
+## Epics
+
+An epic is one issue labelled `epic`, one per milestone. Structure lives in GitHub features, never in the body, so nothing in the body can go stale:
+
+- **Children and progress**: every ticket of the epic is a GitHub sub-issue of it (`gh api --method POST repos/<owner>/<repo>/issues/<epic>/sub_issues -F sub_issue_id=<child-db-id>`, the child's numeric database id as for dependencies above). A follow-up filed from a review is attached the day it is filed. The sub-issue list is the progress bar.
+- **Blocking**: native issue dependencies on each child, as in wayfinding above. The epic body never draws the graph.
+- **Area and scope**: `area:*` labels on each child; the milestone on the epic and on every child.
+
+The body is short and stable, in this order: one-line purpose; links to the spec, `CONTEXT.md`, `docs/adr/` and the milestone; **Goal**; **Done when** as a checklist, each line naming the tickets that prove it; **How this issue is kept** (the rules above); **Status, YYYY-MM-DD**; **Next**, an ordered list. Nothing else.
+
+**Refresh** (after a merge, a new ticket, or a change in the frontier): replace the Status and Next sections in place, tick any Done-when line its tickets now satisfy, and post one dated comment saying what changed. Never append a second Status section. History is the comment thread; when a body is restructured, the old body goes into a comment under a `<details>` block first. Edit the body with `gh api --method PATCH repos/<owner>/<repo>/issues/<epic> -F body=@file`; `gh issue edit` can fail on repositories where the Projects (classic) field is still queried.
