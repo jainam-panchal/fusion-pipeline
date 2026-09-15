@@ -7,14 +7,13 @@
 //! `regex_limit` before any label is chosen.
 
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::metrics::EngineLabel;
 use fusion_core::record::Record;
 use fusion_core::route::{Fallback, RouteSpec};
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 
-use fusion_regex::Engine;
-
 use crate::condition::{CompiledCondition, worst_engine};
-use crate::regex_stage::{RegexParams, log_node_engine, match_failure};
+use crate::regex_stage::{RegexParams, engine_label, log_node_engine, match_failure};
 
 /// A compiled rule: the label and the condition that selects it.
 #[derive(Debug)]
@@ -28,7 +27,7 @@ struct Rule {
 pub struct Route {
     routes: Vec<Rule>,
     fallback: Fallback,
-    engine: Option<&'static str>,
+    engine: Option<EngineLabel>,
 }
 
 impl Route {
@@ -58,7 +57,7 @@ impl Route {
             .collect::<Result<Vec<_>, ConfigError>>()?;
         // The node's label is its worst engine across every rule.
         let engine = worst_engine(routes.iter().filter_map(|rule| rule.condition.engine()))
-            .map(Engine::as_str);
+            .map(engine_label);
         log_node_engine(node, engine);
         Ok(Self {
             routes,
@@ -92,7 +91,7 @@ impl Stage for Route {
         }
     }
 
-    fn engine_label(&self) -> Option<&'static str> {
+    fn engine_label(&self) -> Option<EngineLabel> {
         self.engine
     }
 }

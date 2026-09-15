@@ -6,10 +6,11 @@ use std::collections::HashMap;
 
 use fusion_core::condition::Condition;
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::metrics::EngineLabel;
 use fusion_core::record::Record;
 use fusion_regex::{Engine, MatchError, Regex};
 
-use crate::regex_stage::RegexParams;
+use crate::regex_stage::{RegexParams, engine_label};
 
 /// A condition ready to evaluate, with its patterns compiled.
 #[derive(Debug)]
@@ -69,8 +70,8 @@ impl CompiledCondition {
     }
 
     /// [`CompiledCondition::engine`] as the metric label.
-    pub(crate) fn engine_label(&self) -> Option<&'static str> {
-        self.engine().map(Engine::as_str)
+    pub(crate) fn engine_label(&self) -> Option<EngineLabel> {
+        self.engine().map(engine_label)
     }
 }
 

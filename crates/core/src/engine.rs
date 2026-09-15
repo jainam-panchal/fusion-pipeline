@@ -177,14 +177,13 @@ impl Engine {
 /// One record's walk through the graph: its id, its tenant, the node it is in, and whether
 /// any branch has failed. `SOURCE_ID` is the `stage` label for decisions the engine takes
 /// before any node runs.
-struct Walk<'p, 't> {
+struct Walk<'p: 't, 't> {
     record_id: RecordId,
     /// Borrowed from the handling call, not owned, so labels built on it never borrow the
     /// walk itself and `fail` can take them while the walk is mutated.
     tenant: &'t str,
-    /// The node whose stage or sink is running, with its engine label, so a panic is
-    /// charged to it.
-    at: Option<(&'p str, Option<&'static str>)>,
+    /// The labels of the node whose stage or sink is running, so a panic is charged to it.
+    at: Option<Labels<'t>>,
     failed: bool,
     metrics: &'p Metrics,
 }
@@ -296,8 +295,9 @@ impl<'p> Walker<'p> {
             self.fan_out(targets, Arc::new(record), &mut walk);
         }));
         if outcome.is_err() {
-            let (at, engine) = walk.at.unwrap_or((SOURCE_ID, None));
-            let labels = Labels::new(walk.tenant, at).with_engine(engine);
+            let labels = walk
+                .at
+                .unwrap_or_else(|| Labels::new(walk.tenant, SOURCE_ID));
             walk.fail(&labels, &"stage or sink panicked");
         }
         if walk.failed {
@@ -340,8 +340,8 @@ impl<'p> Walker<'p> {
             CompiledNode::Sink(_) => None,
             CompiledNode::Stage(stage) => stage.engine_label(),
         };
-        walk.at = Some((node_id, engine));
         let labels = Labels::new(walk.tenant, node_id).with_engine(engine);
+        walk.at = Some(labels);
         metrics.records_in(&labels);
         match node {
             CompiledNode::Sink(sink) => {
@@ -364,9 +364,7 @@ impl<'p> Walker<'p> {
                         Arc::clone(&self.store),
                         metrics.clone(),
                         self.pipeline.name(),
-                        walk.tenant,
-                        node_id,
-                        engine,
+                        &labels,
                         stage.uses_state(),
                     ),
                     metrics: StageMetrics::new(metrics, labels),

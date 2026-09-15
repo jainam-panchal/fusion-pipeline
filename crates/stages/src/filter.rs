@@ -13,6 +13,7 @@
 //! says; any other engine failure is a stage error.
 
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::metrics::EngineLabel;
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use serde::Deserialize;
@@ -91,7 +92,7 @@ impl Stage for Filter {
         }
     }
 
-    fn engine_label(&self) -> Option<&'static str> {
+    fn engine_label(&self) -> Option<EngineLabel> {
         self.condition.engine_label()
     }
 }

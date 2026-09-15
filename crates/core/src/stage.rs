@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::metrics::{Labels, Metrics};
+use crate::metrics::{EngineLabel, Labels, Metrics};
 use crate::record::{Record, RecordId};
 use crate::state::{StateError, StateErrorPolicy, StateStore};
 
@@ -141,7 +141,7 @@ pub struct State {
     node: String,
     /// The node's `engine` label, so its state-store series carry it like every other
     /// per-node metric.
-    engine: Option<&'static str>,
+    engine: Option<EngineLabel>,
     /// Whether the node's stage declared [`Stage::uses_state`]. When it did not, no
     /// connection was opened for it and every operation is refused before the store, and
     /// before the metrics, so the store counters stay about the store.
@@ -157,27 +157,29 @@ impl fmt::Debug for State {
 }
 
 impl State {
-    /// A handle for one record: `store` is the worker's connection, `pipeline`, `tenant` and
-    /// `node` form the key prefix, `metrics` receives the counts under the node's labels
-    /// (`engine` is the stage's [`Stage::engine_label`]), and `declared` is the node's
+    /// A handle for one record: `store` is the worker's connection, `pipeline` and the
+    /// tenant and node of `labels` form the key prefix, `metrics` receives the counts under
+    /// `labels` (the node's, as the engine built them), and `declared` is the node's
     /// [`Stage::uses_state`].
     #[must_use]
     pub fn new(
         store: Arc<dyn StateStore>,
         metrics: Metrics,
         pipeline: &str,
-        tenant: &str,
-        node: &str,
-        engine: Option<&'static str>,
+        labels: &Labels<'_>,
         declared: bool,
     ) -> Self {
+        let tenant = labels.tenant();
+        // Only a tenant-wide `Labels` has no stage, and a node's handle is never built from
+        // one; the empty id is the honest fallback rather than a panic on a record.
+        let node = labels.stage().unwrap_or_default();
         Self {
             store,
             metrics,
             prefix: format!("{pipeline}:{}:{node}:", escape_segment(tenant)),
             tenant: tenant.to_owned(),
             node: node.to_owned(),
-            engine,
+            engine: labels.engine(),
             declared,
         }
     }
@@ -343,10 +345,9 @@ pub trait Stage: Send + Sync {
     /// Process one record.
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput;
 
-    /// The `engine` label for this node's metrics: `linear` or `backtracking` for a stage
-    /// that runs a regex, `None` for every other stage. Fixed at load, read by the engine
-    /// once per record.
-    fn engine_label(&self) -> Option<&'static str> {
+    /// The `engine` label for this node's metrics: set for a stage that runs a regex,
+    /// `None` for every other stage. Fixed at load, read by the engine once per record.
+    fn engine_label(&self) -> Option<EngineLabel> {
         None
     }
 

@@ -15,13 +15,16 @@
 //! field is written; any other engine failure is a stage error.
 
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::metrics::EngineLabel;
 use fusion_core::path::{FieldPath, FieldValue};
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, Stage, StageOutput};
 use fusion_regex::Regex;
 use serde::Deserialize;
 
-use crate::regex_stage::{RegexParams, log_node_engine, match_failure, write_strings};
+use crate::regex_stage::{
+    RegexParams, engine_label, log_node_engine, match_failure, write_strings,
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,7 +72,7 @@ impl Redact {
             })
             .collect::<Result<Vec<_>, ConfigError>>()?;
         let regex = params.regex.compile(node, "pattern", &params.pattern)?;
-        log_node_engine(node, Some(regex.engine().as_str()));
+        log_node_engine(node, Some(engine_label(regex.engine())));
         Ok(Self {
             fields,
             regex,
@@ -112,7 +115,7 @@ impl Stage for Redact {
         }
     }
 
-    fn engine_label(&self) -> Option<&'static str> {
-        Some(self.regex.engine().as_str())
+    fn engine_label(&self) -> Option<EngineLabel> {
+        Some(engine_label(self.regex.engine()))
     }
 }

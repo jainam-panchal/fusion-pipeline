@@ -135,6 +135,34 @@ impl Metric {
     }
 }
 
+/// The `engine` label: the facade's classification of a node's pattern. A closed set, so
+/// the label value cannot drift from the two engines the facade is defined as; core does
+/// not depend on the regex crate, so the stages crate maps the facade's engine onto it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EngineLabel {
+    /// The Rust `regex` crate: linear time, cannot backtrack.
+    Linear,
+    /// PCRE2 under the runtime limits.
+    Backtracking,
+}
+
+impl EngineLabel {
+    /// The label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Backtracking => "backtracking",
+        }
+    }
+}
+
+impl std::fmt::Display for EngineLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The labels of one measurement. `tenant` is always set; the rest as the metric requires.
 /// `engine` is set on every per-node metric of a node whose stage runs a regex, and on no
 /// other node, so `sum by (stage)` is unchanged and a regex node can be split by engine.
@@ -142,7 +170,7 @@ impl Metric {
 pub struct Labels<'a> {
     tenant: &'a str,
     stage: Option<&'a str>,
-    engine: Option<&'a str>,
+    engine: Option<EngineLabel>,
     reason: Option<DropReason>,
     kind: Option<&'a str>,
 }
@@ -172,15 +200,27 @@ impl<'a> Labels<'a> {
         }
     }
 
+    /// The `tenant` label.
+    #[must_use]
+    pub const fn tenant(&self) -> &'a str {
+        self.tenant
+    }
+
     /// The `stage` label, if set.
     #[must_use]
     pub const fn stage(&self) -> Option<&'a str> {
         self.stage
     }
 
+    /// The `engine` label, if set.
+    #[must_use]
+    pub const fn engine(&self) -> Option<EngineLabel> {
+        self.engine
+    }
+
     /// Add the `engine` label, or leave it off for `None`.
     #[must_use]
-    pub const fn with_engine(mut self, engine: Option<&'a str>) -> Self {
+    pub const fn with_engine(mut self, engine: Option<EngineLabel>) -> Self {
         self.engine = engine;
         self
     }
@@ -204,7 +244,7 @@ impl<'a> Labels<'a> {
         [
             Some(("tenant", self.tenant)),
             self.stage.map(|s| ("stage", s)),
-            self.engine.map(|e| ("engine", e)),
+            self.engine.map(|e| ("engine", e.as_str())),
             self.reason.map(|r| ("reason", r.as_str())),
             self.kind.map(|k| ("kind", k)),
         ]

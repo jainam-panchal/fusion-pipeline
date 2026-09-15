@@ -16,10 +16,11 @@
 use std::num::NonZeroU32;
 
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::metrics::EngineLabel;
 use fusion_core::path::FieldPath;
 use fusion_core::record::Record;
 use fusion_core::stage::{DropReason, StageError, StageOutput};
-use fusion_regex::{Limits, MatchError, Options, RedosPolicy, Regex};
+use fusion_regex::{Engine, Limits, MatchError, Options, RedosPolicy, Regex};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -124,10 +125,18 @@ impl RegexParams {
     }
 }
 
+/// The facade's engine as the metric label. The two closed sets are the same two engines.
+pub(crate) fn engine_label(engine: Engine) -> EngineLabel {
+    match engine {
+        Engine::Linear => EngineLabel::Linear,
+        Engine::Backtracking => EngineLabel::Backtracking,
+    }
+}
+
 /// The load-time line for a node whose metrics carry `engine`: the worst engine across its
 /// patterns, the value the `engine` label takes. Nothing is printed for `None`, a node
 /// without a regex.
-pub(crate) fn log_node_engine(node: &NodeConfig, engine: Option<&'static str>) {
+pub(crate) fn log_node_engine(node: &NodeConfig, engine: Option<EngineLabel>) {
     if let Some(engine) = engine {
         eprintln!(
             "pipeline: node `{}` type={} engine={engine}",
