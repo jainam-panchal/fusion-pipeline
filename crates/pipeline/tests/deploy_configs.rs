@@ -8,8 +8,9 @@
 mod common;
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
-use common::{WAIT, for_each_worker_count, start_with};
+use common::{WAIT, acme_host_record, for_each_worker_count, start_with};
 use fusion_core::config::Config;
 use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::record::Record;
@@ -36,19 +37,50 @@ fn registry(sinks: &MemorySinks) -> Registry {
     registry
 }
 
-/// `web-2` is on the kept side of the archive branch's 50% line (its hash sits at about
-/// 32%), so every Linux record here reaches `linux_archive`; the host test at the end
-/// proves the split itself.
-fn record(id: u64, severity: &str, format: &str) -> Record {
-    record_from_host(id, severity, format, "web-2")
+/// A Linux host the routing example's archive branch keeps, found by running the example
+/// once over sixteen hosts, so the fan-out and nak tests below hold whatever `percent` the
+/// archive branch is set to. The host test at the end proves the split itself.
+fn archived_host() -> &'static str {
+    static HOST: OnceLock<String> = OnceLock::new();
+    HOST.get_or_init(|| {
+        let sinks = MemorySinks::new();
+        let h = start_with(
+            &deploy_config("pipeline-routing.yaml"),
+            1,
+            sinks.clone(),
+            registry(&sinks),
+        );
+        let hosts: Vec<String> = (1..=16).map(|i| format!("web-{i}")).collect();
+        for (i, host) in hosts.iter().enumerate() {
+            let id = u64::try_from(i).expect("small") + 1;
+            assert_eq!(
+                h.source
+                    .push(record_from_host(id, "INFO", "Linux", host))
+                    .wait(WAIT),
+                Some(AckOutcome::Ack)
+            );
+        }
+        let archived = h.ids("linux_archive");
+        h.finish();
+        let id = archived.first().expect("one of sixteen hosts is archived");
+        hosts[usize::try_from(id - 1).expect("small")].clone()
+    })
 }
 
+fn record(id: u64, severity: &str, format: &str) -> Record {
+    record_from_host(id, severity, format, archived_host())
+}
+
+/// [`acme_host_record`] with the severity and log format the routing example switches on.
 fn record_from_host(id: u64, severity: &str, format: &str, host: &str) -> Record {
-    Record::from_json(&format!(
-        r#"{{"id": {id}, "body": "line", "severity_text": "{severity}",
-             "resource": {{"log.format": "{format}", "tenant.id": "acme", "host": "{host}"}}}}"#
-    ))
-    .expect("record parses")
+    let mut record = acme_host_record(id, Some(host));
+    record.body = Some(serde_json::Value::String("line".to_owned()));
+    record.severity_text = Some(severity.to_owned());
+    record.resource.insert(
+        "log.format".to_owned(),
+        serde_json::Value::String(format.to_owned()),
+    );
+    record
 }
 
 #[test]

@@ -131,6 +131,13 @@ fn a_field_of_another_mode_is_rejected_naming_the_mode_it_belongs_to() {
         "{err}"
     );
 
+    let err = build("    mode: random\n    percent: 10\n    on_state_error: nak\n")
+        .expect_err("rejected");
+    assert!(
+        err.contains("keep_some") && err.contains("on_state_error") && err.contains("every_nth"),
+        "{err}"
+    );
+
     let err = build("    mode: random\n    percent: 10\n    key: [body]\n").expect_err("rejected");
     assert!(
         err.contains("keep_some") && err.contains("key") && err.contains("consistent"),
