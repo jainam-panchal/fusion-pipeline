@@ -52,3 +52,59 @@ fn random_at_ten_percent_keeps_between_nine_and_eleven_percent_of_100k_records()
     assert_eq!(h.counter(Metric::StateOps, &STAGE), 0, "random needs no state");
     h.finish();
 }
+
+#[test]
+fn random_gives_a_redelivered_record_the_same_verdict() {
+    let h = start(RANDOM_TENTH, 1);
+    let ids: Vec<u64> = (1..=200).collect();
+    for &id in &ids {
+        assert_eq!(h.source.push(record(id, "x")).wait(WAIT), Some(AckOutcome::Ack));
+    }
+    let first_pass = h.ids("out");
+    assert!(!first_pass.is_empty() && first_pass.len() < ids.len(), "{first_pass:?}");
+
+    for &id in &ids {
+        assert_eq!(h.source.push(record(id, "x")).wait(WAIT), Some(AckOutcome::Ack));
+    }
+
+    let mut twice = first_pass.clone();
+    twice.extend(first_pass.iter().copied());
+    twice.sort_unstable();
+    assert_eq!(h.ids("out"), twice, "every kept id kept again, every dropped id dropped again");
+    h.finish();
+}
+
+const EVERY_TENTH: &str = r#"
+name: ingest
+nodes:
+  - id: keep_some
+    type: sample
+    mode: every_nth
+    n: 10
+  - id: out
+    type: sink.memory
+"#;
+
+#[test]
+fn every_nth_at_ten_keeps_exactly_one_thousand_of_ten_thousand_records_across_four_workers() {
+    let h = start(EVERY_TENTH, 4);
+    let probes: Vec<AckProbe> = (1..=10_000)
+        .map(|id| h.source.push(record(id, "disk full")))
+        .collect();
+    assert_all(&probes, AckOutcome::Ack);
+
+    assert_eq!(h.ids("out").len(), 1_000);
+    assert_eq!(h.counter(Metric::RecordsDropped, &SAMPLE_DROP), 9_000);
+    h.finish();
+}
+
+#[test]
+fn every_nth_keeps_the_first_record_of_each_n_so_a_small_tenant_still_gets_one_through() {
+    let h = start(EVERY_TENTH, 1);
+    for id in 1..=12 {
+        assert_eq!(h.source.push(record(id, "x")).wait(WAIT), Some(AckOutcome::Ack));
+    }
+
+    assert_eq!(h.ids("out"), vec![1, 11]);
+    h.finish();
+}

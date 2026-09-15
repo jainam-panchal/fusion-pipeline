@@ -9,6 +9,16 @@
 //!   # key: [resource.host]  # consistent: records sharing these values are kept or dropped together
 //!   # on_state_error: pass  # every_nth: pass (default) | nak
 //! ```
+//!
+//! `every_nth` counts deliveries on one shared counter per tenant, `sample:count` under
+//! the handle's prefix, one `incr` per record, and keeps the first of each `n` (counts 1,
+//! n+1, 2n+1, ...), so the split is exact across every worker and every replica. It is
+//! 1 in n of the deliveries that reach the node: a message NATS redelivers is a new
+//! delivery and takes a new count, since remembering every record would cost a store key
+//! per record. The counter lives [`COUNTER_TTL`], refreshed on every `incr`, so a tenant
+//! quieter than that restarts at 1, and its first record back is kept.
+
+use std::time::Duration;
 
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::path::FieldPath;
@@ -71,6 +81,15 @@ impl Share {
 }
 
 const MODES: &str = "`random`, `every_nth` or `consistent`";
+
+/// The `every_nth` counter key under the handle's prefix.
+const COUNTER_KEY: &str = "sample:count";
+
+/// How long the `every_nth` counter lives without a record, refreshed on every `incr`. Long
+/// enough that no tenant with traffic ever sees it restart: a counter that expired with a
+/// short TTL would hand count 1 to every record of a tenant quieter than the TTL and keep
+/// them all.
+const COUNTER_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 impl Sample {
     /// Build from a node's `mode` and the fields of that mode.
@@ -185,7 +204,16 @@ impl Stage for Sample {
             // The coin is the record id: a redelivered record lands on the same side, as
             // every verdict in this pipeline is meant to.
             Mode::Random { share } => share.keeps(mix(ctx.record_id.0 ^ self.salt)),
-            Mode::EveryNth { .. } | Mode::Consistent { .. } => true,
+            Mode::EveryNth { n } => {
+                let count = match ctx.state.incr(COUNTER_KEY, 1, COUNTER_TTL) {
+                    Ok(count) => count,
+                    Err(error) => return StageOutput::StateError { record, error },
+                };
+                // Counts 1, n+1, 2n+1, ...: the first of each n. A tenant with fewer than n
+                // records still gets one through.
+                (count - 1).rem_euclid(i64::try_from(*n).unwrap_or(i64::MAX)) == 0
+            }
+            Mode::Consistent { .. } => true,
         };
         if keep {
             StageOutput::Pass(record)
