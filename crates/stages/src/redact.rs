@@ -6,7 +6,7 @@
 //!   fields: [body, attributes.msg]   # string fields; others are left alone
 //!   pattern: '\d{3}-\d{4}'
 //!   replace: '[phone]'               # literal text, no group expansion
-//!   limits: { input_bytes: 65536 }   # see the regex module for every key
+//!   limits: { input_bytes: 65536 }   # see the regex_stage module for every key
 //!   on_redos_risk: reject            # reject (default) | warn
 //! ```
 //!
@@ -17,12 +17,11 @@
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::path::{FieldPath, FieldValue};
 use fusion_core::record::Record;
-use fusion_core::stage::{Context, Stage, StageError, StageOutput};
+use fusion_core::stage::{Context, Stage, StageOutput};
 use fusion_regex::Regex;
 use serde::Deserialize;
-use serde_json::Value;
 
-use crate::regex::{RegexParams, match_failure};
+use crate::regex_stage::{RegexParams, log_node_engine, match_failure, write_strings};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +69,7 @@ impl Redact {
             })
             .collect::<Result<Vec<_>, ConfigError>>()?;
         let regex = params.regex.compile(node, "pattern", &params.pattern)?;
+        log_node_engine(node, Some(regex.engine().as_str()));
         Ok(Self {
             fields,
             regex,
@@ -91,13 +91,13 @@ impl Stage for Redact {
     fn process(&self, mut record: Record, ctx: &Context<'_>) -> StageOutput {
         // Every field is scanned before any is written, so a limit tripped on the second
         // field cannot leave the first half-redacted on a record that is then dropped.
-        let mut rewrites: Vec<(usize, String)> = Vec::new();
-        for (i, path) in self.fields.iter().enumerate() {
+        let mut rewrites: Vec<(&FieldPath, String)> = Vec::new();
+        for path in &self.fields {
             let FieldValue::Str(text) = path.read(&record) else {
                 continue;
             };
             match self.regex.replace_all(text, &self.replace) {
-                Ok(Some(masked)) => rewrites.push((i, masked)),
+                Ok(Some(masked)) => rewrites.push((path, masked)),
                 Ok(None) => {}
                 Err(error) => return match_failure(ctx.node_id, error),
             }
@@ -106,15 +106,10 @@ impl Stage for Redact {
             ctx.metrics.regex_nonmatch();
             return StageOutput::Pass(record);
         }
-        for (i, masked) in rewrites {
-            if let Err(e) = self.fields[i].write(&mut record, Value::String(masked)) {
-                return StageOutput::Error(StageError::new(format!(
-                    "node `{}`: cannot write `{}`: {e}",
-                    ctx.node_id, self.fields[i]
-                )));
-            }
+        match write_strings(ctx.node_id, &mut record, rewrites) {
+            Ok(()) => StageOutput::Pass(record),
+            Err(error) => StageOutput::Error(error),
         }
-        StageOutput::Pass(record)
     }
 
     fn engine_label(&self) -> Option<&'static str> {

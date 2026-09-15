@@ -84,7 +84,7 @@ fn ground_truth(set: &Set) -> BTreeMap<usize, BTreeMap<String, String>> {
             .columns
             .iter()
             .filter_map(|column| {
-                let text = normalise(cell(column));
+                let text = normalise(column, cell(column));
                 (!text.is_empty()).then(|| ((*column).to_owned(), text))
             })
             .collect();
@@ -93,9 +93,14 @@ fn ground_truth(set: &Set) -> BTreeMap<usize, BTreeMap<String, String>> {
     rows
 }
 
-/// README rules 1 and 3: a pandas float `N.0` is the integer `N`; trailing whitespace goes.
-fn normalise(cell: &str) -> String {
-    let trimmed = cell.trim_end();
+/// README rules 1 and 3: a pandas float `N.0` is the integer `N`; `Content` loses its
+/// trailing whitespace. Every other column compares exactly.
+fn normalise(column: &str, cell: &str) -> String {
+    let trimmed = if column == "Content" {
+        cell.trim_end()
+    } else {
+        cell
+    };
     match trimmed.strip_suffix(".0") {
         Some(digits) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
             digits.to_owned()
@@ -113,7 +118,8 @@ fn extracted(h: &Harness, line_id: usize) -> BTreeMap<String, String> {
         .attributes
         .into_iter()
         .filter_map(|(k, v)| match v {
-            Value::String(s) => Some((k, s.trim_end().to_owned())),
+            Value::String(s) if k == "Content" => Some((k, s.trim_end().to_owned())),
+            Value::String(s) => Some((k, s)),
             _ => None,
         })
         .collect()

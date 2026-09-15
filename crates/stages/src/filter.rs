@@ -5,7 +5,7 @@
 //!   type: filter
 //!   condition: severity_text == "ERROR"
 //!   action: keep                     # or drop
-//!   limits: { input_bytes: 65536 }   # for `=~` and `!~`; see the regex module
+//!   limits: { input_bytes: 65536 }   # for `=~` and `!~`; see the regex_stage module
 //!   on_redos_risk: reject            # reject (default) | warn
 //! ```
 //!
@@ -18,7 +18,7 @@ use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use serde::Deserialize;
 
 use crate::condition::CompiledCondition;
-use crate::regex::{RegexParams, log_node_engine, match_failure};
+use crate::regex_stage::{RegexParams, log_node_engine, match_failure};
 
 /// What to do with records the condition matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

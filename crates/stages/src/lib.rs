@@ -5,7 +5,7 @@ pub mod dedupe;
 pub mod extract;
 pub mod filter;
 pub mod redact;
-mod regex;
+mod regex_stage;
 pub mod route;
 
 pub use dedupe::Dedupe;

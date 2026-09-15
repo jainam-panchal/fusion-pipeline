@@ -5,7 +5,7 @@
 //!   type: pcre2_extract
 //!   field: body                       # any string field
 //!   pattern: '^(?<Month>\w{3}) ...'   # named groups become attributes.<name>
-//!   limits: { input_bytes: 65536 }    # see the regex module for every key
+//!   limits: { input_bytes: 65536 }    # see the regex_stage module for every key
 //!   on_redos_risk: reject             # reject (default) | warn
 //! ```
 //!
@@ -15,12 +15,11 @@
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::path::{FieldPath, FieldValue};
 use fusion_core::record::Record;
-use fusion_core::stage::{Context, Stage, StageError, StageOutput};
+use fusion_core::stage::{Context, Stage, StageOutput};
 use fusion_regex::Regex;
 use serde::Deserialize;
-use serde_json::Value;
 
-use crate::regex::{RegexParams, match_failure};
+use crate::regex_stage::{RegexParams, log_node_engine, match_failure, write_strings};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +52,7 @@ impl Extract {
         let field = FieldPath::parse(&params.field)
             .map_err(|e| node.invalid_params(format!("field `{}`: {e}", params.field)))?;
         let regex = params.regex.compile(node, "pattern", &params.pattern)?;
+        log_node_engine(node, Some(regex.engine().as_str()));
         let targets = regex
             .capture_names()
             .flatten()
@@ -86,12 +86,11 @@ impl Stage for Extract {
             ctx.metrics.regex_nonmatch();
             return StageOutput::Pass(record);
         };
-        let extracted: Vec<(usize, String)> = match self.regex.captures(haystack) {
+        let extracted: Vec<(&FieldPath, String)> = match self.regex.captures(haystack) {
             Ok(Some(caps)) => self
                 .targets
                 .iter()
-                .enumerate()
-                .filter_map(|(i, (name, _))| Some((i, caps.name(name)?.to_owned())))
+                .filter_map(|(name, path)| Some((path, caps.name(name)?.to_owned())))
                 .collect(),
             Ok(None) => {
                 ctx.metrics.regex_nonmatch();
@@ -99,16 +98,10 @@ impl Stage for Extract {
             }
             Err(error) => return match_failure(ctx.node_id, error),
         };
-        for (i, text) in extracted {
-            let (name, path) = &self.targets[i];
-            if let Err(e) = path.write(&mut record, Value::String(text)) {
-                return StageOutput::Error(StageError::new(format!(
-                    "node `{}`: cannot write group `{name}`: {e}",
-                    ctx.node_id
-                )));
-            }
+        match write_strings(ctx.node_id, &mut record, extracted) {
+            Ok(()) => StageOutput::Pass(record),
+            Err(error) => StageOutput::Error(error),
         }
-        StageOutput::Pass(record)
     }
 
     fn engine_label(&self) -> Option<&'static str> {

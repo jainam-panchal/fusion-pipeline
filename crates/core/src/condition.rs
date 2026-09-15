@@ -155,16 +155,6 @@ impl Condition {
         }
     }
 
-    /// Whether the condition uses `=~` or `!~` anywhere.
-    #[must_use]
-    pub fn has_regex_ops(&self) -> bool {
-        match self {
-            Self::Compare { op, .. } => matches!(op, CompareOp::Match | CompareOp::NotMatch),
-            Self::And(a, b) | Self::Or(a, b) => a.has_regex_ops() || b.has_regex_ops(),
-            Self::Not(inner) => inner.has_regex_ops(),
-        }
-    }
-
     /// The pattern of every `=~` and `!~` leaf, in tree order, duplicates included.
     #[must_use]
     pub fn regex_patterns(&self) -> Vec<&str> {

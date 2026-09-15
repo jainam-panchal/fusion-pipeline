@@ -1,5 +1,7 @@
 //! What the regex stages share: the `limits` and `on_redos_risk` parameters, compiling a
-//! pattern through the facade at load, and turning a match error into a stage output.
+//! pattern through the facade at load, the load-time log lines, writing extracted or
+//! masked text back through the record path helpers, and turning a match error into a
+//! stage output.
 //!
 //! ```yaml
 //! limits:               # every key optional
@@ -14,9 +16,12 @@
 use std::num::NonZeroU32;
 
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::path::FieldPath;
+use fusion_core::record::Record;
 use fusion_core::stage::{DropReason, StageError, StageOutput};
 use fusion_regex::{Limits, MatchError, Options, RedosPolicy, Regex};
 use serde::Deserialize;
+use serde_json::Value;
 
 /// The `limits` block as written. Absent keys take the facade's defaults.
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -84,9 +89,9 @@ impl RegexParams {
     }
 
     /// Compile `pattern` for `node` under these parameters and print the load-time line
-    /// for it: the node, its type, the engine the pattern landed on, and any lint or
-    /// canary finding kept under `warn`. A node with several patterns also logs its own
-    /// engine through [`log_node_engine`].
+    /// for it: the node, the parameter, the pattern, and any lint or canary finding kept
+    /// under `warn`. The node's engine is one line, [`log_node_engine`], whatever the
+    /// number of patterns.
     ///
     /// # Errors
     ///
@@ -102,12 +107,7 @@ impl RegexParams {
             .map_err(|e| node.invalid_params(format!("{what} `{pattern}`: {e}")))?;
         // Structured logging over OTLP lands with the logs ticket; until then the load-time
         // classification is at least visible on stderr.
-        eprintln!(
-            "pipeline: node `{}` type={} engine={} {what}={pattern:?}",
-            node.id,
-            node.kind,
-            regex.engine()
-        );
+        eprintln!("pipeline: node `{}` {what}={pattern:?}", node.id);
         for risk in regex.redos_warnings() {
             eprintln!(
                 "pipeline: node `{}` on_redos_risk=warn lint: {risk}",
@@ -134,6 +134,20 @@ pub(crate) fn log_node_engine(node: &NodeConfig, engine: Option<&'static str>) {
             node.id, node.kind
         );
     }
+}
+
+/// Write each `(path, text)` into `record` as a string. The record is unchanged on the
+/// first refusal, which becomes a stage error naming the node and the path.
+pub(crate) fn write_strings<'a>(
+    node: &str,
+    record: &mut Record,
+    writes: impl IntoIterator<Item = (&'a FieldPath, String)>,
+) -> Result<(), StageError> {
+    for (path, text) in writes {
+        path.write(record, Value::String(text))
+            .map_err(|e| StageError::new(format!("node `{node}`: cannot write `{path}`: {e}")))?;
+    }
+    Ok(())
 }
 
 /// A match error as the spec classifies it: every tripped limit is a drop with reason

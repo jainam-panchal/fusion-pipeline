@@ -14,7 +14,7 @@ use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use fusion_regex::Engine;
 
 use crate::condition::{CompiledCondition, worst_engine};
-use crate::regex::{RegexParams, log_node_engine, match_failure};
+use crate::regex_stage::{RegexParams, log_node_engine, match_failure};
 
 /// A compiled rule: the label and the condition that selects it.
 #[derive(Debug)]

@@ -9,7 +9,7 @@ use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::record::Record;
 use fusion_regex::{Engine, MatchError, Regex};
 
-use crate::regex::RegexParams;
+use crate::regex_stage::RegexParams;
 
 /// A condition ready to evaluate, with its patterns compiled.
 #[derive(Debug)]

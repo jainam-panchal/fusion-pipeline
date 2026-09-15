@@ -337,29 +337,6 @@ pub struct Context<'a> {
     pub metrics: StageMetrics<'a>,
 }
 
-impl<'a> Context<'a> {
-    /// A context over an in-memory state store and a no-op recorder, for tests that call a
-    /// stage directly. `metrics` must outlive the context; pass a `&Metrics::noop()` the
-    /// test keeps.
-    #[must_use]
-    pub fn in_memory(node_id: &'a str, record_id: RecordId, metrics: &'a Metrics) -> Self {
-        Self {
-            node_id,
-            record_id,
-            state: State::new(
-                Arc::new(crate::memory::MemoryStateStore::new()),
-                metrics.clone(),
-                crate::config::DEFAULT_NAME,
-                Metrics::UNKNOWN_TENANT,
-                node_id,
-                None,
-                false,
-            ),
-            metrics: StageMetrics::new(metrics, Labels::new(Metrics::UNKNOWN_TENANT, node_id)),
-        }
-    }
-}
-
 /// A pipeline stage. Shared across worker threads, so it must be `Send + Sync`; per-worker
 /// resources are a later concern.
 pub trait Stage: Send + Sync {

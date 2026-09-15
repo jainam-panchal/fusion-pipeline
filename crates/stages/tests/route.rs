@@ -1,12 +1,13 @@
 //! The `route` stage through its public contract: a record in, `Routed(label, record)` or
 //! `Drop(route_default_drop)` out.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
-use fusion_core::config::Config;
-use fusion_core::metrics::Metrics;
+use fusion_core::config::{Config, DEFAULT_NAME};
+use fusion_core::memory::MemoryStateStore;
+use fusion_core::metrics::{Labels, Metrics};
 use fusion_core::record::{Record, RecordId};
-use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
+use fusion_core::stage::{Context, DropReason, Stage, StageMetrics, StageOutput, State};
 use fusion_stages::Route;
 
 fn route(yaml_params: &str) -> Route {
@@ -26,8 +27,24 @@ fn record(format: &str) -> Record {
 
 static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::noop);
 
+/// The context the engine would build for node `by_format`, over an in-memory store and a
+/// no-op recorder.
 fn ctx() -> Context<'static> {
-    Context::in_memory("by_format", RecordId(1), &METRICS)
+    let labels = Labels::new(Metrics::UNKNOWN_TENANT, "by_format");
+    Context {
+        node_id: "by_format",
+        record_id: RecordId(1),
+        state: State::new(
+            Arc::new(MemoryStateStore::new()),
+            METRICS.clone(),
+            DEFAULT_NAME,
+            Metrics::UNKNOWN_TENANT,
+            "by_format",
+            None,
+            false,
+        ),
+        metrics: StageMetrics::new(&METRICS, labels),
+    }
 }
 
 const BY_FORMAT: &str = r#"    routes:

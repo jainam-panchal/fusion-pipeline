@@ -323,7 +323,7 @@ fn redact_counts_a_record_where_no_listed_field_matched_once_and_skips_non_strin
 }
 
 #[test]
-fn redact_over_input_bytes_drops_with_reason_regex_limit_before_touching_the_record() {
+fn redact_over_input_bytes_drops_with_reason_regex_limit_and_nothing_reaches_the_sink() {
     let yaml = REDACT.replace(
         "    replace:",
         "    limits: { input_bytes: 8 }\n    replace:",
