@@ -4,9 +4,8 @@
 
 mod common;
 
-use std::time::Duration;
 
-use common::{WAIT, acme_record as record, for_each_worker_count, start};
+use common::{WAIT, acme_record as record, start};
 use fusion_core::memory::{AckOutcome, AckProbe};
 use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
@@ -176,5 +175,140 @@ fn every_nth_with_the_store_down_and_nak_policy_naks() {
     ));
     assert!(h.ids("out").is_empty());
     assert_eq!(h.counter(Metric::StateErrors, &STAGE), 1);
+    h.finish();
+}
+
+const CONSISTENT_HALF: &str = r#"
+name: ingest
+nodes:
+  - id: keep_some
+    type: sample
+    mode: consistent
+    percent: 50
+    key: [resource.host]
+  - id: out
+    type: sink.memory
+"#;
+
+fn host_record(id: u64, host: Option<&str>) -> Record {
+    let host = host.map_or(String::new(), |h| format!(r#", "host": "{h}""#));
+    Record::from_json(&format!(
+        r#"{{"id": {id}, "body": "x", "resource": {{"tenant.id": "acme"{host}}}}}"#
+    ))
+    .expect("record parses")
+}
+
+/// Ids are `host_index * 10 + copy`, so the host of a kept id is recoverable.
+fn push_hosts(h: &common::Harness, hosts: u64, copies: u64) -> Vec<AckProbe> {
+    (0..hosts)
+        .flat_map(|host| {
+            (0..copies).map(move |copy| (host, copy))
+        })
+        .map(|(host, copy)| {
+            h.source.push(host_record(host * 10 + copy, Some(&format!("web-{host}"))))
+        })
+        .collect()
+}
+
+#[test]
+fn consistent_at_fifty_percent_keeps_or_drops_every_record_of_a_host_together() {
+    let h = start(CONSISTENT_HALF, 4);
+    let probes = push_hosts(&h, 1_000, 3);
+    assert_all(&probes, AckOutcome::Ack);
+
+    let kept = h.ids("out");
+    let mut kept_hosts: Vec<u64> = kept.iter().map(|id| id / 10).collect();
+    kept_hosts.dedup();
+    assert_eq!(kept.len(), kept_hosts.len() * 3, "every kept host has all 3 copies");
+    assert!(
+        (450..=550).contains(&kept_hosts.len()),
+        "{} of 1000 hosts kept",
+        kept_hosts.len()
+    );
+    assert_eq!(h.counter(Metric::RecordsDropped, &SAMPLE_DROP), 3_000 - kept.len() as u64);
+    assert_eq!(h.counter(Metric::StateOps, &STAGE), 0, "consistent needs no state");
+    h.finish();
+}
+
+#[test]
+fn consistent_decides_all_records_missing_the_key_field_together() {
+    let h = start(CONSISTENT_HALF, 1);
+    for id in 1..=20 {
+        assert_eq!(h.source.push(host_record(id, None)).wait(WAIT), Some(AckOutcome::Ack));
+    }
+
+    let kept = h.ids("out").len();
+    assert!(kept == 0 || kept == 20, "all or none, got {kept}");
+    h.finish();
+}
+
+/// Kept at 20% implies kept at 50%: the same hosts, plus more.
+#[test]
+fn consistent_at_a_lower_percent_keeps_a_subset_of_the_hosts_kept_at_a_higher_percent() {
+    let low = start(&CONSISTENT_HALF.replace("percent: 50", "percent: 20"), 1);
+    let high = start(CONSISTENT_HALF, 1);
+    assert_all(&push_hosts(&low, 300, 1), AckOutcome::Ack);
+    assert_all(&push_hosts(&high, 300, 1), AckOutcome::Ack);
+
+    let low_kept = low.ids("out");
+    let high_kept = high.ids("out");
+    assert!(!low_kept.is_empty() && low_kept.len() < high_kept.len());
+    assert!(low_kept.iter().all(|id| high_kept.contains(id)), "subset");
+    low.finish();
+    high.finish();
+}
+
+#[test]
+fn random_at_one_hundred_percent_keeps_everything() {
+    let h = start(&RANDOM_TENTH.replace("percent: 10", "percent: 100"), 1);
+    let probes: Vec<AckProbe> = (1..=1_000).map(|id| h.source.push(record(id, "x"))).collect();
+    assert_all(&probes, AckOutcome::Ack);
+
+    assert_eq!(h.ids("out").len(), 1_000);
+    assert_eq!(h.counter(Metric::RecordsDropped, &SAMPLE_DROP), 0);
+    h.finish();
+}
+
+/// Snowflake ids: a millisecond timestamp in the high bits, a sequence in the low bits, a
+/// few hundred per millisecond. Near-identical high bits must not skew the coin.
+#[test]
+fn random_at_ten_percent_holds_on_snowflake_shaped_ids() {
+    let h = start(RANDOM_TENTH, 4);
+    let base_ms: u64 = 1_800_000_000_000;
+    let probes: Vec<AckProbe> = (0..100_000u64)
+        .map(|i| (base_ms + i / 400) << 22 | (i % 400))
+        .map(|id| h.source.push(record(id, "x")))
+        .collect();
+    assert_all(&probes, AckOutcome::Ack);
+
+    let kept = h.ids("out").len();
+    assert!((9_000..=11_000).contains(&kept), "kept {kept}");
+    h.finish();
+}
+
+/// Two `random` nodes in series at 10% each keep about 1%, not 10%: each node's coin is
+/// its own.
+#[test]
+fn two_random_nodes_in_series_keep_the_product_of_their_shares() {
+    let yaml = r#"
+name: ingest
+nodes:
+  - id: first
+    type: sample
+    mode: random
+    percent: 10
+  - id: second
+    type: sample
+    mode: random
+    percent: 10
+  - id: out
+    type: sink.memory
+"#;
+    let h = start(yaml, 4);
+    let probes: Vec<AckProbe> = (1..=100_000).map(|id| h.source.push(record(id, "x"))).collect();
+    assert_all(&probes, AckOutcome::Ack);
+
+    let kept = h.ids("out").len();
+    assert!((700..=1_300).contains(&kept), "kept {kept}, expected about 1,000");
     h.finish();
 }

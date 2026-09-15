@@ -27,6 +27,8 @@ use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use fusion_core::state::StateErrorPolicy;
 use serde::Deserialize;
 
+use crate::key_hash::{fnv1a64, hash_key_values};
+
 /// Every parameter of every mode, so a field belonging to another mode is rejected by
 /// name rather than as "unknown".
 #[derive(Deserialize)]
@@ -213,7 +215,9 @@ impl Stage for Sample {
                 // records still gets one through.
                 (count - 1).rem_euclid(i64::try_from(*n).unwrap_or(i64::MAX)) == 0
             }
-            Mode::Consistent { .. } => true,
+            // No salt: the same key value must get the same answer on every node and every
+            // pipeline, and a key kept at a lower percent is kept at any higher one.
+            Mode::Consistent { share, key } => share.keeps(mix(hash_key_values(key, &record))),
         };
         if keep {
             StageOutput::Pass(record)
@@ -238,13 +242,4 @@ fn mix(mut x: u64) -> u64 {
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     x ^ (x >> 31)
-}
-
-/// FNV-1a, 64-bit: stable across builds and platforms.
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    bytes
-        .iter()
-        .fold(OFFSET, |hash, &b| (hash ^ u64::from(b)).wrapping_mul(PRIME))
 }

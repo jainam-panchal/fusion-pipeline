@@ -4,6 +4,7 @@ mod condition;
 pub mod dedupe;
 pub mod extract;
 pub mod filter;
+mod key_hash;
 pub mod redact;
 mod regex_stage;
 pub mod route;
