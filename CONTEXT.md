@@ -162,8 +162,9 @@ _Avoid_: owner, winner
 A record past the holder's window writing itself as the new holder, with a compare-and-set against the holder it read. Refused when another worker wrote first; the record is then judged against that holder instead.
 _Avoid_: overwrite, refresh
 
-**Dedupe key**:
-The `key` field paths of a `dedupe` node, whose values (a missing one is `null`) hashed together say "same content".
+**Key fields**:
+The `key` field paths of a `dedupe` or `consistent` `sample` node, whose values (a missing one is `null`) hashed together say "same content" for `dedupe` and "same group" for `sample`. One parser and one hash, shared.
+_Avoid_: dedupe key, group-by
 
 **State error policy**:
 A node's `on_state_error`, `pass` or `nak`, applied by the engine when a stage could not reach the store. The stage only reports.
