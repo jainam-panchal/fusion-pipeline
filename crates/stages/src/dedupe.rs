@@ -24,7 +24,7 @@ use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use fusion_core::state::StateErrorPolicy;
 use serde::Deserialize;
 
-use crate::key_hash::hash_key_values;
+use crate::key_hash::{hash_key_fields, parse_key_fields};
 
 /// The purpose segment of this stage's keys: `{prefix}dedupe:{hash}`.
 const PURPOSE: &str = "dedupe";
@@ -82,17 +82,7 @@ impl Dedupe {
     /// `pass` or `nak`.
     pub fn from_node(node: &NodeConfig) -> Result<Self, ConfigError> {
         let params: Params = node.parse_params()?;
-        if params.key.is_empty() {
-            return Err(node.invalid_params("`key` needs at least one field path"));
-        }
-        let key = params
-            .key
-            .iter()
-            .map(|path| {
-                FieldPath::parse(path)
-                    .map_err(|e| node.invalid_params(format!("key `{path}`: {e}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let key = parse_key_fields(node, &params.key)?;
         let window_text = params.window.as_text();
         let window = parse_window(&window_text)
             .map_err(|e| node.invalid_params(format!("window `{window_text}`: {e}")))?;
@@ -114,7 +104,7 @@ impl Dedupe {
 
     /// The state key for `record`'s content: `dedupe:` plus the hash of its key fields.
     fn state_key(&self, record: &Record) -> String {
-        format!("{PURPOSE}:{:016x}", hash_key_values(&self.key, record))
+        format!("{PURPOSE}:{:016x}", hash_key_fields(&self.key, record))
     }
 }
 

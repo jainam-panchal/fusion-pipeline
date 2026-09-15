@@ -27,7 +27,7 @@ use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use fusion_core::state::StateErrorPolicy;
 use serde::Deserialize;
 
-use crate::key_hash::{fnv1a64, hash_key_values};
+use crate::key_hash::{fnv1a64, hash_key_fields, parse_key_fields};
 
 /// Every parameter of every mode, so a field belonging to another mode is rejected by
 /// name rather than as "unknown".
@@ -45,7 +45,6 @@ struct Params {
 #[derive(Debug)]
 pub struct Sample {
     mode: Mode,
-    on_state_error: StateErrorPolicy,
 }
 
 #[derive(Debug)]
@@ -60,6 +59,8 @@ enum Mode {
     EveryNth {
         /// As `i64` because the store counts in `i64`; converted once at load.
         n: i64,
+        /// The only mode that reaches the store, so the only one with a policy.
+        on_state_error: StateErrorPolicy,
     },
     Consistent {
         share: Share,
@@ -92,7 +93,8 @@ impl Share {
 
 const MODES: &str = "`random`, `every_nth` or `consistent`";
 
-/// The `every_nth` sample count key under the handle's prefix.
+/// The `every_nth` sample count under the handle's prefix: the purpose segment `sample`,
+/// as `dedupe` has `dedupe`, then `count`. The stage's only key.
 const COUNT_KEY: &str = "sample:count";
 
 /// How long the `every_nth` sample count lives without a record, refreshed on every
@@ -115,77 +117,69 @@ impl Sample {
         let Some(mode) = params.mode.as_deref() else {
             return Err(node.invalid_params(format!("`mode` is required: {MODES}")));
         };
-        let refuse = |field: &str, owner: &str| {
-            Err(node.invalid_params(format!("`{field}` belongs to {owner}, not `mode: {mode}`")))
+        // Which fields each mode takes; any other field present belongs to another mode
+        // and is refused naming that mode, so `n` under `random` is a caught mistake.
+        let allowed: &[&str] = match mode {
+            "random" => &["percent"],
+            "every_nth" => &["n", "on_state_error"],
+            "consistent" => &["percent", "key"],
+            other => {
+                return Err(node.invalid_params(format!("unknown mode `{other}`: use {MODES}")));
+            }
         };
-        match mode {
-            "random" => {
-                if params.n.is_some() {
-                    return refuse("n", "`mode: every_nth`");
-                }
-                if params.key.is_some() {
-                    return refuse("key", "`mode: consistent`");
-                }
-                if params.on_state_error.is_some() {
-                    return refuse("on_state_error", "`mode: every_nth`");
-                }
-                let share = parse_percent(node, params.percent)?;
-                Ok(Self {
-                    mode: Mode::Random {
-                        share,
-                        salt: fnv1a64(node.id.as_bytes()),
-                    },
-                    on_state_error: StateErrorPolicy::Pass,
-                })
-            }
-            "every_nth" => {
-                if params.percent.is_some() {
-                    return refuse("percent", "`mode: random` or `mode: consistent`");
-                }
-                if params.key.is_some() {
-                    return refuse("key", "`mode: consistent`");
-                }
-                let n = match params.n {
-                    Some(n) if n >= 1 => i64::try_from(n)
-                        .map_err(|_| node.invalid_params("`n` is too large"))?,
+        let fields = [
+            (
+                "percent",
+                params.percent.is_some(),
+                "`mode: random` or `mode: consistent`",
+            ),
+            ("n", params.n.is_some(), "`mode: every_nth`"),
+            ("key", params.key.is_some(), "`mode: consistent`"),
+            (
+                "on_state_error",
+                params.on_state_error.is_some(),
+                "`mode: every_nth`",
+            ),
+        ];
+        if let Some((field, _, owner)) = fields
+            .iter()
+            .find(|(field, present, _)| *present && !allowed.contains(field))
+        {
+            return Err(
+                node.invalid_params(format!("`{field}` belongs to {owner}, not `mode: {mode}`"))
+            );
+        }
+        let mode = match mode {
+            "random" => Mode::Random {
+                share: parse_percent(node, params.percent)?,
+                salt: fnv1a64(node.id.as_bytes()),
+            },
+            "every_nth" => Mode::EveryNth {
+                n: match params.n {
+                    Some(n) if n >= 1 => {
+                        i64::try_from(n).map_err(|_| node.invalid_params("`n` is too large"))?
+                    }
                     Some(_) => return Err(node.invalid_params("`n` must be at least 1")),
-                    None => return Err(node.invalid_params("`n` is required: keep one record in n")),
-                };
-                Ok(Self {
-                    mode: Mode::EveryNth { n },
-                    on_state_error: params.on_state_error.unwrap_or(StateErrorPolicy::Pass),
-                })
-            }
-            "consistent" => {
-                if params.n.is_some() {
-                    return refuse("n", "`mode: every_nth`");
-                }
-                if params.on_state_error.is_some() {
-                    return refuse("on_state_error", "`mode: every_nth`");
-                }
+                    None => {
+                        return Err(node.invalid_params("`n` is required: keep one record in n"));
+                    }
+                },
+                on_state_error: params.on_state_error.unwrap_or(StateErrorPolicy::Pass),
+            },
+            _ => {
                 let share = parse_percent(node, params.percent)?;
-                let Some(key) = params.key else {
+                let Some(key) = params.key.as_deref() else {
                     return Err(node.invalid_params(
                         "`key` is required: the field paths records are kept or dropped together by",
                     ));
                 };
-                if key.is_empty() {
-                    return Err(node.invalid_params("`key` needs at least one field path"));
+                Mode::Consistent {
+                    share,
+                    key: parse_key_fields(node, key)?,
                 }
-                let key = key
-                    .iter()
-                    .map(|path| {
-                        FieldPath::parse(path)
-                            .map_err(|e| node.invalid_params(format!("key `{path}`: {e}")))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Self {
-                    mode: Mode::Consistent { share, key },
-                    on_state_error: StateErrorPolicy::Pass,
-                })
             }
-            other => Err(node.invalid_params(format!("unknown mode `{other}`: use {MODES}"))),
-        }
+        };
+        Ok(Self { mode })
     }
 
     /// Factory for a [`fusion_core::registry::Registry`].
@@ -205,7 +199,10 @@ fn parse_percent(node: &NodeConfig, percent: Option<f64>) -> Result<Share, Confi
         Some(p) => Err(node.invalid_params(format!(
             "`percent` must be above 0 and at most 100, not {p}"
         ))),
-        None => Err(node.invalid_params("`percent` is required: the share kept, above 0 and at most 100")),
+        None => {
+            Err(node
+                .invalid_params("`percent` is required: the share kept, above 0 and at most 100"))
+        }
     }
 }
 
@@ -215,7 +212,7 @@ impl Stage for Sample {
             // The coin is the record id: a redelivered record lands on the same side, as
             // every verdict in this pipeline is meant to.
             Mode::Random { share, salt } => share.keeps(mix(ctx.record_id.0 ^ salt)),
-            Mode::EveryNth { n } => {
+            Mode::EveryNth { n, .. } => {
                 let count = match ctx.state.incr(COUNT_KEY, 1, COUNT_TTL) {
                     Ok(count) => count,
                     Err(error) => return StageOutput::StateError { record, error },
@@ -227,7 +224,7 @@ impl Stage for Sample {
             }
             // No salt: the same key value must get the same answer on every node and every
             // pipeline, and a key kept at a lower percent is kept at any higher one.
-            Mode::Consistent { share, key } => share.keeps(mix(hash_key_values(key, &record))),
+            Mode::Consistent { share, key } => share.keeps(mix(hash_key_fields(key, &record))),
         };
         if keep {
             StageOutput::Pass(record)
@@ -241,7 +238,10 @@ impl Stage for Sample {
     }
 
     fn on_state_error(&self) -> StateErrorPolicy {
-        self.on_state_error
+        match self.mode {
+            Mode::EveryNth { on_state_error, .. } => on_state_error,
+            Mode::Random { .. } | Mode::Consistent { .. } => StateErrorPolicy::Pass,
+        }
     }
 }
 

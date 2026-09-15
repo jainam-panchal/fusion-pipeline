@@ -1,18 +1,39 @@
-//! One hash for "these key field values": `dedupe` names a state key with it, `sample`'s
-//! `consistent` mode decides with it. Equal values hash equal whatever their source, so
-//! the two stages agree on what "the same key" means.
+//! Key fields: the `key` field paths a stage groups records by, and one hash of their
+//! values. `dedupe` names a state key with the hash, `sample`'s `consistent` mode decides
+//! with it. One parser and one hash, so the two stages agree on what "the same key" means.
 
 use std::fmt::Write as _;
 
+use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::path::{FieldPath, FieldValue, Num};
 use fusion_core::record::Record;
 
-/// FNV-1a 64 over the canonical JSON array of `paths` read from `record`. A missing field
-/// is `null`, so records lacking it hash together.
+/// The `key` field paths of `node`, parsed.
+///
+/// # Errors
+///
+/// [`ConfigError::InvalidParams`] naming the node when `key` is empty or a path in it does
+/// not parse; the message quotes the path and the parser's hint.
+pub(crate) fn parse_key_fields(
+    node: &NodeConfig,
+    key: &[String],
+) -> Result<Vec<FieldPath>, ConfigError> {
+    if key.is_empty() {
+        return Err(node.invalid_params("`key` needs at least one field path"));
+    }
+    key.iter()
+        .map(|path| {
+            FieldPath::parse(path).map_err(|e| node.invalid_params(format!("key `{path}`: {e}")))
+        })
+        .collect()
+}
+
+/// FNV-1a 64 over the canonical JSON array of the key `fields` read from `record`. A
+/// missing field is `null`, so records lacking it hash together.
 #[must_use]
-pub(crate) fn hash_key_values(paths: &[FieldPath], record: &Record) -> u64 {
+pub(crate) fn hash_key_fields(fields: &[FieldPath], record: &Record) -> u64 {
     let mut canonical = String::from("[");
-    for (i, path) in paths.iter().enumerate() {
+    for (i, path) in fields.iter().enumerate() {
         if i > 0 {
             canonical.push(',');
         }
