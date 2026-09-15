@@ -200,22 +200,10 @@ impl<'a> Labels<'a> {
         }
     }
 
-    /// The `tenant` label.
-    #[must_use]
-    pub const fn tenant(&self) -> &'a str {
-        self.tenant
-    }
-
     /// The `stage` label, if set.
     #[must_use]
     pub const fn stage(&self) -> Option<&'a str> {
         self.stage
-    }
-
-    /// The `engine` label, if set.
-    #[must_use]
-    pub const fn engine(&self) -> Option<EngineLabel> {
-        self.engine
     }
 
     /// Add the `engine` label, or leave it off for `None`.
