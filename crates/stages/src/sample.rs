@@ -13,7 +13,7 @@
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::path::FieldPath;
 use fusion_core::record::Record;
-use fusion_core::stage::{Context, Stage, StageOutput};
+use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use fusion_core::state::StateErrorPolicy;
 use serde::Deserialize;
 
@@ -33,14 +33,41 @@ struct Params {
 #[derive(Debug)]
 pub struct Sample {
     mode: Mode,
+    /// The node id hashed: mixed into every hash-based verdict so two `sample` nodes in
+    /// series keep different subsets rather than the same one twice.
+    salt: u64,
     on_state_error: StateErrorPolicy,
 }
 
 #[derive(Debug)]
 enum Mode {
-    Random { percent: f64 },
+    Random { share: Share },
     EveryNth { n: u64 },
-    Consistent { percent: f64, key: Vec<FieldPath> },
+    Consistent { share: Share, key: Vec<FieldPath> },
+}
+
+/// The share kept, as the threshold a uniformly mixed 64-bit hash is compared against:
+/// `percent` of the hash space lies below it. `percent: 100` keeps everything.
+#[derive(Debug, Clone, Copy)]
+struct Share {
+    threshold: u64,
+}
+
+impl Share {
+    fn from_percent(percent: f64) -> Self {
+        // 2^64 * percent / 100, saturating at u64::MAX for percent 100.
+        let space = 2f64.powi(64);
+        let threshold = (space * percent / 100.0).min(space - 1.0);
+        Self {
+            threshold: threshold as u64,
+        }
+    }
+
+    /// Whether a value with this `hash` is inside the share. `hash` must already be mixed:
+    /// the comparison assumes it is spread over the whole space.
+    fn keeps(self, hash: u64) -> bool {
+        hash <= self.threshold
+    }
 }
 
 const MODES: &str = "`random`, `every_nth` or `consistent`";
@@ -73,9 +100,10 @@ impl Sample {
                 if params.on_state_error.is_some() {
                     return refuse("on_state_error", "every_nth");
                 }
-                let percent = parse_percent(node, params.percent)?;
+                let share = parse_percent(node, params.percent)?;
                 Ok(Self {
-                    mode: Mode::Random { percent },
+                    mode: Mode::Random { share },
+                    salt: fnv1a64(node.id.as_bytes()),
                     on_state_error: StateErrorPolicy::Pass,
                 })
             }
@@ -93,6 +121,7 @@ impl Sample {
                 };
                 Ok(Self {
                     mode: Mode::EveryNth { n },
+                    salt: fnv1a64(node.id.as_bytes()),
                     on_state_error: params.on_state_error.unwrap_or(StateErrorPolicy::Pass),
                 })
             }
@@ -103,7 +132,7 @@ impl Sample {
                 if params.on_state_error.is_some() {
                     return refuse("on_state_error", "every_nth");
                 }
-                let percent = parse_percent(node, params.percent)?;
+                let share = parse_percent(node, params.percent)?;
                 let Some(key) = params.key else {
                     return Err(node.invalid_params(
                         "`key` is required: the field paths records are kept or dropped together by",
@@ -120,7 +149,8 @@ impl Sample {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Self {
-                    mode: Mode::Consistent { percent, key },
+                    mode: Mode::Consistent { share, key },
+                    salt: fnv1a64(node.id.as_bytes()),
                     on_state_error: StateErrorPolicy::Pass,
                 })
             }
@@ -138,10 +168,10 @@ impl Sample {
     }
 }
 
-/// `percent` in `(0, 100]`.
-fn parse_percent(node: &NodeConfig, percent: Option<f64>) -> Result<f64, ConfigError> {
+/// `percent` in `(0, 100]`, as a [`Share`].
+fn parse_percent(node: &NodeConfig, percent: Option<f64>) -> Result<Share, ConfigError> {
     match percent {
-        Some(p) if p > 0.0 && p <= 100.0 => Ok(p),
+        Some(p) if p > 0.0 && p <= 100.0 => Ok(Share::from_percent(p)),
         Some(p) => Err(node.invalid_params(format!(
             "`percent` must be above 0 and at most 100, not {p}"
         ))),
@@ -150,9 +180,18 @@ fn parse_percent(node: &NodeConfig, percent: Option<f64>) -> Result<f64, ConfigE
 }
 
 impl Stage for Sample {
-    fn process(&self, record: Record, _ctx: &Context<'_>) -> StageOutput {
-        let _ = &self.mode;
-        StageOutput::Pass(record)
+    fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
+        let keep = match &self.mode {
+            // The coin is the record id: a redelivered record lands on the same side, as
+            // every verdict in this pipeline is meant to.
+            Mode::Random { share } => share.keeps(mix(ctx.record_id.0 ^ self.salt)),
+            Mode::EveryNth { .. } | Mode::Consistent { .. } => true,
+        };
+        if keep {
+            StageOutput::Pass(record)
+        } else {
+            StageOutput::Drop(DropReason::Sample)
+        }
     }
 
     fn uses_state(&self) -> bool {
@@ -162,4 +201,22 @@ impl Stage for Sample {
     fn on_state_error(&self) -> StateErrorPolicy {
         self.on_state_error
     }
+}
+
+/// The splitmix64 finalizer: a bijection on `u64` that spreads nearby inputs (sequential
+/// record ids, hashes of similar keys) evenly over the whole space, so a threshold on the
+/// output keeps the configured share of any input population.
+fn mix(mut x: u64) -> u64 {
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+/// FNV-1a, 64-bit: stable across builds and platforms.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    bytes
+        .iter()
+        .fold(OFFSET, |hash, &b| (hash ^ u64::from(b)).wrapping_mul(PRIME))
 }
