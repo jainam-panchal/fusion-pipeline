@@ -164,6 +164,53 @@ nodes:
 }
 
 #[test]
+fn or_short_circuits_so_a_pattern_on_the_unreached_side_is_not_run() {
+    // The right side is exponential on PCRE2 and would trip `limits.match` on the
+    // adversarial body; the left side decides for record 1, so the pattern never runs.
+    let yaml = r#"
+nodes:
+  - id: keep_flagged
+    type: filter
+    condition: attributes.keep == true or body =~ "^(?=a)(a+)+$"
+    action: keep
+    on_redos_risk: warn
+    limits: { match: 1000 }
+  - id: out
+    type: sink.memory
+"#;
+    let h = start(yaml, 1);
+    let mut adversarial = "a".repeat(30);
+    adversarial.push('!');
+    let flagged = fusion_core::record::Record::from_json(&format!(
+        r#"{{"id": 1, "body": "{adversarial}", "attributes": {{"keep": true}}, "resource": {{"tenant.id": "acme"}}}}"#
+    ))
+    .expect("record parses");
+    assert_eq!(h.source.push(flagged).wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(
+        h.source.push(acme_record(2, &adversarial)).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
+
+    assert_eq!(
+        h.ids("out"),
+        vec![1],
+        "record 1 kept without running the pattern"
+    );
+    let dropped = [
+        ("tenant", "acme"),
+        ("stage", "keep_flagged"),
+        ("engine", "backtracking"),
+        ("reason", "regex_limit"),
+    ];
+    assert_eq!(
+        h.counter(Metric::RecordsDropped, &dropped),
+        1,
+        "record 2 reached the pattern"
+    );
+    h.finish();
+}
+
+#[test]
 fn a_condition_without_regex_operators_carries_no_engine_label() {
     let yaml = KEEP_DISK.replace(r#"body =~ "disk (full|failing)""#, r#"body == "disk full""#);
     let h = start(&yaml, 1);
