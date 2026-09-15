@@ -1,5 +1,6 @@
 # The pipeline the compose stack and the smoke test run: LOGS in, TRACE-level records
-# dropped, repeats of a body within 10s dropped, everything else to PROCESSED.
+# dropped, repeats of a body within 10s dropped, syslog lines parsed into attributes, IPv4
+# addresses masked, everything else to PROCESSED.
 #
 #   pipelined --config deploy/pipeline.yaml
 #
@@ -10,7 +11,9 @@
 # node gives the state-store panels a producer; its window is measured in ingestion time,
 # so a redelivered record is never mistaken for a repeat. `on_state_error: nak` (the default
 # is `pass`) because in the chaos test a paused Dragonfly must hold records back, not let
-# duplicates through: the redelivery lands after the pause is over.
+# duplicates through: the redelivery lands after the pause is over. The extract node gives
+# the regex panels a producer: a body that is not a syslog line is a non-match and passes
+# unchanged. The redact node masks IPv4 addresses in the body and the extracted content.
 name: compose
 source:
   type: nats
@@ -27,6 +30,15 @@ nodes:
     key: [body]
     window: 10s
     on_state_error: nak
+  - id: parse_syslog
+    type: pcre2_extract
+    field: body
+    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$'
+  - id: mask_ips
+    type: redact
+    fields: [body, attributes.Content]
+    pattern: '\b\d{1,3}(?:\.\d{1,3}){3}\b'
+    replace: '[ip]'
   - id: out
     type: sink.nats
     url: nats://127.0.0.1:4222

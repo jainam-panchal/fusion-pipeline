@@ -5,7 +5,8 @@
 #   1. every scrape target is up: the collector (pipeline metrics), NATS via
 #      prometheus-nats-exporter, Dragonfly, and the collector's self-metrics;
 #   2. traffic: 1,000 records with distinct bodies, one repeated body the dedupe node drops,
-#      one TRACE record the filter drops, one record without an id and one sink failure;
+#      one TRACE record the filter drops, one syslog line the extract node parses and the
+#      redact node masks, one record without an id and one sink failure;
 #   3. every metric with a producer is in Prometheus with the labels the spec gives it;
 #   4. the `reason` values seen on records_dropped_total are within the spec's closed set;
 #   5. the NATS exporter reports JetStream consumer pending, redelivered and ack floor;
@@ -69,6 +70,7 @@ nats pub logs.acme.syslog \
     --count "$RECORDS" >/dev/null
 nats pub logs.acme.syslog '{"id": 999999, "severity_text": "ERROR", "body": "disk full 1"}' >/dev/null
 nats pub logs.acme.syslog '{"id": 1000000, "severity_text": "TRACE", "body": "noise"}' >/dev/null
+nats pub logs.acme.syslog '{"id": 1000002, "body": "Jun 14 15:16:01 combo sshd(pam_unix)[19939]: authentication failure; rhost=218.188.2.4"}' >/dev/null
 nats pub logs.acme.syslog '{"body": "no id"}' >/dev/null
 # Sink failure: the PROCESSED stream is gone, so the write gets no PubAck, the source
 # message is nakked and JetStream redelivers it; nats-init recreates the stream.
@@ -94,6 +96,9 @@ SPEC_METRICS=(
     'records_dropped_total{tenant="acme",stage="dedupe_body",reason="dedupe"}'
     'records_errored_total{tenant="acme",stage="out"}'
     'stage_duration_seconds_bucket{tenant="acme",stage="drop_trace"}'
+    'records_in_total{tenant="acme",stage="parse_syslog",engine="linear"}'
+    'regex_nonmatch_total{tenant="acme",stage="parse_syslog",engine="linear"}'
+    'records_out_total{tenant="acme",stage="mask_ips",engine="linear"}'
     'state_ops_total{tenant="acme",stage="dedupe_body"}'
     'state_op_duration_seconds_bucket{tenant="acme",stage="dedupe_body"}'
     'source_naks_total{tenant="acme"}'
@@ -104,8 +109,8 @@ SPEC_METRICS=(
 )
 # Named in the spec, emitted by stages that do not exist yet (#8 Lua, #10 dead-letter
 # queue). Reported, not required, until their tickets land. `state_errors_total` has a
-# producer but a healthy run gives it nothing to count. Likewise the `regex_limit` drop
-# reason has no producer until the regex stages (#5).
+# producer but a healthy run gives it nothing to count, and so does the `regex_limit` drop
+# reason: no pattern in deploy/pipeline.yaml trips a limit on this traffic.
 PENDING_METRICS=(
     state_errors_total lua_errors_total dlq_total
 )
