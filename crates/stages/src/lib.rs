@@ -7,12 +7,14 @@ pub mod filter;
 pub mod redact;
 mod regex_stage;
 pub mod route;
+pub mod sample;
 
 pub use dedupe::Dedupe;
 pub use extract::Extract;
 pub use filter::Filter;
 pub use redact::Redact;
 pub use route::Route;
+pub use sample::Sample;
 
 /// Register every built-in stage under its config `type` name.
 pub fn register_all(registry: &mut fusion_core::registry::Registry) {
@@ -21,4 +23,5 @@ pub fn register_all(registry: &mut fusion_core::registry::Registry) {
     registry.register_stage("dedupe", Dedupe::build);
     registry.register_stage("extract", Extract::build);
     registry.register_stage("redact", Redact::build);
+    registry.register_stage("sample", Sample::build);
 }
