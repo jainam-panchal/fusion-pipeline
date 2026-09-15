@@ -4,7 +4,7 @@
 #   pipelined --config deploy/pipeline-routing.yaml
 #
 # DEBUG records are dropped and acked. What survives is routed by log format to that
-# format's pcre2_extract node: Linux goes to two sinks (fan-out), Apache and everything else
+# format's extract node: Linux goes to two sinks (fan-out), Apache and everything else
 # share one (fan-in). A record is acked once every branch it took has a PubAck.
 #
 # `url` here and on each sink is overridden by NATS_URL when set.
@@ -28,13 +28,13 @@ nodes:
     default: other
 
   - id: parse_linux
-    type: pcre2_extract                     # named groups become attributes.<name>
+    type: extract                     # named groups become attributes.<name>
     from: by_format.linux
     field: body
     pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$'
 
   - id: parse_apache
-    type: pcre2_extract
+    type: extract
     from: by_format.apache
     field: body
     pattern: '^\[(?<Time>[^\]]+)\] \[(?<Level>\w+)\] (?<Content>.*)$'

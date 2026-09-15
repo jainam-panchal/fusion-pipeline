@@ -31,7 +31,7 @@ nodes:
     window: 10s
     on_state_error: nak
   - id: parse_syslog
-    type: pcre2_extract
+    type: extract
     field: body
     pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$'
   - id: mask_ips
