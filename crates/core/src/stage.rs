@@ -157,29 +157,29 @@ impl fmt::Debug for State {
 }
 
 impl State {
-    /// A handle for one record: `store` is the worker's connection, `pipeline` and the
-    /// tenant and node of `labels` form the key prefix, `metrics` receives the counts under
-    /// `labels` (the node's, as the engine built them), and `declared` is the node's
-    /// [`Stage::uses_state`].
+    /// A handle for one record: `store` is the worker's connection, `pipeline`, `tenant` and
+    /// `node` form the key prefix, `metrics` receives the counts under the node's labels
+    /// (`engine` is the stage's [`Stage::engine_label`]), and `declared` is the node's
+    /// [`Stage::uses_state`]. `tenant` and `node` are taken apart rather than as a
+    /// [`Labels`] so a handle without a node id is unrepresentable: the key prefix is an
+    /// invariant, not a convention.
     #[must_use]
     pub fn new(
         store: Arc<dyn StateStore>,
         metrics: Metrics,
         pipeline: &str,
-        labels: &Labels<'_>,
+        tenant: &str,
+        node: &str,
+        engine: Option<EngineLabel>,
         declared: bool,
     ) -> Self {
-        let tenant = labels.tenant();
-        // Only a tenant-wide `Labels` has no stage, and a node's handle is never built from
-        // one; the empty id is the honest fallback rather than a panic on a record.
-        let node = labels.stage().unwrap_or_default();
         Self {
             store,
             metrics,
             prefix: format!("{pipeline}:{}:{node}:", escape_segment(tenant)),
             tenant: tenant.to_owned(),
             node: node.to_owned(),
-            engine: labels.engine(),
+            engine,
             declared,
         }
     }
