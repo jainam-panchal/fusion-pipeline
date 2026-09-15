@@ -108,3 +108,73 @@ fn every_nth_keeps_the_first_record_of_each_n_so_a_small_tenant_still_gets_one_t
     assert_eq!(h.ids("out"), vec![1, 11]);
     h.finish();
 }
+
+/// The stated behaviour of option C: a redelivered message is a new delivery and takes a
+/// new count. Here record 1 took count 1 (kept) and comes back as count 13 (dropped).
+#[test]
+fn every_nth_counts_a_redelivered_record_again_because_sampling_is_per_delivery() {
+    let h = start(EVERY_TENTH, 1);
+    for id in 1..=12 {
+        assert_eq!(h.source.push(record(id, "x")).wait(WAIT), Some(AckOutcome::Ack));
+    }
+    assert_eq!(h.source.push(record(1, "x")).wait(WAIT), Some(AckOutcome::Ack));
+
+    assert_eq!(h.ids("out"), vec![1, 11]);
+    assert_eq!(
+        h.state.get("ingest:acme:keep_some:sample:count").expect("store answers"),
+        Some(b"13".to_vec()),
+        "13 deliveries, 13 counts"
+    );
+    assert_eq!(h.state.keys(), vec!["ingest:acme:keep_some:sample:count"], "no key per record");
+    h.finish();
+}
+
+fn tenant_record(id: u64, tenant: &str) -> Record {
+    Record::from_json(&format!(
+        r#"{{"id": {id}, "body": "x", "resource": {{"tenant.id": "{tenant}"}}}}"#
+    ))
+    .expect("record parses")
+}
+
+#[test]
+fn every_nth_keeps_one_counter_per_tenant_so_a_small_tenant_is_not_drowned_by_a_big_one() {
+    let h = start(EVERY_TENTH, 1);
+    for id in 1..=30 {
+        assert_eq!(h.source.push(tenant_record(id, "acme")).wait(WAIT), Some(AckOutcome::Ack));
+    }
+    for id in 101..=103 {
+        assert_eq!(h.source.push(tenant_record(id, "beta")).wait(WAIT), Some(AckOutcome::Ack));
+    }
+
+    assert_eq!(h.ids("out"), vec![1, 11, 21, 101], "acme's 1, 11, 21; beta's first");
+    h.finish();
+}
+
+#[test]
+fn every_nth_with_the_store_down_passes_by_default_and_counts_the_error() {
+    let h = start(EVERY_TENTH, 1);
+    h.state.fail_all(true);
+    for id in 1..=5 {
+        assert_eq!(h.source.push(record(id, "x")).wait(WAIT), Some(AckOutcome::Ack));
+    }
+
+    assert_eq!(h.ids("out"), vec![1, 2, 3, 4, 5], "uncounted, forwarded");
+    assert_eq!(h.counter(Metric::StateErrors, &STAGE), 5);
+    assert_eq!(h.counter(Metric::RecordsDropped, &SAMPLE_DROP), 0);
+    h.finish();
+}
+
+#[test]
+fn every_nth_with_the_store_down_and_nak_policy_naks() {
+    let yaml = EVERY_TENTH.replace("    n: 10\n", "    n: 10\n    on_state_error: nak\n");
+    let h = start(&yaml, 1);
+    h.state.fail_all(true);
+
+    assert!(matches!(
+        h.source.push(record(1, "x")).wait(WAIT),
+        Some(AckOutcome::Nak(_))
+    ));
+    assert!(h.ids("out").is_empty());
+    assert_eq!(h.counter(Metric::StateErrors, &STAGE), 1);
+    h.finish();
+}
