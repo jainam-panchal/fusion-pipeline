@@ -1508,8 +1508,8 @@
         {
           "id": 16,
           "type": "timeseries",
-          "title": "Regex limit trips",
-          "description": "Drops with reason regex_limit: match, depth, heap, work or input-size limit tripped on the PCRE2 path.",
+          "title": "Regex limit trips and non-matches",
+          "description": "Drops with reason regex_limit (match, depth, heap, work or input-size limit tripped) and records a regex node's pattern did not match, per node and engine.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1555,9 +1555,18 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum by (stage) (rate(records_dropped_total{tenant=~\"$tenant\",reason=\"regex_limit\"}[1m]))",
-              "legendFormat": "{{stage}}",
+              "expr": "sum by (stage, engine) (rate(records_dropped_total{tenant=~\"$tenant\",reason=\"regex_limit\"}[1m]))",
+              "legendFormat": "{{stage}} ({{engine}}) limit",
               "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (stage, engine) (rate(regex_nonmatch_total{tenant=~\"$tenant\"}[1m]))",
+              "legendFormat": "{{stage}} ({{engine}}) non-match",
+              "refId": "B"
             }
           ]
         },

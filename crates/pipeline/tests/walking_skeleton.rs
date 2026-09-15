@@ -132,18 +132,6 @@ fn many_records_are_all_settled_across_workers() {
 }
 
 #[test]
-fn filter_with_regex_operator_is_rejected_at_load_until_the_regex_ticket() {
-    let yaml = KEEP_ERRORS.replace(r#"severity_text == "ERROR""#, r#"body =~ "disk""#);
-    let registry = registry(&MemorySinks::new());
-
-    let err = Pipeline::from_yaml(&yaml, &registry).expect_err("regex ops not wired");
-
-    let message = err.to_string();
-    assert!(message.contains("keep_errors"), "{message}");
-    assert!(message.contains("=~"), "{message}");
-}
-
-#[test]
 fn unknown_node_type_is_rejected_naming_the_node() {
     let yaml = KEEP_ERRORS.replace("type: filter", "type: teleport");
     let registry = registry(&MemorySinks::new());

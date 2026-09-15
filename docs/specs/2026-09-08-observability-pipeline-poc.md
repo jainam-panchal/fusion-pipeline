@@ -158,6 +158,8 @@ Internally the config becomes a DAG (node ids plus an edge list). The POC config
 
 Amended 2026-09-11 (issue #20): the field was "a dotted or bracketed path"; bracket syntax is removed and is a load-time config error naming the node, with the dotted form in the message.
 
+Amended 2026-09-14 (issue #5): the literal after `=~` or `!~` must be a string, the pattern; anything else is a parse error with the literal's offset, reported at load naming the node. A field that is not a string makes `=~` false and `!~` true, as `!=` is on a type mismatch. `and` and `or` short-circuit, so a pattern on the side that is not reached is not run.
+
 ### Field paths
 
 Every stage names a record field with one dotted path, `root ("." segment)*`, and nothing else. The root is a top-level record field. When it is `attributes`, `resource` or `scope`, the segments after it joined with dots are the map key: `attributes.http.status` reads and writes the `http.status` key of `attributes`, and `resource.tenant.id` is the tenant. Map values are scalars; nothing below a key is addressable. `body` is addressed only as a whole, and the scalar fields (`id`, `kind`, `severity_text`, `severity_number`, the time fields, `trace_id`, `span_id`) take no segments. A bare segment is one or more of `[A-Za-z0-9_-]`, so `resource.k8s.pod-name` and `attributes.5xx.count` need no quoting; a segment with any other character is written as a double-quoted string, `attributes."Event ID".code` naming the `Event ID.code` key, with `\"` and `\\` as the only escapes. The root is never quoted.
@@ -170,6 +172,8 @@ Every stage implements one function: record in, and one of `Pass(record)`, `Drop
 
 Amended 2026-09-11 (issue #6): a sixth output, `StateError { record, error }`, for a stage that could not reach the state store. `Error` carries no record, and the `pass` policy needs the record back unchanged, so the stage hands it over with the error and the engine decides. The context's state handle carries the metrics handle inside it: a stage never emits a metric directly, every state operation is counted by the handle. A stage declares `uses_state` so the engine knows whether to open connections at all.
 
+Amended 2026-09-14 (issue #5): "a stage never emits a metric directly" reads: never without a handle the engine built for it. The context carries a second narrow handle, for the metrics a stage owns (`regex_nonmatch_total`); the per-node series (`records_in_total` and the rest) stay the engine's and are not reachable from a stage.
+
 `filter` takes a condition and `action: drop|keep`.
 
 `route` takes ordered labelled conditions; first match wins, default applies otherwise.
@@ -177,6 +181,10 @@ Amended 2026-09-11 (issue #6): a sixth output, `StateError { record, error }`, f
 `pcre2_extract` takes `field`, `pattern`, `limits {match, depth, heap_kib, work, input_bytes}` and `on_redos_risk: reject|warn` (default `reject`). Named groups become attributes. The engine is chosen per the facade rules above; `limits.match`, `depth`, `heap_kib` and `work` apply only on the PCRE2 path, `input_bytes` on both. An absent `work` takes the default (10 000 000); `work: 0` turns the count off. (assumed) A non-match is `Pass` unchanged rather than an error.
 
 `redact` takes `fields`, `pattern`, `replace` and the same limits. Replacement is in place.
+
+Amended 2026-09-15 (issue #5): the node type is `extract`, not `pcre2_extract`. The name says what the node does, as `filter`, `route`, `redact` and `dedupe` do; which engine a pattern lands on is the facade's decision and is reported on the `engine` label, so an engine in the type name would be wrong for every linear pattern. Every `pcre2_extract` above reads `extract`.
+
+Amended 2026-09-14 (issue #5): `replace` is literal text; `$1`, `$name` and `\1` are written as they are, since the two engines expand them differently and one config must give one output whichever engine the pattern lands on. Every match in each listed field is replaced, following the `regex` crate's rule for empty matches on both engines. A field that is not a string is skipped by `redact` and is a non-match for `extract`. A record no listed field matched, or whose `field` did not match, passes unchanged and counts once on `regex_nonmatch_total`. `redact` refuses `id` and `kind` in `fields` at load. `filter` and `route` take the same `limits` and `on_redos_risk` for the patterns in their conditions; a tripped limit in a condition drops the record with reason `regex_limit` whatever the `action` or the label would have been, and any other engine failure is a stage error. On every regex stage a limit that trips on one record leaves the pattern serving the next. `input_bytes` bounds the text a pattern runs on, not the record: the `field` of `extract`, each listed field of `redact` on its own, the field of each regex leaf in a condition.
 
 `sample` takes `mode: random|every_nth|consistent`, `percent` or `n`, and `key` for consistent mode. `every_nth` uses a shared `incr` in the state store guarded by the record id so redelivery does not double-count.
 
@@ -218,6 +226,8 @@ The spine metric is `records_dropped_total{tenant, stage, reason}`. Reasons are 
 
 Other metrics: per-stage `records_in_total`, `records_out_total`, `records_errored_total`, `stage_duration_seconds`; `state_ops_total`, `state_op_duration_seconds`, `state_errors_total`; `lua_errors_total{kind}`; `source_naks_total`, `source_redeliveries_total`, `dlq_total`; `sink_publish_duration_seconds`, `sink_publish_errors_total`; `pipeline_end_to_end_seconds`.
 
+Amended 2026-09-14 (issue #5): one more metric, `regex_nonmatch_total{tenant, stage, engine}`, counts the records a regex stage's pattern did not match and passed on unchanged, so extraction coverage per node is readable without the harness verifier. The `engine` label: every per-node metric of a node whose stage runs a regex (`extract`, `redact`, and `filter` or `route` when a condition uses `=~` or `!~`) carries `engine="linear"` or `engine="backtracking"`, the facade's classification of its pattern; a condition with several patterns reports `backtracking` if any of them needs PCRE2; nodes without a regex carry no `engine` label, so `sum by (stage)` is unchanged and a regex node can be split by engine. The same value is in the node's load-time log line. `records_dropped_total{reason="regex_limit"}` now has producers: the two regex stages and conditions with regex operators.
+
 Traces are head-sampled at 1% by record id, with force-sampling on any error or nak.
 
 NATS is scraped through `prometheus-nats-exporter`; Dragonfly is scraped at `:6379/metrics`.
@@ -229,6 +239,8 @@ Amended 2026-09-11 (issue #11): The internal dashboard ships with #11; the tenan
 ### Chaos test
 
 Vendored data lives under `testdata/loghub/<Set>/` (raw log, structured CSV, templates CSV; about 300 KB per set).
+
+Amended 2026-09-14 (issue #5): Linux, Apache and OpenSSH are vendored with the regex stages; Mac lands with the harness (#13). `testdata/loghub/README.md` carries the loghub-2.0 licence notice (research and academic use, citation required, not the workspace's Apache-2.0), the upstream commit and per-file checksums, and the three rules for comparing extracted attributes with the structured CSV (a `N.0` cell is the integer `N`, an empty cell means the attribute is absent, `Content` is trimmed of trailing whitespace on both sides, since some raw lines end in a space the CSV does not keep, and every other column compares exactly). The patterns lift the text as it is in the line, trailing space included; the normalisation is the comparer's.
 
 Compose services: `nats`, `dragonfly`, `otel-collector`, `prometheus`, `loki`, `tempo`, `grafana`, `pipeline`, `producer`, `verifier`, `nats-exporter`.
 

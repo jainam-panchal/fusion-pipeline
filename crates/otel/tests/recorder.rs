@@ -78,9 +78,10 @@ fn every_spec_metric_exports_under_the_spec_name_with_seconds_on_histograms() {
 fn a_counter_exports_its_labels_as_attributes_and_its_running_total() {
     let exported = export(|recorder| {
         let metrics = Metrics::new(recorder.clone());
-        metrics.dropped("acme", "keep_errors", DropReason::Filter);
-        metrics.dropped("acme", "keep_errors", DropReason::Filter);
-        metrics.dropped("acme", "keep_errors", DropReason::RouteDefaultDrop);
+        let node = Labels::new("acme", "keep_errors");
+        metrics.dropped(&node, DropReason::Filter);
+        metrics.dropped(&node, DropReason::Filter);
+        metrics.dropped(&node, DropReason::RouteDefaultDrop);
     });
 
     let dropped =
@@ -124,7 +125,10 @@ fn a_counter_exports_its_labels_as_attributes_and_its_running_total() {
 fn a_duration_histogram_has_sub_second_buckets_so_stage_latency_is_not_all_in_one_bin() {
     let exported = export(|recorder| {
         let metrics = Metrics::new(recorder.clone());
-        metrics.stage_duration("acme", "keep_errors", std::time::Duration::from_micros(300));
+        metrics.stage_duration(
+            &Labels::new("acme", "keep_errors"),
+            std::time::Duration::from_micros(300),
+        );
     });
 
     let duration =
@@ -155,7 +159,8 @@ fn a_duration_histogram_has_sub_second_buckets_so_stage_latency_is_not_all_in_on
 
 #[test]
 fn every_export_carries_the_service_name_and_an_instance_id() {
-    let exported = export(|recorder| Metrics::new(recorder.clone()).records_in("acme", "out"));
+    let exported =
+        export(|recorder| Metrics::new(recorder.clone()).records_in(&Labels::new("acme", "out")));
 
     let resource = exported[0].resource();
     let name = resource

@@ -465,6 +465,78 @@ impl Regex {
         }))
     }
 
+    /// Every non-overlapping match in `haystack`, leftmost first, with all capture groups.
+    /// Both engines follow the `regex` crate's rule for empty matches: an empty match that
+    /// ends where the previous match ended is skipped, and the search then moves on by one
+    /// character. The input size is checked once, on the first item; on the backtracking
+    /// engine the work budget is one for the whole iteration, so a tripped limit ends it
+    /// with that error.
+    pub fn captures_iter<'r, 'h>(&'r self, haystack: &'h str) -> CapturesIter<'r, 'h> {
+        CapturesIter {
+            re: self,
+            haystack,
+            start: 0,
+            last_end: None,
+            budget: match &self.inner {
+                Inner::Linear(_) => None,
+                Inner::Backtracking(re) => re.budget(),
+            },
+            checked: false,
+            done: false,
+        }
+    }
+
+    /// `haystack` with every match replaced by `replacement`, taken literally: `$` and `\`
+    /// mean nothing. `None` when nothing matched, so a caller can tell a rewrite from a
+    /// pass-through without a second scan.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Regex::is_match`]; a limit tripped on any match ends the call.
+    pub fn replace_all(
+        &self,
+        haystack: &str,
+        replacement: &str,
+    ) -> Result<Option<String>, MatchError> {
+        let mut out: Option<String> = None;
+        let mut copied = 0;
+        for caps in self.captures_iter(haystack) {
+            let caps = caps?;
+            let Some(span) = caps.span(0) else { continue };
+            let out = out.get_or_insert_with(|| String::with_capacity(haystack.len()));
+            out.push_str(&haystack[copied..span.start]);
+            out.push_str(replacement);
+            copied = span.end;
+        }
+        Ok(out.map(|mut out| {
+            out.push_str(&haystack[copied..]);
+            out
+        }))
+    }
+
+    /// The leftmost match starting at or after byte `start`, with `budget` carried across
+    /// calls on the backtracking engine. No input check: the iterator does that once.
+    fn captures_at<'h>(
+        &self,
+        haystack: &'h str,
+        start: usize,
+        budget: &mut Option<u64>,
+    ) -> Result<Option<Captures<'_, 'h>>, MatchError> {
+        let spans = match &self.inner {
+            Inner::Linear(re) => re.captures_at(haystack, start).map(Spans::Linear),
+            Inner::Backtracking(re) => {
+                let (found, remaining) = re.captures_from(haystack, start, *budget)?;
+                *budget = remaining;
+                found.map(Spans::Backtracking)
+            }
+        };
+        Ok(spans.map(|spans| Captures {
+            haystack,
+            spans,
+            names: &self.names,
+        }))
+    }
+
     fn check_input(&self, haystack: &str) -> Result<(), MatchError> {
         if haystack.len() > self.input_bytes {
             return Err(MatchError::InputTooLarge {
@@ -505,6 +577,79 @@ fn linear_error_offset(pattern: &str) -> usize {
         Err(regex_syntax::Error::Translate(e)) => e.span().start.offset,
         _ => 0,
     }
+}
+
+/// The iterator behind [`Regex::captures_iter`].
+#[derive(Debug)]
+pub struct CapturesIter<'r, 'h> {
+    re: &'r Regex,
+    haystack: &'h str,
+    /// Where the next search starts.
+    start: usize,
+    /// Where the last reported match ended, for the empty-match rule.
+    last_end: Option<usize>,
+    /// Work left for the backtracking engine across the whole iteration.
+    budget: Option<u64>,
+    checked: bool,
+    done: bool,
+}
+
+impl<'r, 'h> Iterator for CapturesIter<'r, 'h> {
+    type Item = Result<Captures<'r, 'h>, MatchError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        if !self.checked {
+            self.checked = true;
+            if let Err(e) = self.re.check_input(self.haystack) {
+                self.done = true;
+                return Some(Err(e));
+            }
+        }
+        loop {
+            if self.start > self.haystack.len() {
+                self.done = true;
+                return None;
+            }
+            let found = match self
+                .re
+                .captures_at(self.haystack, self.start, &mut self.budget)
+            {
+                Ok(found) => found,
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+            };
+            let Some(caps) = found else {
+                self.done = true;
+                return None;
+            };
+            let Some(span) = caps.span(0) else {
+                self.done = true;
+                return None;
+            };
+            if span.start == span.end && Some(span.end) == self.last_end {
+                // An empty match where the previous match ended: skip it and move on by
+                // one character, as the `regex` crate does.
+                self.start = next_char_boundary(self.haystack, self.start);
+                continue;
+            }
+            self.last_end = Some(span.end);
+            self.start = span.end;
+            return Some(Ok(caps));
+        }
+    }
+}
+
+/// `at` plus the width of the character there, or one past the end.
+fn next_char_boundary(haystack: &str, at: usize) -> usize {
+    haystack
+        .get(at..)
+        .and_then(|rest| rest.chars().next())
+        .map_or(at + 1, |c| at + c.len_utf8())
 }
 
 /// Group spans as the engine reports them. The linear engine's own capture block is kept

@@ -13,9 +13,12 @@
 //!
 //! A path is resolved by [`FieldPath`]: the root is a top-level record field and, under
 //! `attributes`, `resource` or `scope`, the segments joined with dots are the flat map key.
-//! `=~` and `!~` parse here; the regex ticket wires their evaluation, so
-//! [`Condition::matches`] treats them as false and stages reject them at load through
-//! [`Condition::has_regex_ops`].
+//! `=~` and `!~` take a string literal, the pattern. Core has no regex engine: a stage
+//! compiles the patterns [`Condition::regex_patterns`] lists through the facade and
+//! evaluates with [`Condition::matches_with`], handing in the match function; a `!~` is the
+//! negation, and a field that is not a string matches neither (`=~` false, `!~` true, as
+//! `!=` is on a type mismatch). [`Condition::matches`] is for conditions without regex
+//! operators and treats them as false.
 
 use std::cmp::Ordering;
 
@@ -59,6 +62,12 @@ pub enum ConditionError {
         /// Byte offset in the expression.
         offset: usize,
     },
+    /// `=~` or `!~` with something other than a string literal on the right.
+    #[error("`=~` and `!~` take a quoted pattern (at offset {offset})")]
+    RegexNeedsString {
+        /// Byte offset of the literal in the expression.
+        offset: usize,
+    },
     /// A field path that does not follow the path rule.
     #[error("{source} (path at offset {offset})")]
     Field {
@@ -86,9 +95,9 @@ pub enum CompareOp {
     Le,
     /// `>=`
     Ge,
-    /// `=~` (regex match; evaluation lands with the regex ticket)
+    /// `=~`: the field is a string and the pattern matches somewhere in it.
     Match,
-    /// `!~` (regex non-match; evaluation lands with the regex ticket)
+    /// `!~`: the negation of `=~`.
     NotMatch,
 }
 
@@ -146,27 +155,74 @@ impl Condition {
         }
     }
 
-    /// Whether the condition uses `=~` or `!~` anywhere.
+    /// The pattern of every `=~` and `!~` leaf, in tree order, duplicates included.
     #[must_use]
-    pub fn has_regex_ops(&self) -> bool {
+    pub fn regex_patterns(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        self.collect_patterns(&mut out);
+        out
+    }
+
+    fn collect_patterns<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
-            Self::Compare { op, .. } => matches!(op, CompareOp::Match | CompareOp::NotMatch),
-            Self::And(a, b) | Self::Or(a, b) => a.has_regex_ops() || b.has_regex_ops(),
-            Self::Not(inner) => inner.has_regex_ops(),
+            Self::Compare {
+                op: CompareOp::Match | CompareOp::NotMatch,
+                literal: Literal::Str(pattern),
+                ..
+            } => out.push(pattern),
+            Self::Compare { .. } => {}
+            Self::And(a, b) | Self::Or(a, b) => {
+                a.collect_patterns(out);
+                b.collect_patterns(out);
+            }
+            Self::Not(inner) => inner.collect_patterns(out),
         }
     }
 
-    /// Evaluate against `record`.
+    /// Evaluate against `record` with regex operators treated as false. For a condition
+    /// that uses them, see [`Condition::matches_with`].
     ///
     /// A missing field equals `null` and nothing else; comparisons between mismatched types
     /// are false (so `!=` is true); ordering applies to numbers and to strings.
     #[must_use]
     pub fn matches(&self, record: &Record) -> bool {
+        self.matches_with(record, &mut |_, _| Ok::<bool, ()>(false))
+            .unwrap_or(false)
+    }
+
+    /// Evaluate against `record`, asking `regex(pattern, text)` whether the pattern of a
+    /// `=~` or `!~` leaf matches the field's text. `and` and `or` short-circuit, so a leaf
+    /// the left side decides is not asked. The first error `regex` returns ends the
+    /// evaluation with it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `regex` returns.
+    pub fn matches_with<E>(
+        &self,
+        record: &Record,
+        regex: &mut impl FnMut(&str, &str) -> Result<bool, E>,
+    ) -> Result<bool, E> {
         match self {
-            Self::Compare { field, op, literal } => compare(field.read(record), *op, literal),
-            Self::And(a, b) => a.matches(record) && b.matches(record),
-            Self::Or(a, b) => a.matches(record) || b.matches(record),
-            Self::Not(inner) => !inner.matches(record),
+            Self::Compare {
+                field,
+                op: op @ (CompareOp::Match | CompareOp::NotMatch),
+                literal: Literal::Str(pattern),
+            } => {
+                let matched = match field.read(record) {
+                    FieldValue::Str(text) => regex(pattern, text)?,
+                    _ => false,
+                };
+                Ok(if *op == CompareOp::Match {
+                    matched
+                } else {
+                    !matched
+                })
+            }
+            Self::Compare { field, op, literal } => Ok(compare(field.read(record), *op, literal)),
+            Self::And(a, b) => Ok(a.matches_with(record, regex)? && b.matches_with(record, regex)?),
+            Self::Or(a, b) => Ok(a.matches_with(record, regex)? || b.matches_with(record, regex)?),
+            Self::Not(inner) => Ok(!inner.matches_with(record, regex)?),
         }
     }
 }
@@ -489,7 +545,15 @@ impl Parser {
                     } => op,
                     other => return Err(other.unexpected()),
                 };
+                let literal_offset = self.peek().map_or(0, |t| t.offset);
                 let literal = self.literal()?;
+                if matches!(op, CompareOp::Match | CompareOp::NotMatch)
+                    && !matches!(literal, Literal::Str(_))
+                {
+                    return Err(ConditionError::RegexNeedsString {
+                        offset: literal_offset,
+                    });
+                }
                 Ok(Condition::Compare { field, op, literal })
             }
             _ => Err(token.unexpected()),

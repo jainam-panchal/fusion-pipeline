@@ -200,15 +200,25 @@ fn single_quoted_strings_and_escapes() {
 }
 
 #[test]
-fn regex_operators_parse_but_are_not_wired_yet() {
-    let c = Condition::parse(r#"body =~ "disk""#).expect("parses");
-    assert!(c.has_regex_ops());
-    let c = Condition::parse(r#"body !~ "disk""#).expect("parses");
-    assert!(c.has_regex_ops());
+fn regex_operators_parse_and_list_their_patterns() {
+    let c = Condition::parse(r#"body =~ "disk" and (body !~ "ok" or severity_number > 1)"#)
+        .expect("parses");
+    assert_eq!(c.regex_patterns(), vec!["disk", "ok"]);
+    let c = Condition::parse("severity_number > 1").expect("parses");
+    assert!(c.regex_patterns().is_empty());
+}
+
+#[test]
+fn regex_operators_need_a_string_literal() {
+    let err = Condition::parse("body =~ 42").expect_err("rejected");
     assert!(
-        !Condition::parse("severity_number > 1")
-            .expect("parses")
-            .has_regex_ops()
+        matches!(err, ConditionError::RegexNeedsString { offset: 8 }),
+        "{err:?}"
+    );
+    let err = Condition::parse("body !~ null").expect_err("rejected");
+    assert!(
+        matches!(err, ConditionError::RegexNeedsString { .. }),
+        "{err:?}"
     );
 }
 

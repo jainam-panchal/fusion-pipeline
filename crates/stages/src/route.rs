@@ -2,21 +2,24 @@
 //! The README's "Routing" section has the config example.
 //!
 //! The declaration is parsed by [`fusion_core::route::RouteSpec`], which the graph validator
-//! also uses to check that every label has a consumer.
+//! also uses to check that every label has a consumer. `limits` and `on_redos_risk` apply
+//! to every `=~` and `!~` in the conditions; a tripped limit drops the record with reason
+//! `regex_limit` before any label is chosen.
 
-use fusion_core::condition::Condition;
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::metrics::EngineLabel;
 use fusion_core::record::Record;
 use fusion_core::route::{Fallback, RouteSpec};
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 
-use crate::condition::parse_condition;
+use crate::condition::{CompiledCondition, worst_engine};
+use crate::regex_stage::{RegexParams, engine_label, log_node_engine, match_failure};
 
 /// A compiled rule: the label and the condition that selects it.
 #[derive(Debug)]
 struct Rule {
     label: String,
-    condition: Condition,
+    condition: CompiledCondition,
 }
 
 /// The `route` stage.
@@ -24,6 +27,7 @@ struct Rule {
 pub struct Route {
     routes: Vec<Rule>,
     fallback: Fallback,
+    engine: Option<EngineLabel>,
 }
 
 impl Route {
@@ -32,23 +36,33 @@ impl Route {
     /// # Errors
     ///
     /// [`ConfigError::InvalidParams`] when the declaration is malformed (see
-    /// [`RouteSpec::from_node`]), a condition does not parse, or it uses `=~`/`!~` (not
-    /// wired until the regex ticket).
+    /// [`RouteSpec::from_node`]), a condition does not parse, or a pattern in one does not
+    /// compile under the node's limits and ReDoS policy.
     pub fn from_node(node: &NodeConfig) -> Result<Self, ConfigError> {
         let spec = RouteSpec::from_node(node)?;
+        let regex: RegexParams = node.parse_params()?;
         let routes = spec
             .routes()
             .iter()
             .map(|rule| {
                 let label = rule.label.clone();
-                let condition =
-                    parse_condition(node, &rule.condition, &format!("route `{label}`"))?;
+                let condition = CompiledCondition::compile(
+                    node,
+                    &rule.condition,
+                    &format!("route `{label}`"),
+                    &regex,
+                )?;
                 Ok(Rule { label, condition })
             })
             .collect::<Result<Vec<_>, ConfigError>>()?;
+        // The node's label is its worst engine across every rule.
+        let engine = worst_engine(routes.iter().filter_map(|rule| rule.condition.engine()))
+            .map(engine_label);
+        log_node_engine(node, engine);
         Ok(Self {
             routes,
             fallback: spec.fallback().clone(),
+            engine,
         })
     }
 
@@ -63,15 +77,21 @@ impl Route {
 }
 
 impl Stage for Route {
-    fn process(&self, record: Record, _ctx: &Context<'_>) -> StageOutput {
+    fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
         for rule in &self.routes {
-            if rule.condition.matches(&record) {
-                return StageOutput::Routed(rule.label.clone(), record);
+            match rule.condition.matches(&record) {
+                Ok(true) => return StageOutput::Routed(rule.label.clone(), record),
+                Ok(false) => {}
+                Err(error) => return match_failure(ctx.node_id, error),
             }
         }
         match &self.fallback {
             Fallback::Label(label) => StageOutput::Routed(label.clone(), record),
             Fallback::Drop => StageOutput::Drop(DropReason::RouteDefaultDrop),
         }
+    }
+
+    fn engine_label(&self) -> Option<EngineLabel> {
+        self.engine
     }
 }

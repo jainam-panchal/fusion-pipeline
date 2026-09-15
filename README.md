@@ -13,7 +13,7 @@ Cargo workspace under `crates/`:
 | Crate | Contents |
 |---|---|
 | `core` | record model, field paths (read, write, remove), config loader, DAG validation, engine, `Source`/`Sink`/`AckHandle` traits, in-memory fakes, condition grammar |
-| `stages` | built-in stages: `filter`, `route`, `dedupe` |
+| `stages` | built-in stages: `filter`, `route`, `dedupe`, `extract`, `redact` |
 | `regex` | two-engine regex facade: linear `regex` first, PCRE2 fallback with configurable limits, load-time ReDoS lint and canary; the only crate with `unsafe` |
 | `nats` | NATS JetStream source (pull consumer, explicit ack) and sink (returns after `PubAck`); tenant stamped from the subject; `NATS_URL` overrides configured URLs |
 | `state` | Dragonfly state store over the Redis protocol: one sync connection per worker, timeouts and reconnect, `DRAGONFLY_URL` |
@@ -82,8 +82,8 @@ as before; point it at the compose collector with `OTEL_EXPORTER_OTLP_ENDPOINT=h
 `OTEL_METRIC_EXPORT_INTERVAL` (milliseconds) sets the cadence; compose uses 5000.
 
 Every metric carries `tenant`; per-node metrics carry `stage` (the node id, `source` for the
-engine's own decisions) and `records_dropped_total` carries `reason` from the spec's closed
-set, and the collector adds `job="fusion-pipeline"` and `instance=<hostname>` from the
+engine's own decisions), the metrics of a regex node carry `engine`, and
+`records_dropped_total` carries `reason` from the spec's closed set, and the collector adds `job="fusion-pipeline"` and `instance=<hostname>` from the
 resource, so `--scale pipeline=3` gives three series that the dashboard sums. NATS is scraped through `prometheus-nats-exporter`
 (`jetstream_consumer_*` for pending, redelivered and ack floor), Dragonfly at
 `:6379/metrics`. Each process reports its own CPU and memory: the pipeline exports OTel's
@@ -172,6 +172,44 @@ write instead.
 ```yaml
 condition: attributes.http.status >= 500 and resource.tenant.id == "acme"
 condition: resource.k8s.pod-name == "web-0" and attributes."something something" == 1
+```
+
+## Regex stages
+
+`extract` lifts a pattern's named groups out of one string field into `attributes`;
+`redact` replaces every match in the listed fields in place, with `replace` taken literally.
+Both, and any `filter` or `route` condition using `=~` or `!~`, compile through the regex
+facade: linear engine first, PCRE2 only when the syntax needs it, with per-node `limits`
+(`match`, `depth`, `heap_kib`, `work`, `input_bytes`) and `on_redos_risk: reject|warn` for
+the load-time lint and canary. A non-match passes the record unchanged and counts on
+`regex_nonmatch_total`; a tripped limit drops it with reason `regex_limit` and the next
+record is served. Every metric of a regex node carries `engine=linear|backtracking`.
+
+```yaml
+nodes:
+  - id: parse_linux
+    type: extract
+    field: body
+    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$'
+    limits: { input_bytes: 8192 }
+    on_redos_risk: reject
+  - id: mask_ips
+    type: redact
+    fields: [body, attributes.Content]
+    pattern: '\b\d{1,3}(?:\.\d{1,3}){3}\b'
+    replace: '[ip]'
+  - id: keep_auth
+    type: filter
+    condition: attributes.Component =~ "^sshd"
+    action: keep
+```
+
+The extraction accuracy tests replay every 20th line of the vendored loghub sets
+(`testdata/loghub/`, licence and normalisation rules in its README) and compare the
+attributes with the structured CSV:
+
+```sh
+cargo test -p fusion-pipeline --test extract_loghub
 ```
 
 ## Routing

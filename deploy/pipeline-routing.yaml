@@ -3,9 +3,9 @@
 #
 #   pipelined --config deploy/pipeline-routing.yaml
 #
-# DEBUG records are dropped and acked. What survives is routed by log format: Linux goes to
-# two sinks (fan-out), Apache and everything else share one (fan-in). A record is acked once
-# every branch it took has a PubAck.
+# DEBUG records are dropped and acked. What survives is routed by log format to that
+# format's extract node: Linux goes to two sinks (fan-out), Apache and everything else
+# share one (fan-in). A record is acked once every branch it took has a PubAck.
 #
 # `url` here and on each sink is overridden by NATS_URL when set.
 workers: 4
@@ -27,23 +27,35 @@ nodes:
       apache: resource.log.format == "Apache"
     default: other
 
+  - id: parse_linux
+    type: extract                     # named groups become attributes.<name>
+    from: by_format.linux
+    field: body
+    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$'
+
+  - id: parse_apache
+    type: extract
+    from: by_format.apache
+    field: body
+    pattern: '^\[(?<Time>[^\]]+)\] \[(?<Level>\w+)\] (?<Content>.*)$'
+
   - id: linux_out
     type: sink.nats
-    from: by_format.linux
+    from: parse_linux
     url: nats://127.0.0.1:4222
     stream: PROCESSED
     subject: processed.linux
 
   - id: linux_archive
     type: sink.nats
-    from: by_format.linux                   # fan-out: the same label twice
+    from: parse_linux                       # fan-out: the same upstream twice
     url: nats://127.0.0.1:4222
     stream: PROCESSED
     subject: processed.archive.linux
 
   - id: rest_out
     type: sink.nats
-    from: [by_format.apache, by_format.other]   # fan-in
+    from: [parse_apache, by_format.other]   # fan-in
     url: nats://127.0.0.1:4222
     stream: PROCESSED
     subject: processed.rest

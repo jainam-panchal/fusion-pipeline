@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::metrics::Metrics;
+use crate::metrics::{EngineLabel, Labels, Metrics};
 use crate::record::{Record, RecordId};
 use crate::state::{StateError, StateErrorPolicy, StateStore};
 
@@ -139,6 +139,9 @@ pub struct State {
     prefix: String,
     tenant: String,
     node: String,
+    /// The node's `engine` label, so its state-store series carry it like every other
+    /// per-node metric.
+    engine: Option<EngineLabel>,
     /// Whether the node's stage declared [`Stage::uses_state`]. When it did not, no
     /// connection was opened for it and every operation is refused before the store, and
     /// before the metrics, so the store counters stay about the store.
@@ -155,8 +158,11 @@ impl fmt::Debug for State {
 
 impl State {
     /// A handle for one record: `store` is the worker's connection, `pipeline`, `tenant` and
-    /// `node` form the key prefix, `metrics` receives the counts, and `declared` is the
-    /// node's [`Stage::uses_state`].
+    /// `node` form the key prefix, `metrics` receives the counts under the node's labels
+    /// (`engine` is the stage's [`Stage::engine_label`]), and `declared` is the node's
+    /// [`Stage::uses_state`]. `tenant` and `node` are taken apart rather than as a
+    /// [`Labels`] so a handle without a node id is unrepresentable: the key prefix is an
+    /// invariant, not a convention.
     #[must_use]
     pub fn new(
         store: Arc<dyn StateStore>,
@@ -164,6 +170,7 @@ impl State {
         pipeline: &str,
         tenant: &str,
         node: &str,
+        engine: Option<EngineLabel>,
         declared: bool,
     ) -> Self {
         Self {
@@ -172,6 +179,7 @@ impl State {
             prefix: format!("{pipeline}:{}:{node}:", escape_segment(tenant)),
             tenant: tenant.to_owned(),
             node: node.to_owned(),
+            engine,
             declared,
         }
     }
@@ -191,10 +199,10 @@ impl State {
         }
         let started = Instant::now();
         let result = op();
-        self.metrics
-            .state_op(&self.tenant, &self.node, started.elapsed());
+        let labels = Labels::new(&self.tenant, &self.node).with_engine(self.engine);
+        self.metrics.state_op(&labels, started.elapsed());
         if result.is_err() {
-            self.metrics.state_error(&self.tenant, &self.node);
+            self.metrics.state_error(&labels);
         }
         result
     }
@@ -294,6 +302,29 @@ fn escape_segment(segment: &str) -> String {
     out
 }
 
+/// A stage's handle on the metrics for one record: the node's labels are fixed, and only
+/// the metrics a stage emits for itself are reachable, so the per-node series the engine
+/// owns (`records_in_total` and the rest) stay the engine's.
+#[derive(Debug, Clone, Copy)]
+pub struct StageMetrics<'a> {
+    metrics: &'a Metrics,
+    labels: Labels<'a>,
+}
+
+impl<'a> StageMetrics<'a> {
+    /// A handle emitting through `metrics` under `labels`, the node's labels as the engine
+    /// built them.
+    #[must_use]
+    pub const fn new(metrics: &'a Metrics, labels: Labels<'a>) -> Self {
+        Self { metrics, labels }
+    }
+
+    /// `regex_nonmatch_total`: the stage's pattern did not match this record.
+    pub fn regex_nonmatch(&self) {
+        self.metrics.regex_nonmatch(&self.labels);
+    }
+}
+
 /// Per-record context handed to a stage alongside the record.
 #[derive(Debug, Clone)]
 pub struct Context<'a> {
@@ -304,6 +335,8 @@ pub struct Context<'a> {
     /// The state handle: the worker's store connection, scoped to this pipeline, tenant
     /// and node.
     pub state: State,
+    /// The metrics a stage emits for itself, under the node's labels.
+    pub metrics: StageMetrics<'a>,
 }
 
 /// A pipeline stage. Shared across worker threads, so it must be `Send + Sync`; per-worker
@@ -311,6 +344,12 @@ pub struct Context<'a> {
 pub trait Stage: Send + Sync {
     /// Process one record.
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput;
+
+    /// The `engine` label for this node's metrics: set for a stage that runs a regex,
+    /// `None` for every other stage. Fixed at load, read by the engine once per record.
+    fn engine_label(&self) -> Option<EngineLabel> {
+        None
+    }
 
     /// Whether this stage reaches the state store. The engine opens one connection per
     /// worker only when some node does.

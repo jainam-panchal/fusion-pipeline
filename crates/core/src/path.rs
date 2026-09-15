@@ -584,6 +584,14 @@ impl FieldPath {
         }
     }
 
+    /// Whether [`FieldPath::write`] can ever succeed on this path: `false` for the read-only
+    /// `id` and `kind`, so a stage that will write can refuse them at load instead of per
+    /// record.
+    #[must_use]
+    pub fn is_writable(&self) -> bool {
+        !matches!(self.target, Target::Field(Field::Id | Field::Kind))
+    }
+
     /// Read the field as a borrowed view. An absent field is [`FieldValue::Null`].
     #[must_use]
     pub fn read<'a>(&self, record: &'a Record) -> FieldValue<'a> {
