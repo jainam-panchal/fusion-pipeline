@@ -163,14 +163,14 @@ the Dragonfly panel shows the memory, `state_ops_total` the call rate per node.
 
 A `sample` node keeps a share of the records and drops the rest with reason `sample`; a
 drop is acked, never redelivered. `random` scrambles the record id (mixed with the node id)
-and keeps it when the result is below `percent`, so a redelivered record gets the same
+and keeps it when the result is at or below `percent`, so a redelivered record gets the same
 verdict and two `random` nodes in series keep independent subsets. `consistent` scrambles
 the `key` field values instead, with no node id mixed in, so every record of a host is kept
 or dropped together on every node and every pipeline, and a host kept at 20% is kept at 50%;
-records missing the key field form one bucket, kept or dropped together. `every_nth` keeps
+records missing the key field share one `null` value and are kept or dropped together. `every_nth` keeps
 1 in `n` of the deliveries that reach the node, per tenant, exact across every worker and
-replica: one shared counter in Dragonfly, one `incr` per record, counts 1, n+1, 2n+1, ...
-kept, so a tenant with fewer than `n` records still gets one through. It is the only mode
+replica: one shared sample count in Dragonfly, one `incr` per record, counts 1, n+1, 2n+1,
+... kept, so a tenant with fewer than `n` records still gets one through. It is the only mode
 that touches the store and the only one that takes `on_state_error`.
 
 ```yaml
@@ -197,8 +197,8 @@ place; during a sink outage most of the records the node had chosen are dropped 
 retry while the 1-in-`n` share of deliveries stays right. Remembering every record would
 cost a state key per record, which is why the guard is not there (issue #7 records the
 decision). Do not fan the same record into an `every_nth` node twice: each arrival counts.
-The counter lives 24 h, refreshed on every record, so a tenant quieter than that restarts at
-1 and its first record back is kept.
+The count lives 24 h, refreshed on every record, so a tenant quieter than that restarts at 1
+and its first record back is kept.
 
 ## Field paths
 

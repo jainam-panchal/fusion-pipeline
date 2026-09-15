@@ -173,9 +173,9 @@ _Avoid_: fallback, degrade
 The fraction of records a `sample` node keeps: `percent` for `random` and `consistent`, one in `n` for `every_nth`. A record outside the share drops with reason `sample`.
 _Avoid_: rate, ratio
 
-**Sample counter**:
+**Sample count**:
 The one number behind `every_nth`: per tenant in the state store, advanced by one `incr` per delivery that reaches the node, shared by every worker and replica. Counts 1, n+1, 2n+1, ... are kept. A redelivered message is a new delivery and takes a new count; `every_nth` is the stated exception to "a redelivered record gets the same answer".
-_Avoid_: ticket machine (the explanation, not the term), sequence
+_Avoid_: counter (an instrument kind), ticket machine (the explanation, not the term), sequence
 
 **Worker**:
 One OS thread that owns a Lua VM and a state-store connection and runs stages synchronously.
