@@ -52,8 +52,8 @@ carry the text as it appears in the line.
    line that reads `[19939]`.
 2. An empty cell means the attribute must be absent, the way a capture group that did not
    participate is absent.
-3. Trailing whitespace is trimmed on both sides. Some raw lines end in a space that the CSV
-   `Content` cell does not carry.
+3. `Content` is trimmed of trailing whitespace on both sides. Some raw lines end in a
+   space that the CSV `Content` cell does not carry. Every other column compares exactly.
 
 Column notes. Linux `Level` is the host name (`combo`), not a severity. OpenSSH
 `Component` is the host (`LabSZ`) and the `sshd` token belongs to no column; `Pid` is the
