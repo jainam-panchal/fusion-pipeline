@@ -169,5 +169,13 @@ The `key` field paths of a `dedupe` node, whose values (a missing one is `null`)
 A node's `on_state_error`, `pass` or `nak`, applied by the engine when a stage could not reach the store. The stage only reports.
 _Avoid_: fallback, degrade
 
+**Share**:
+The fraction of records a `sample` node keeps: `percent` for `random` and `consistent`, one in `n` for `every_nth`. A record outside the share drops with reason `sample`.
+_Avoid_: rate, ratio
+
+**Sample counter**:
+The one number behind `every_nth`: per tenant in the state store, advanced by one `incr` per delivery that reaches the node, shared by every worker and replica. Counts 1, n+1, 2n+1, ... are kept. A redelivered message is a new delivery and takes a new count; `every_nth` is the stated exception to "a redelivered record gets the same answer".
+_Avoid_: ticket machine (the explanation, not the term), sequence
+
 **Worker**:
 One OS thread that owns a Lua VM and a state-store connection and runs stages synchronously.

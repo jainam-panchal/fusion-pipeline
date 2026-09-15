@@ -159,6 +159,47 @@ forwards it un-deduped, `nak` fails it so JetStream redelivers. Either way the o
 on `state_errors_total`. Live keys are unique contents per window, about 200 bytes each;
 the Dragonfly panel shows the memory, `state_ops_total` the call rate per node.
 
+## Sampling
+
+A `sample` node keeps a share of the records and drops the rest with reason `sample`; a
+drop is acked, never redelivered. `random` scrambles the record id (mixed with the node id)
+and keeps it when the result is below `percent`, so a redelivered record gets the same
+verdict and two `random` nodes in series keep independent subsets. `consistent` scrambles
+the `key` field values instead, with no node id mixed in, so every record of a host is kept
+or dropped together on every node and every pipeline, and a host kept at 20% is kept at 50%;
+records missing the key field form one bucket, kept or dropped together. `every_nth` keeps
+1 in `n` of the deliveries that reach the node, per tenant, exact across every worker and
+replica: one shared counter in Dragonfly, one `incr` per record, counts 1, n+1, 2n+1, ...
+kept, so a tenant with fewer than `n` records still gets one through. It is the only mode
+that touches the store and the only one that takes `on_state_error`.
+
+```yaml
+nodes:
+  - id: keep_tenth
+    type: sample
+    mode: random               # random | every_nth | consistent
+    percent: 10                # random, consistent: (0, 100]
+  - id: one_in_ten
+    type: sample
+    mode: every_nth
+    n: 10
+    on_state_error: pass       # pass (default) | nak
+  - id: half_the_hosts
+    type: sample
+    mode: consistent
+    percent: 50
+    key: [resource.host]
+```
+
+`every_nth` counts deliveries, not records: a message JetStream redelivers takes a new
+count. So a kept record whose sink failed is nakked, comes back, and usually loses its
+place; during a sink outage most of the records the node had chosen are dropped on their
+retry while the 1-in-`n` share of deliveries stays right. Remembering every record would
+cost a state key per record, which is why the guard is not there (issue #7 records the
+decision). Do not fan the same record into an `every_nth` node twice: each arrival counts.
+The counter lives 24 h, refreshed on every record, so a tenant quieter than that restarts at
+1 and its first record back is kept.
+
 ## Field paths
 
 Every stage names a record field with one dotted path: write what the JSON shows, outer
