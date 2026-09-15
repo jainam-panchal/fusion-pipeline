@@ -106,6 +106,14 @@ The load-time structural check over the pattern AST for catastrophic shapes.
 **Canary**:
 The load-time run of a PCRE2-bound pattern against generated adversarial inputs under the runtime limits.
 
+**Non-match**:
+A record a regex stage's pattern did not match, or whose field is not a string. Passed on unchanged and counted on `regex_nonmatch_total`; never a drop and never an error.
+_Avoid_: miss, extraction failure
+
+**Limit trip**:
+A regex limit (match, depth, heap, work, input size) exceeded on one record. A drop with reason `regex_limit`; the pattern keeps serving the next record.
+_Avoid_: timeout
+
 ### Telemetry
 
 **Metric**:
@@ -118,6 +126,9 @@ _Avoid_: meter, registry, telemetry sink
 
 **Tenant label**:
 The `tenant` label on every metric: `resource.tenant.id`, or `unknown` when the record has none.
+
+**Engine label**:
+The `engine` label (`linear` or `backtracking`) on every per-node metric of a node whose stage runs a regex, and on no other node. A condition with several patterns reports its worst.
 
 **Stage label**:
 The `stage` label on per-node metrics: the node id, or the reserved `source`, itself a node on the metrics (in on hand-over, out on entering the graph, engine rejections as its drops).

@@ -178,6 +178,8 @@ Amended 2026-09-11 (issue #6): a sixth output, `StateError { record, error }`, f
 
 `redact` takes `fields`, `pattern`, `replace` and the same limits. Replacement is in place.
 
+Amended 2026-09-14 (issue #5): `replace` is literal text; `$1`, `$name` and `\1` are written as they are, since the two engines expand them differently and one config must give one output whichever engine the pattern lands on. Every match in each listed field is replaced, following the `regex` crate's rule for empty matches on both engines. A field that is not a string is skipped by `redact` and is a non-match for `pcre2_extract`. A record no listed field matched, or whose `field` did not match, passes unchanged and counts once on `regex_nonmatch_total`. `redact` refuses `id` and `kind` in `fields` at load. `filter` and `route` take the same `limits` and `on_redos_risk` for the patterns in their conditions; the literal after `=~` or `!~` must be a string (a load error otherwise); a field that is not a string makes `=~` false and `!~` true, as `!=` is on a type mismatch; a tripped limit in a condition drops the record with reason `regex_limit` whatever the `action` or the label would have been, and any other engine failure is a stage error. On every regex stage a limit that trips on one record leaves the pattern serving the next.
+
 `sample` takes `mode: random|every_nth|consistent`, `percent` or `n`, and `key` for consistent mode. `every_nth` uses a shared `incr` in the state store guarded by the record id so redelivery does not double-count.
 
 `dedupe` takes `key` fields, `window` and `on_state_error: pass|nak`. The state value is the record id. When `set_nx` fails the stage reads the stored id: the same id means this record is being seen again, so it passes; a different id means a real duplicate, so it drops.
@@ -218,6 +220,8 @@ The spine metric is `records_dropped_total{tenant, stage, reason}`. Reasons are 
 
 Other metrics: per-stage `records_in_total`, `records_out_total`, `records_errored_total`, `stage_duration_seconds`; `state_ops_total`, `state_op_duration_seconds`, `state_errors_total`; `lua_errors_total{kind}`; `source_naks_total`, `source_redeliveries_total`, `dlq_total`; `sink_publish_duration_seconds`, `sink_publish_errors_total`; `pipeline_end_to_end_seconds`.
 
+Amended 2026-09-14 (issue #5): one more metric, `regex_nonmatch_total{tenant, stage, engine}`, counts the records a regex stage's pattern did not match and passed on unchanged, so extraction coverage per node is readable without the harness verifier. The `engine` label: every per-node metric of a node whose stage runs a regex (`pcre2_extract`, `redact`, and `filter` or `route` when a condition uses `=~` or `!~`) carries `engine="linear"` or `engine="backtracking"`, the facade's classification of its pattern; a condition with several patterns reports `backtracking` if any of them needs PCRE2; nodes without a regex carry no `engine` label, so `sum by (stage)` is unchanged and a regex node can be split by engine. The same value is in the node's load-time log line. `records_dropped_total{reason="regex_limit"}` now has producers: the two regex stages and conditions with regex operators.
+
 Traces are head-sampled at 1% by record id, with force-sampling on any error or nak.
 
 NATS is scraped through `prometheus-nats-exporter`; Dragonfly is scraped at `:6379/metrics`.
@@ -229,6 +233,8 @@ Amended 2026-09-11 (issue #11): The internal dashboard ships with #11; the tenan
 ### Chaos test
 
 Vendored data lives under `testdata/loghub/<Set>/` (raw log, structured CSV, templates CSV; about 300 KB per set).
+
+Amended 2026-09-14 (issue #5): Linux, Apache and OpenSSH are vendored with the regex stages; Mac lands with the harness (#13). `testdata/loghub/README.md` carries the loghub-2.0 licence notice (research and academic use, citation required, not the workspace's Apache-2.0), the upstream commit and per-file checksums, and the three rules for comparing extracted attributes with the structured CSV (a `N.0` cell is the integer `N`, an empty cell means the attribute is absent, trailing whitespace is trimmed). The patterns lift the text as it is in the line; the normalisation is the comparer's.
 
 Compose services: `nats`, `dragonfly`, `otel-collector`, `prometheus`, `loki`, `tempo`, `grafana`, `pipeline`, `producer`, `verifier`, `nats-exporter`.
 
