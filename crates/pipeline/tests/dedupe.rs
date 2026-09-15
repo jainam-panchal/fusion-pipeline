@@ -178,7 +178,7 @@ fn holder(id: u64, observed_s: u64) -> Vec<u8> {
     dedupe_stage::holder_value(id, observed_s * 1_000_000_000)
 }
 
-/// The holder of the one dedupe key in the store.
+/// The holder of the one dedupe state key in the store.
 fn stored_holder(h: &common::Harness) -> Vec<u8> {
     let keys = h.state.keys();
     assert_eq!(keys.len(), 1, "{keys:?}");

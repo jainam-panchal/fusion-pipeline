@@ -15,15 +15,16 @@
 //! whenever it reaches the stage: a crash between a state write and the ack never turns a
 //! real record into a duplicate.
 
-use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fusion_core::config::{ConfigError, NodeConfig};
-use fusion_core::path::{FieldPath, FieldValue, Num};
+use fusion_core::path::FieldPath;
 use fusion_core::record::{Record, RecordId};
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use fusion_core::state::StateErrorPolicy;
 use serde::Deserialize;
+
+use crate::key_hash::{hash_key_fields, parse_key_fields};
 
 /// The purpose segment of this stage's keys: `{prefix}dedupe:{hash}`.
 const PURPOSE: &str = "dedupe";
@@ -81,17 +82,7 @@ impl Dedupe {
     /// `pass` or `nak`.
     pub fn from_node(node: &NodeConfig) -> Result<Self, ConfigError> {
         let params: Params = node.parse_params()?;
-        if params.key.is_empty() {
-            return Err(node.invalid_params("`key` needs at least one field path"));
-        }
-        let key = params
-            .key
-            .iter()
-            .map(|path| {
-                FieldPath::parse(path)
-                    .map_err(|e| node.invalid_params(format!("key `{path}`: {e}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let key = parse_key_fields(node, &params.key)?;
         let window_text = params.window.as_text();
         let window = parse_window(&window_text)
             .map_err(|e| node.invalid_params(format!("window `{window_text}`: {e}")))?;
@@ -113,15 +104,7 @@ impl Dedupe {
 
     /// The state key for `record`'s content: `dedupe:` plus the hash of its key fields.
     fn state_key(&self, record: &Record) -> String {
-        let mut canonical = String::from("[");
-        for (i, path) in self.key.iter().enumerate() {
-            if i > 0 {
-                canonical.push(',');
-            }
-            write_canonical(&mut canonical, path.read(record));
-        }
-        canonical.push(']');
-        format!("{PURPOSE}:{:016x}", fnv1a64(canonical.as_bytes()))
+        format!("{PURPOSE}:{:016x}", hash_key_fields(&self.key, record))
     }
 }
 
@@ -188,7 +171,7 @@ pub fn holder_value(id: u64, ingestion_time_unix_nano: u64) -> Vec<u8> {
     .to_bytes()
 }
 
-/// Who holds a dedupe key: the record that claimed it and its ingestion time. The state
+/// Who holds a dedupe state key: the record that claimed it and its ingestion time. The state
 /// value is `"{id} {ingestion time}"`, written and read here only.
 struct Holder {
     id: RecordId,
@@ -300,30 +283,4 @@ fn parse_window(text: &str) -> Result<Duration, String> {
         return Err("must be at least 1ms".to_owned());
     }
     Ok(Duration::from_millis(millis))
-}
-
-/// One key field as canonical JSON, so equal values hash equal whatever their source.
-fn write_canonical(out: &mut String, value: FieldValue<'_>) {
-    match value {
-        FieldValue::Null => out.push_str("null"),
-        FieldValue::Bool(b) => out.push_str(if b { "true" } else { "false" }),
-        FieldValue::Num(Num::Int(i)) => {
-            let _ = write!(out, "{i}");
-        }
-        FieldValue::Num(Num::Float(f)) => {
-            let _ = write!(out, "{f:?}");
-        }
-        FieldValue::Str(s) => out.push_str(&serde_json::to_string(s).unwrap_or_default()),
-        FieldValue::Json(v) => out.push_str(&serde_json::to_string(v).unwrap_or_default()),
-        _ => out.push_str("null"),
-    }
-}
-
-/// FNV-1a, 64-bit: stable across builds and platforms, and cheap next to a store round trip.
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    bytes
-        .iter()
-        .fold(OFFSET, |hash, &b| (hash ^ u64::from(b)).wrapping_mul(PRIME))
 }

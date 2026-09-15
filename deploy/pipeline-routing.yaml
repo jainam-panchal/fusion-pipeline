@@ -5,7 +5,10 @@
 #
 # DEBUG records are dropped and acked. What survives is routed by log format to that
 # format's extract node: Linux goes to two sinks (fan-out), Apache and everything else
-# share one (fan-in). A record is acked once every branch it took has a PubAck.
+# share one (fan-in). The archive sink keeps half the Linux hosts: a `sample` node in
+# `consistent` mode keeps or drops every record of a host together, with no state store,
+# so an archived host is complete and a missing host is absent, never half there. A
+# record is acked once every branch it took has a PubAck or a drop.
 #
 # `url` here and on each sink is overridden by NATS_URL when set.
 workers: 4
@@ -46,9 +49,16 @@ nodes:
     stream: PROCESSED
     subject: processed.linux
 
+  - id: half_the_hosts
+    type: sample
+    from: parse_linux                       # fan-out: the same upstream twice
+    mode: consistent                        # random | every_nth | consistent
+    percent: 50
+    key: [resource.host]                    # same host, same verdict, on every replica
+
   - id: linux_archive
     type: sink.nats
-    from: parse_linux                       # fan-out: the same upstream twice
+    from: half_the_hosts
     url: nats://127.0.0.1:4222
     stream: PROCESSED
     subject: processed.archive.linux

@@ -162,12 +162,21 @@ _Avoid_: owner, winner
 A record past the holder's window writing itself as the new holder, with a compare-and-set against the holder it read. Refused when another worker wrote first; the record is then judged against that holder instead.
 _Avoid_: overwrite, refresh
 
-**Dedupe key**:
-The `key` field paths of a `dedupe` node, whose values (a missing one is `null`) hashed together say "same content".
+**Key fields**:
+The `key` field paths of a `dedupe` or `consistent` `sample` node, whose values (a missing one is `null`) hashed together say "same content" for `dedupe` and "same group" for `sample`. One parser and one hash, shared.
+_Avoid_: dedupe key, group-by
 
 **State error policy**:
 A node's `on_state_error`, `pass` or `nak`, applied by the engine when a stage could not reach the store. The stage only reports.
 _Avoid_: fallback, degrade
+
+**Share**:
+The fraction of records a `sample` node keeps: `percent` for `random` and `consistent`, one in `n` for `every_nth`. A record outside the share drops with reason `sample`.
+_Avoid_: rate, ratio
+
+**Sample count**:
+The one number behind `every_nth`: per tenant in the state store, advanced by one `incr` per delivery that reaches the node, shared by every worker and replica. Counts 1, n+1, 2n+1, ... are kept. A redelivered message is a new delivery and takes a new count; `every_nth` is the stated exception to "a redelivered record gets the same answer".
+_Avoid_: counter (an instrument kind), ticket machine (the explanation, not the term), sequence
 
 **Worker**:
 One OS thread that owns a Lua VM and a state-store connection and runs stages synchronously.

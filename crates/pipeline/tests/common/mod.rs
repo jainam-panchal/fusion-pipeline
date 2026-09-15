@@ -112,6 +112,19 @@ pub fn acme_record_observed_at(id: u64, body: &str, observed_unix_nanos: u64) ->
     .expect("record parses")
 }
 
+/// [`acme_record`] with `resource.host` set, or absent for `None`, the shape the
+/// `consistent` sampling tests push.
+pub fn acme_host_record(id: u64, host: Option<&str>) -> Record {
+    let mut record = acme_record(id, "x");
+    if let Some(host) = host {
+        record.resource.insert(
+            "host".to_owned(),
+            serde_json::Value::String(host.to_owned()),
+        );
+    }
+    record
+}
+
 /// The labels of a `dedupe` drop by the node `dedupe_body` for tenant `acme`.
 pub const DEDUPE_DROP: [(&str, &str); 3] = [
     ("tenant", "acme"),
