@@ -1,4 +1,4 @@
-//! `pcre2_extract` and `redact` through the trait boundary: YAML config in, envelopes
+//! `extract` and `redact` through the trait boundary: YAML config in, envelopes
 //! through the in-memory source, assertions on what reached the in-memory sink, how each
 //! ack settled and what the recorder saw.
 
@@ -19,7 +19,7 @@ fn extract_yaml(pattern: &str) -> String {
         r#"
 nodes:
   - id: parse_linux
-    type: pcre2_extract
+    type: extract
     field: body
     pattern: '{pattern}'
   - id: out

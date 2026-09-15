@@ -1,8 +1,8 @@
-//! `pcre2_extract`: lift a pattern's named groups out of one field into attributes.
+//! `extract`: lift a pattern's named groups out of one field into attributes.
 //!
 //! ```yaml
 //! - id: parse_linux
-//!   type: pcre2_extract
+//!   type: extract
 //!   field: body                       # any string field
 //!   pattern: '^(?<Month>\w{3}) ...'   # named groups become attributes.<name>
 //!   limits: { input_bytes: 65536 }    # see the regex_stage module for every key
@@ -33,7 +33,7 @@ struct Params {
     regex: RegexParams,
 }
 
-/// The `pcre2_extract` stage.
+/// The `extract` stage.
 #[derive(Debug)]
 pub struct Extract {
     field: FieldPath,

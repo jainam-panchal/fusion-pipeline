@@ -1,5 +1,5 @@
 //! Extraction accuracy against loghub ground truth: for every 20th line of a vendored
-//! set, the attributes `pcre2_extract` lifts equal that line's row in the
+//! set, the attributes `extract` lifts equal that line's row in the
 //! `_structured_corrected.csv`, under the normalisation rules in `testdata/loghub/README.md`.
 
 mod common;
@@ -130,7 +130,7 @@ fn assert_set_extracts_its_ground_truth(set: &Set) {
         r#"
 nodes:
   - id: parse
-    type: pcre2_extract
+    type: extract
     field: body
     pattern: '{}'
   - id: out
