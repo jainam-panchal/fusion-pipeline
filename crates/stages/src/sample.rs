@@ -91,10 +91,10 @@ impl Share {
     }
 }
 
-const MODES: &str = "`random`, `every_nth` or `consistent`";
-
-/// Each mode and the fields it takes. `mode` itself is common. The refusal message for a
-/// field under the wrong mode is derived from this table, so it has one source.
+/// Each mode and the fields it takes. `mode` itself is common. The list of modes in every
+/// error message and the refusal of a field under the wrong mode are both derived from
+/// this table, so a mode's name and fields have one source; its construction is one arm
+/// of the match in [`Sample::from_node`].
 const MODE_FIELDS: [(&str, &[&str]); 3] = [
     ("random", &["percent"]),
     ("every_nth", &["n", "on_state_error"]),
@@ -111,6 +111,18 @@ const COUNT_KEY: &str = "sample:count";
 /// and keep them all.
 const COUNT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// The modes as an error message lists them: "`random`, `every_nth` or `consistent`".
+fn modes() -> String {
+    let names: Vec<String> = MODE_FIELDS
+        .iter()
+        .map(|(name, _)| format!("`{name}`"))
+        .collect();
+    match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+        _ => names.concat(),
+    }
+}
+
 impl Sample {
     /// Build from a node's `mode` and the fields of that mode.
     ///
@@ -123,14 +135,16 @@ impl Sample {
     pub fn from_node(node: &NodeConfig) -> Result<Self, ConfigError> {
         let params: Params = node.parse_params()?;
         let Some(mode) = params.mode.as_deref() else {
-            return Err(node.invalid_params(format!("`mode` is required: {MODES}")));
+            return Err(node.invalid_params(format!("`mode` is required: {}", modes())));
         };
-        // The one table of which fields each mode takes. A field present under a mode that
-        // does not take it is refused naming the modes that do, so `n` under `random` is a
-        // caught mistake and adding a mode is one row here.
+        // A field present under a mode that does not take it is refused naming the modes
+        // that do, so `n` under `random` is a caught mistake. This is the only place an
+        // unknown mode is rejected.
         let Some((_, allowed)) = MODE_FIELDS.iter().find(|(name, _)| *name == mode) else {
-            return Err(node.invalid_params(format!("unknown mode `{mode}`: use {MODES}")));
+            return Err(node.invalid_params(format!("unknown mode `{mode}`: use {}", modes())));
         };
+        // Every field of `Params` except `mode`. A field added to `Params` and to
+        // `MODE_FIELDS` must be added here too, or it is never refused under the wrong mode.
         let present = [
             ("percent", params.percent.is_some()),
             ("n", params.n.is_some()),
@@ -180,9 +194,7 @@ impl Sample {
                     key: parse_key_fields(node, key)?,
                 }
             }
-            other => {
-                return Err(node.invalid_params(format!("unknown mode `{other}`: use {MODES}")));
-            }
+            other => unreachable!("mode `{other}` was checked against MODE_FIELDS above"),
         };
         Ok(Self { mode })
     }
