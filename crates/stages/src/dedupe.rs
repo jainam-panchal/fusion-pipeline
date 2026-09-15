@@ -171,7 +171,7 @@ pub fn holder_value(id: u64, ingestion_time_unix_nano: u64) -> Vec<u8> {
     .to_bytes()
 }
 
-/// Who holds a dedupe key: the record that claimed it and its ingestion time. The state
+/// Who holds a dedupe state key: the record that claimed it and its ingestion time. The state
 /// value is `"{id} {ingestion time}"`, written and read here only.
 struct Holder {
     id: RecordId,

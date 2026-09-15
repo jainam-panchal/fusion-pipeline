@@ -93,6 +93,14 @@ impl Share {
 
 const MODES: &str = "`random`, `every_nth` or `consistent`";
 
+/// Each mode and the fields it takes. `mode` itself is common. The refusal message for a
+/// field under the wrong mode is derived from this table, so it has one source.
+const MODE_FIELDS: [(&str, &[&str]); 3] = [
+    ("random", &["percent"]),
+    ("every_nth", &["n", "on_state_error"]),
+    ("consistent", &["percent", "key"]),
+];
+
 /// The `every_nth` sample count under the handle's prefix: the purpose segment `sample`,
 /// as `dedupe` has `dedupe`, then `count`. The stage's only key.
 const COUNT_KEY: &str = "sample:count";
@@ -117,36 +125,30 @@ impl Sample {
         let Some(mode) = params.mode.as_deref() else {
             return Err(node.invalid_params(format!("`mode` is required: {MODES}")));
         };
-        // Which fields each mode takes; any other field present belongs to another mode
-        // and is refused naming that mode, so `n` under `random` is a caught mistake.
-        let allowed: &[&str] = match mode {
-            "random" => &["percent"],
-            "every_nth" => &["n", "on_state_error"],
-            "consistent" => &["percent", "key"],
-            other => {
-                return Err(node.invalid_params(format!("unknown mode `{other}`: use {MODES}")));
-            }
+        // The one table of which fields each mode takes. A field present under a mode that
+        // does not take it is refused naming the modes that do, so `n` under `random` is a
+        // caught mistake and adding a mode is one row here.
+        let Some((_, allowed)) = MODE_FIELDS.iter().find(|(name, _)| *name == mode) else {
+            return Err(node.invalid_params(format!("unknown mode `{mode}`: use {MODES}")));
         };
-        let fields = [
-            (
-                "percent",
-                params.percent.is_some(),
-                "`mode: random` or `mode: consistent`",
-            ),
-            ("n", params.n.is_some(), "`mode: every_nth`"),
-            ("key", params.key.is_some(), "`mode: consistent`"),
-            (
-                "on_state_error",
-                params.on_state_error.is_some(),
-                "`mode: every_nth`",
-            ),
+        let present = [
+            ("percent", params.percent.is_some()),
+            ("n", params.n.is_some()),
+            ("key", params.key.is_some()),
+            ("on_state_error", params.on_state_error.is_some()),
         ];
-        if let Some((field, _, owner)) = fields
+        if let Some((field, _)) = present
             .iter()
-            .find(|(field, present, _)| *present && !allowed.contains(field))
+            .find(|(field, present)| *present && !allowed.contains(field))
         {
+            let owners = MODE_FIELDS
+                .iter()
+                .filter(|(_, fields)| fields.contains(field))
+                .map(|(name, _)| format!("`mode: {name}`"))
+                .collect::<Vec<_>>()
+                .join(" or ");
             return Err(
-                node.invalid_params(format!("`{field}` belongs to {owner}, not `mode: {mode}`"))
+                node.invalid_params(format!("`{field}` belongs to {owners}, not `mode: {mode}`"))
             );
         }
         let mode = match mode {
@@ -166,7 +168,7 @@ impl Sample {
                 },
                 on_state_error: params.on_state_error.unwrap_or(StateErrorPolicy::Pass),
             },
-            _ => {
+            "consistent" => {
                 let share = parse_percent(node, params.percent)?;
                 let Some(key) = params.key.as_deref() else {
                     return Err(node.invalid_params(
@@ -177,6 +179,9 @@ impl Sample {
                     share,
                     key: parse_key_fields(node, key)?,
                 }
+            }
+            other => {
+                return Err(node.invalid_params(format!("unknown mode `{other}`: use {MODES}")));
             }
         };
         Ok(Self { mode })
