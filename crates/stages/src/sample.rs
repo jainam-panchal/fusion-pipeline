@@ -10,13 +10,13 @@
 //!   # on_state_error: pass  # every_nth: pass (default) | nak
 //! ```
 //!
-//! `every_nth` counts deliveries on one shared counter per tenant, `sample:count` under
-//! the handle's prefix, one `incr` per record, and keeps the first of each `n` (counts 1,
-//! n+1, 2n+1, ...), so the split is exact across every worker and every replica. It is
-//! 1 in n of the deliveries that reach the node: a message NATS redelivers is a new
-//! delivery and takes a new count, since remembering every record would cost a store key
-//! per record. The counter lives [`COUNTER_TTL`], refreshed on every `incr`, so a tenant
-//! quieter than that restarts at 1, and its first record back is kept.
+//! `every_nth` counts deliveries on one shared sample count per tenant, `sample:count`
+//! under the handle's prefix, one `incr` per record, and keeps the first of each `n`
+//! (counts 1, n+1, 2n+1, ...), so the split is exact across every worker and every
+//! replica. It is 1 in n of the deliveries that reach the node: a message NATS redelivers
+//! is a new delivery and takes a new count, since remembering every record would cost a
+//! store key per record. The count lives [`COUNT_TTL`], refreshed on every `incr`, so a
+//! tenant quieter than that restarts at 1, and its first record back is kept.
 
 use std::time::Duration;
 
@@ -45,17 +45,26 @@ struct Params {
 #[derive(Debug)]
 pub struct Sample {
     mode: Mode,
-    /// The node id hashed: mixed into every hash-based verdict so two `sample` nodes in
-    /// series keep different subsets rather than the same one twice.
-    salt: u64,
     on_state_error: StateErrorPolicy,
 }
 
 #[derive(Debug)]
 enum Mode {
-    Random { share: Share },
-    EveryNth { n: u64 },
-    Consistent { share: Share, key: Vec<FieldPath> },
+    Random {
+        share: Share,
+        /// The node id hashed, mixed into the coin so two `random` nodes in series keep
+        /// independent subsets rather than the same one twice. `Consistent` has no salt
+        /// on purpose: the same key value must get the same verdict everywhere.
+        salt: u64,
+    },
+    EveryNth {
+        /// As `i64` because the store counts in `i64`; converted once at load.
+        n: i64,
+    },
+    Consistent {
+        share: Share,
+        key: Vec<FieldPath>,
+    },
 }
 
 /// The share kept, as the threshold a uniformly mixed 64-bit hash is compared against:
@@ -67,11 +76,10 @@ struct Share {
 
 impl Share {
     fn from_percent(percent: f64) -> Self {
-        // 2^64 * percent / 100, saturating at u64::MAX for percent 100.
-        let space = 2f64.powi(64);
-        let threshold = (space * percent / 100.0).min(space - 1.0);
+        // 2^64 * percent / 100. For `percent: 100` that is 2^64 itself, which the `as u64`
+        // cast saturates to `u64::MAX`, so every hash is kept.
         Self {
-            threshold: threshold as u64,
+            threshold: (2f64.powi(64) * percent / 100.0) as u64,
         }
     }
 
@@ -84,14 +92,14 @@ impl Share {
 
 const MODES: &str = "`random`, `every_nth` or `consistent`";
 
-/// The `every_nth` counter key under the handle's prefix.
-const COUNTER_KEY: &str = "sample:count";
+/// The `every_nth` sample count key under the handle's prefix.
+const COUNT_KEY: &str = "sample:count";
 
-/// How long the `every_nth` counter lives without a record, refreshed on every `incr`. Long
-/// enough that no tenant with traffic ever sees it restart: a counter that expired with a
-/// short TTL would hand count 1 to every record of a tenant quieter than the TTL and keep
-/// them all.
-const COUNTER_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long the `every_nth` sample count lives without a record, refreshed on every
+/// `incr`. Long enough that no tenant with traffic ever sees it restart: a count that
+/// expired with a short TTL would hand 1 to every record of a tenant quieter than the TTL
+/// and keep them all.
+const COUNT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 impl Sample {
     /// Build from a node's `mode` and the fields of that mode.
@@ -108,50 +116,52 @@ impl Sample {
             return Err(node.invalid_params(format!("`mode` is required: {MODES}")));
         };
         let refuse = |field: &str, owner: &str| {
-            Err(node.invalid_params(format!("`{field}` belongs to `mode: {owner}`, not `{mode}`")))
+            Err(node.invalid_params(format!("`{field}` belongs to {owner}, not `mode: {mode}`")))
         };
         match mode {
             "random" => {
                 if params.n.is_some() {
-                    return refuse("n", "every_nth");
+                    return refuse("n", "`mode: every_nth`");
                 }
                 if params.key.is_some() {
-                    return refuse("key", "consistent");
+                    return refuse("key", "`mode: consistent`");
                 }
                 if params.on_state_error.is_some() {
-                    return refuse("on_state_error", "every_nth");
+                    return refuse("on_state_error", "`mode: every_nth`");
                 }
                 let share = parse_percent(node, params.percent)?;
                 Ok(Self {
-                    mode: Mode::Random { share },
-                    salt: fnv1a64(node.id.as_bytes()),
+                    mode: Mode::Random {
+                        share,
+                        salt: fnv1a64(node.id.as_bytes()),
+                    },
                     on_state_error: StateErrorPolicy::Pass,
                 })
             }
             "every_nth" => {
                 if params.percent.is_some() {
-                    return refuse("percent", "random` or `consistent");
+                    return refuse("percent", "`mode: random` or `mode: consistent`");
                 }
                 if params.key.is_some() {
-                    return refuse("key", "consistent");
+                    return refuse("key", "`mode: consistent`");
                 }
                 let n = match params.n {
-                    Some(n) if n >= 1 => n,
+                    Some(n) if n >= 1 => i64::try_from(n)
+                        .map_err(|_| node.invalid_params("`n` is too large"))?,
                     Some(_) => return Err(node.invalid_params("`n` must be at least 1")),
                     None => return Err(node.invalid_params("`n` is required: keep one record in n")),
                 };
                 Ok(Self {
                     mode: Mode::EveryNth { n },
-                    salt: fnv1a64(node.id.as_bytes()),
                     on_state_error: params.on_state_error.unwrap_or(StateErrorPolicy::Pass),
                 })
             }
             "consistent" => {
                 if params.n.is_some() {
-                    return refuse("n", "every_nth");
+                    return refuse("n", "`mode: every_nth`");
                 }
                 if params.on_state_error.is_some() {
-                    return refuse("on_state_error", "every_nth");
+                    return refuse("on_state_error", "`mode: every_nth`");
                 }
                 let share = parse_percent(node, params.percent)?;
                 let Some(key) = params.key else {
@@ -171,7 +181,6 @@ impl Sample {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Self {
                     mode: Mode::Consistent { share, key },
-                    salt: fnv1a64(node.id.as_bytes()),
                     on_state_error: StateErrorPolicy::Pass,
                 })
             }
@@ -205,15 +214,16 @@ impl Stage for Sample {
         let keep = match &self.mode {
             // The coin is the record id: a redelivered record lands on the same side, as
             // every verdict in this pipeline is meant to.
-            Mode::Random { share } => share.keeps(mix(ctx.record_id.0 ^ self.salt)),
+            Mode::Random { share, salt } => share.keeps(mix(ctx.record_id.0 ^ salt)),
             Mode::EveryNth { n } => {
-                let count = match ctx.state.incr(COUNTER_KEY, 1, COUNTER_TTL) {
+                let count = match ctx.state.incr(COUNT_KEY, 1, COUNT_TTL) {
                     Ok(count) => count,
                     Err(error) => return StageOutput::StateError { record, error },
                 };
                 // Counts 1, n+1, 2n+1, ...: the first of each n. A tenant with fewer than n
-                // records still gets one through.
-                (count - 1).rem_euclid(i64::try_from(*n).unwrap_or(i64::MAX)) == 0
+                // records still gets one through. `wrapping_sub` only so a store answering
+                // `i64::MIN` cannot panic; `incr` never gets there.
+                count.wrapping_sub(1).rem_euclid(*n) == 0
             }
             // No salt: the same key value must get the same answer on every node and every
             // pipeline, and a key kept at a lower percent is kept at any higher one.

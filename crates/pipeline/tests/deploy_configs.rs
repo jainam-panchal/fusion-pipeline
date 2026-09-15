@@ -108,3 +108,42 @@ fn a_failing_branch_of_the_routing_example_naks_the_record_once() {
     assert_eq!(h.ids("linux_out"), [1], "the other branch still wrote");
     h.finish();
 }
+
+/// The archive branch keeps half the Linux hosts, every record of a host together: the
+/// main Linux sink sees every record, the archive sees all of some hosts and none of the
+/// others.
+#[test]
+fn the_routing_example_archives_every_record_of_half_the_linux_hosts() {
+    let sinks = MemorySinks::new();
+    let h = start_with(
+        &deploy_config("pipeline-routing.yaml"),
+        4,
+        sinks.clone(),
+        registry(&sinks),
+    );
+    let hosts = 40;
+    let probes: Vec<_> = (0..hosts)
+        .flat_map(|host| (0..3).map(move |copy| (host, copy)))
+        .map(|(host, copy)| {
+            let mut r = record(host * 10 + copy, "INFO", "Linux");
+            r.resource
+                .insert("host".to_owned(), serde_json::Value::String(format!("web-{host}")));
+            h.source.push(r)
+        })
+        .collect();
+    for probe in &probes {
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    }
+
+    assert_eq!(h.ids("linux_out").len() as u64, hosts * 3, "the main sink sees every record");
+    let archived = h.ids("linux_archive");
+    let mut archived_hosts: Vec<u64> = archived.iter().map(|id| id / 10).collect();
+    archived_hosts.dedup();
+    assert_eq!(archived.len(), archived_hosts.len() * 3, "a host is archived whole or not at all");
+    assert!(
+        !archived_hosts.is_empty() && (archived_hosts.len() as u64) < hosts,
+        "{} of {hosts} hosts archived",
+        archived_hosts.len()
+    );
+    h.finish();
+}

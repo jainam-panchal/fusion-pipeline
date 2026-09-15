@@ -4,6 +4,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 
 use common::{WAIT, acme_record as record, start};
 use fusion_core::memory::{AckOutcome, AckProbe};
@@ -108,8 +110,8 @@ fn every_nth_keeps_the_first_record_of_each_n_so_a_small_tenant_still_gets_one_t
     h.finish();
 }
 
-/// The stated behaviour of option C: a redelivered message is a new delivery and takes a
-/// new count. Here record 1 took count 1 (kept) and comes back as count 13 (dropped).
+/// Per delivery, per the spec amendment: a redelivered message is a new delivery and takes
+/// a new count. Here record 1 took count 1 (kept) and comes back as count 13 (dropped).
 #[test]
 fn every_nth_counts_a_redelivered_record_again_because_sampling_is_per_delivery() {
     let h = start(EVERY_TENTH, 1);
@@ -122,9 +124,28 @@ fn every_nth_counts_a_redelivered_record_again_because_sampling_is_per_delivery(
     assert_eq!(
         h.state.get("ingest:acme:keep_some:sample:count").expect("store answers"),
         Some(b"13".to_vec()),
-        "13 deliveries, 13 counts"
+        "13 deliveries, count 13"
     );
     assert_eq!(h.state.keys(), vec!["ingest:acme:keep_some:sample:count"], "no key per record");
+    h.finish();
+}
+
+/// The count lives 24 h from its last `incr`: a tenant with a record every 23 h never sees
+/// it restart, a tenant silent for 25 h does, and its first record back is kept.
+#[test]
+fn every_nth_count_lives_a_day_from_its_last_record_then_restarts_at_one() {
+    let h = start(EVERY_TENTH, 1);
+    let day = Duration::from_secs(24 * 60 * 60);
+
+    assert_eq!(h.source.push(record(1, "x")).wait(WAIT), Some(AckOutcome::Ack));
+    h.state.advance(day - Duration::from_secs(3600));
+    assert_eq!(h.source.push(record(2, "x")).wait(WAIT), Some(AckOutcome::Ack));
+    h.state.advance(day - Duration::from_secs(3600));
+    assert_eq!(h.source.push(record(3, "x")).wait(WAIT), Some(AckOutcome::Ack), "refreshed");
+    h.state.advance(day + Duration::from_secs(3600));
+    assert_eq!(h.source.push(record(4, "x")).wait(WAIT), Some(AckOutcome::Ack), "expired");
+
+    assert_eq!(h.ids("out"), vec![1, 4], "counts 1, 2, 3, then 1 again");
     h.finish();
 }
 
@@ -136,7 +157,7 @@ fn tenant_record(id: u64, tenant: &str) -> Record {
 }
 
 #[test]
-fn every_nth_keeps_one_counter_per_tenant_so_a_small_tenant_is_not_drowned_by_a_big_one() {
+fn every_nth_keeps_one_count_per_tenant_so_a_small_tenant_is_not_drowned_by_a_big_one() {
     let h = start(EVERY_TENTH, 1);
     for id in 1..=30 {
         assert_eq!(h.source.push(tenant_record(id, "acme")).wait(WAIT), Some(AckOutcome::Ack));
@@ -269,8 +290,8 @@ fn random_at_one_hundred_percent_keeps_everything() {
     h.finish();
 }
 
-/// Snowflake ids: a millisecond timestamp in the high bits, a sequence in the low bits, a
-/// few hundred per millisecond. Near-identical high bits must not skew the coin.
+/// Snowflake ids: a millisecond timestamp in the high bits, a running number in the low
+/// bits, a few hundred per millisecond. Near-identical high bits must not skew the coin.
 #[test]
 fn random_at_ten_percent_holds_on_snowflake_shaped_ids() {
     let h = start(RANDOM_TENTH, 4);
