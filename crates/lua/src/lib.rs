@@ -10,14 +10,16 @@
 //!   on_state_error: nak                # nak (default) | pass, when the script uses `state`
 //! ```
 //!
-//! The script defines `process(record)`. It gets the record as a plain table with OTLP
-//! field names (`record.attributes["http.path"]`) and returns it to pass, `nil` to drop
-//! (reason `lua_drop`), or a list of records to split. Every field is payload: a script
-//! may change or drop any of them, `id`, `kind`, the tenant and the time fields included,
-//! and the pipeline keeps deciding with the record's `Meta` (ADR 0005), which every split
-//! record inherits. Typed fields keep their types (`kind` is `log`, `metric` or `span`,
-//! `log` when left out), the maps stay flat, and the strings together stay under
-//! `output_kib`; anything else is refused and counts as an error of kind `output`.
+//! The script defines `process(record, meta)`. It gets the record as a plain table with
+//! OTLP field names (`record.attributes["http.path"]`) and a read-only `meta` table (`id`,
+//! `tenant`, `ingestion_time`, `delivery_count`), and returns the record to pass, `nil` to
+//! drop (reason `lua_drop`), or a list of records to split; `record:copy()` makes a deep
+//! copy for a split. Every field is payload: a script may change or drop any of them, `id`,
+//! `kind`, the tenant and the time fields included, and the pipeline keeps deciding with the
+//! record's `Meta` (ADR 0005), which every split record inherits. Every returned field goes
+//! through core's write rules (`kind` is `log` when left out), every key must be a record
+//! field, and the strings together stay under `output_kib`; anything else is refused and
+//! counts as an error of kind `output`.
 //!
 //! A script that loops is stopped by the instruction budget (`instructions`), one that
 //! allocates without bound by the memory cap (`memory_kib`), each per record; a runtime
@@ -26,7 +28,7 @@
 //! `lua_error`, `nak` fails it so the source message redelivers.
 //!
 //! The sandbox has `string`, `table`, `math` and `utf8`, plus `state.get/set_nx/incr/del`
-//! on the node's state handle, `log.info/warn` and `now_ns()`. `os`, `io`, `package`,
+//! on the node's state handle, `log.info/warn`, `now_ns()` and `record:copy()`. `os`, `io`, `package`,
 //! `require`, `load` and `debug` are not there, and a script that names one of them is
 //! refused at load, as is one that does not parse (the message carries the line) or does
 //! not define `process`. One VM per worker per node, the script loaded once, so a counter

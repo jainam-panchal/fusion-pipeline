@@ -224,7 +224,7 @@ impl Vm {
             Ok(LuaValue::Function(f)) => f,
             Ok(_) => {
                 return Err(LuaError::Runtime(format!(
-                    "{}: the script must define a function `process(record)`",
+                    "{}: the script must define a function `process(record, meta)`",
                     script.display_name()
                 )));
             }

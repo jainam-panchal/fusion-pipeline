@@ -91,8 +91,8 @@ fn a_syntax_error_is_rejected_with_its_line() {
 
 #[test]
 fn a_script_without_process_is_rejected() {
-    rejects(&inline("local x = 1"), &["process(record)"]);
-    rejects(&inline("process = 42"), &["process(record)"]);
+    rejects(&inline("local x = 1"), &["process(record, meta)"]);
+    rejects(&inline("process = 42"), &["process(record, meta)"]);
 }
 
 #[test]
