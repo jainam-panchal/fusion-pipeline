@@ -59,8 +59,8 @@ message and JetStream redeliver it. `NATS_URL` overrides the `url` of the source
 sink.
 
 A message that fails its last delivery is dead-lettered: the source publishes it as it
-arrived (payload and the producer's headers, minus any `Nats-*`) to `dlq.{tenant}`, waits
-for the `PubAck` and terminates it. The dead letter carries `Fusion-Dlq-Reason` (the node that
+arrived (payload and the producer's headers, minus any `Nats-*` or `Fusion-*`) to
+`dlq.{tenant}`, waits for the `PubAck` and terminates it. The dead letter carries `Fusion-Dlq-Reason` (the node that
 failed and its error, `source` for a payload that is not a record or a record without an
 `id`), `Fusion-Dlq-Subject` (where it arrived), the tenant and ingestion time headers, so
 republishing it to its subject replays it with the same `Meta`, and `Nats-Msg-Id`
