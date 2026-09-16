@@ -7,7 +7,7 @@
 #   2. traffic: 1,000 records with distinct bodies, one repeated body the dedupe node drops,
 #      one TRACE record the filter drops, one syslog line the extract node parses and the
 #      redact node masks, one with a non-numeric http.status the lua node raises on, one
-#      record without an id and one sink failure;
+#      with a malformed pipeline header, one record without an id and one sink failure;
 #   3. every metric with a producer is in Prometheus with the labels the spec gives it;
 #   4. the `reason` values seen on records_dropped_total are within the spec's closed set;
 #   5. the NATS exporter reports JetStream consumer pending, redelivered and ack floor;
@@ -63,7 +63,7 @@ for job in pipeline nats dragonfly otel-collector prometheus; do
     echo "up: $job"
 done
 
-step "2. traffic: $RECORDS records, one repeat (deduped), one TRACE (filtered), one the lua node raises on, one without an id, one sink failure"
+step "2. traffic: $RECORDS records, one repeat (deduped), one TRACE (filtered), one the lua node raises on, one with a malformed pipeline header, one without an id, one sink failure"
 nats stream purge LOGS -f >/dev/null
 # Distinct bodies, so the dedupe node lets every one of them through.
 nats pub logs.acme.syslog \
@@ -74,6 +74,10 @@ nats pub logs.acme.syslog '{"id": 1000000, "severity_text": "TRACE", "body": "no
 nats pub logs.acme.syslog '{"id": 1000002, "body": "Jun 14 15:16:01 combo sshd(pam_unix)[19939]: authentication failure; rhost=218.188.2.4"}' >/dev/null
 # `"abc" // 100` raises inside the lua node: a `runtime` error, forwarded by `on_error: pass`.
 nats pub logs.acme.syslog '{"id": 1000003, "body": "bad status", "attributes": {"http.status": "abc"}}' >/dev/null
+# A pipeline header that does not parse: ignored and counted on
+# source_invalid_headers_total, and the record is still walked.
+nats pub logs.acme.syslog '{"id": 1000004, "body": "bad header"}' \
+    -H 'Fusion-Ingestion-Time:soon' -H 'Fusion-Ingestion-Time-Kind:reported' >/dev/null
 nats pub logs.acme.syslog '{"body": "no id"}' >/dev/null
 # Sink failure: the PROCESSED stream is gone, so the write gets no PubAck, the source
 # message is nakked and JetStream redelivers it; nats-init recreates the stream.
@@ -110,6 +114,7 @@ SPEC_METRICS=(
     'state_op_duration_seconds_bucket{tenant="acme",stage="dedupe_body"}'
     'source_naks_total{tenant="acme"}'
     'source_redeliveries_total{tenant="acme"}'
+    'source_invalid_headers_total{tenant="acme"}'
     'sink_publish_duration_seconds_bucket{tenant="acme",stage="out"}'
     'sink_publish_errors_total{tenant="acme",stage="out"}'
     'pipeline_end_to_end_seconds_bucket{tenant="acme"}'
@@ -118,10 +123,9 @@ SPEC_METRICS=(
 # Reported, not required, until its ticket lands. `state_errors_total` has a producer but a
 # healthy run gives it nothing to count, and so do the `regex_limit`, `lua_drop` and
 # `lua_error` drop reasons: no pattern in deploy/pipeline.yaml trips a limit on this traffic,
-# the lua node returns nil for nothing, and its `on_error` is `pass`. Nothing publishes a
-# malformed pipeline header, so `source_invalid_headers_total` stays empty too.
+# the lua node returns nil for nothing, and its `on_error` is `pass`.
 PENDING_METRICS=(
-    state_errors_total dlq_total source_invalid_headers_total
+    state_errors_total dlq_total
 )
 for expr in "${SPEC_METRICS[@]}"; do
     wait_for 30 "$expr" prom_has "$expr"
