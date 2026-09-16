@@ -292,6 +292,54 @@ Amended 2026-09-14 (issue #5): one more metric, `regex_nonmatch_total{tenant, st
 
 Traces are head-sampled at 1% by record id, with force-sampling on any error or nak.
 
+Amended 2026-09-16 (issue #12, ADR 0006): logs, traces and bytes.
+
+**Logs.** Logs are events from a closed set, each with fixed fields, sent through core's `EventLog` seam and exported as OTLP log records. The fields are:
+
+- `record.id`: absent when the record has none;
+- `tenant` and `node`: from `Meta` and the failure;
+- `reason`: the failure kind; absent on `redelivery`;
+- `delivery_count`;
+- `stream_sequence`: dead letters only;
+- the error text as the body, never a label;
+- the record's trace context when it has one.
+
+The events are:
+
+- `stage_error` (severity error): one per node that failed, whatever the failure kind, `panic` included.
+- `nak` (warn): one per nakked record, after all branches, carrying the walk's first failure. A record without an id gets one at `node=source`, `reason=missing_id`.
+- `redelivery` (info): one per record whose delivery count is above one.
+- `dead_letter` (warn): the NATS source, on the dead letter's `PubAck`.
+- `dead_letter_failed` (error): the NATS source, when every dead-letter publish failed.
+
+Drops are not logged. A non-final nak of an undecodable payload is not an event either: it stays on stderr and its counters. A `nak` line does not mean the message is dead: the NATS source decides that, and says so with its own line.
+
+**Traces.** Head sampling is replaced by a decision taken when the record settles. The trace of a delivery is kept when any branch failed, when the delivery count is above one, or when the record's trace key falls in the share `OTEL_TRACES_SAMPLER_ARG` gives (default `0.01`; there is still no telemetry block in the YAML). The trace key is `mix(record id ^ fnv1a(tenant) ^ salt)`, and the trace id is `key << 64 | record id`. So every delivery of one record lands in one trace, and a log line and its trace share the trace id. A kept trace has:
+
+- one root span `delivery` per delivery, with attributes `record.id`, `tenant`, `delivery_count` and `settlement` (`ack` or `nak`);
+- one span per node visited, named after the node id, whose parent is the span of the node the record came from. It carries `node`, `outcome` (`pass`, `routed`, `split`, `drop`, `state_error_pass`, `written` or `error`), and `reason`, `failure`, `label` or `records` when they apply. A failed node's span has error status and the error text.
+
+Span times are the engine's own measurements, anchored on one clock reading per delivery. A record without an id has no trace.
+
+**Backpressure.** Logs and spans are exported through batch processors with bounded queues that drop when full and never block a worker. During an outage, every delivery writes a `stage_error`, a `nak` and a trace, and what does not fit in the queue is lost.
+
+**Bytes.** Two more metrics, for the tenant dashboard's bytes panel:
+
+- `bytes_in_total{tenant}`: payload bytes as the transport delivered them. It is counted at intake for every delivery, whether the record is rejected, redelivered or cannot be decoded (the NATS source counts that last case). A source reports the size on the arrival.
+- `bytes_out_total{tenant, stage}`: bytes a sink wrote with durable acceptance. A sink's write returns the count. Across a fan-out every sink counts its own copy.
+
+**Deploy.** The collector sends logs to Loki's native OTLP endpoint and traces to Tempo. Loki keeps `service_name` as its only index label; `record.id` is stored as the structured metadata `record_id`, beside `tenant`, `trace_id` and the others. Grafana's Loki datasource opens Tempo from `trace_id`, and its Tempo datasource opens Loki filtered on `record_id` and `tenant`.
+
+**Tenant dashboard.** It is provisioned with a `tenant` variable and has these panels:
+
+- in (`records_in_total{stage="source"}`) and out (`records_out_total` of the stages that have `bytes_out_total`, which are the sinks);
+- drops by stage and reason from `records_dropped_total` alone;
+- bytes in and out;
+- e2e p99;
+- dead letters by reason.
+
+It has no stage-duration, state-store, NATS, Lua, regex, sink-publish or process panel. `deploy/metrics-check.sh` also checks that the record without an id has a `nak` line in Loki, and that a record with an id that hits a stage error has a `stage_error` line whose trace id finds its trace in Tempo.
+
 NATS is scraped through `prometheus-nats-exporter`; Dragonfly is scraped at `:6379/metrics`.
 
 Two dashboards are provisioned. The tenant dashboard shows in/out, dropped by stage and reason, bytes, and e2e p99. The internal dashboard shows everything, plus state store, Lua, regex, NATS and sink panels and the chaos-test coverage panel.
