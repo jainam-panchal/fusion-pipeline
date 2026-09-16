@@ -265,26 +265,37 @@ function process(record)
 end
 ```
 
-Every returned record keeps the original `id` and `resource.tenant.id`, `kind` stays `log`,
-typed fields keep their types (`severity_number` an integer, the time fields non-negative
-integers), the maps stay flat, a key that is not a record field is refused, and the strings
-together stay under `output_kib`. Anything else is a Lua error of kind `output`. A script
-that loops is stopped by the instruction budget (`instructions`), one that allocates without
-bound by the memory cap (`memory_kib`, at least 64), a script that raises is `runtime`; each
-counts on `lua_errors_total{kind}` and then `on_error` decides: `pass` forwards the record as
-it came in, `drop` drops it with reason `lua_error`, `nak` fails it so JetStream redelivers.
-The next record is served either way; the VM survives its own errors.
+Every returned record keeps the original `id` and `resource.tenant.id`, `kind` is `log`
+(filled in when left out), typed fields keep their types (`severity_number` an integer, the
+time fields non-negative integers; `18 / 2` counts as one), a key that is not a record
+field is refused, and the strings together stay under `output_kib`. Anything else is a Lua
+error of kind `output`. A script that loops is stopped by the instruction budget
+(`instructions`, per record), one that allocates without bound by the memory cap
+(`memory_kib`, at least 64, on the worker's VM as a whole, upvalues included), a script that
+raises is `runtime`; each counts on `lua_errors_total{kind}` and then `on_error` decides:
+`pass` forwards the record as it came in, `drop` drops it with reason `lua_error`, `nak`
+fails it so JetStream redelivers. `nak` is for faults a retry can cure; a `runtime` or
+`output` error repeats on redelivery until the consumer's `max_deliver`, so under `nak` a
+bad script poisons its records until the dead-letter queue (#10) takes them. The next record
+is served either way: the VM survives a budget or runtime error, and a memory fault rebuilds
+it, upvalues included, since a script whose upvalues grow would otherwise fail every record
+from then on. `pcall` and `xpcall` catch the script's own errors and nothing else: a budget
+or cap trip and a state error go through them.
 
 The sandbox has `string`, `table`, `math` and `utf8`, plus `state.get(key)`,
 `state.set_nx(key, value, ttl_ms)` (`true`, or `false` and the holder), `state.incr(key, by,
 ttl_ms)` and `state.del(key)` on the node's state handle (every key under
 `{pipeline}:{tenant}:{node}:`, every call on the `state_*` metrics), `log.info`, `log.warn`
-and `now_ns()`. `os`, `io`, `package`, `require`, `load` and `debug` are not there, and a
-script that names one of them anywhere is refused when the config loads, with the line; so
-is a script that does not parse or does not define `process`. A `state.*` call the store
-cannot answer is handled by `on_state_error`, not `on_error`. One VM per worker per node,
-the script loaded once, so a counter in its upvalues persists across the records that
-worker sees; with `workers: 4` there are four counters.
+and `now_ns()`. `os`, `io`, `package`, `require`, `load`, `debug` and `print` are not there,
+and a script that names one of them anywhere is refused when the config loads, with the
+line; so is a script that does not parse or does not define `process`. A `state.*` call the
+store cannot answer is handled by `on_state_error`, not `on_error`; its default is `nak`
+where `dedupe` and `sample` default to `pass`, because a record forwarded past a script
+that did not run may be unredacted, whereas an un-deduped one is only a copy. One VM per
+worker per node, the script loaded once, so a counter in its upvalues persists across the
+records that worker sees; with `workers: 4` there are four counters, and a redelivered
+record may land on another. A `script:` path is read relative to the process working
+directory, not the config file.
 
 ## Field paths
 

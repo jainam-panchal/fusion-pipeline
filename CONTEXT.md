@@ -129,7 +129,7 @@ The Lua source a `lua` node runs: a file named by `script` or text given inline 
 _Avoid_: plugin, handler, hook (the instruction counter, not the script)
 
 **Guardrail**:
-One of the per-record limits on a script: the instruction budget (`limits.instructions`), the memory cap (`limits.memory_kib`) and the output cap (`limits.output_kib`). A tripped guardrail is a Lua error of its kind, never a crash of the worker.
+One of the limits on a script: the instruction budget (`limits.instructions`, per record), the memory cap (`limits.memory_kib`, on the worker's VM for the node, upvalues included; a trip rebuilds the VM) and the output cap (`limits.output_kib`, per returned record). A tripped guardrail is a Lua error of its kind, never a crash of the worker, and a script's `pcall` cannot catch it.
 _Avoid_: quota, timeout (nothing is measured in time)
 
 **Lua error**:
@@ -141,11 +141,11 @@ A `lua` node's `on_error`: `pass` forwards the record as it entered the node (th
 _Avoid_: fallback, on_fail
 
 **Output check**:
-The validation of what `process` returned before it leaves the stage: `id` and the tenant unchanged, `kind` still `log`, typed fields typed, the maps flat, no key that is not a record field, strings under the output cap. A refusal is a Lua error of kind `output`.
+The validation of what `process` returned before it leaves the stage: `id` and the tenant unchanged, `kind` `log` (filled in when omitted), typed fields typed (an integral float counts as an integer), no key that is not a record field, strings under the output cap. A refusal is a Lua error of kind `output`.
 _Avoid_: schema validation, sanitising
 
 **Sandbox**:
-The VM a script runs in: `string`, `table`, `math` and `utf8`, plus `state`, `log` and `now_ns()`; no `os`, `io`, `package`, `require`, `load` or `debug`. A script that names one of those is refused at load.
+The VM a script runs in: `string`, `table`, `math` and `utf8`, plus `state`, `log` and `now_ns()`, and a `pcall`/`xpcall` that let guardrails and state errors through; no `os`, `io`, `package`, `require`, `load`, `debug` or `print`. A script that names one of those is refused at load.
 _Avoid_: jail, container
 
 ### Telemetry
