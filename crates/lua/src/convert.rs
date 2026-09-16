@@ -30,10 +30,40 @@ fn refuse<T>(message: impl Into<String>) -> Result<T, OutputError> {
     Err(OutputError(message.into()))
 }
 
+/// The VM's mark for a table that is a JSON list: one shared metatable with no fields, whose
+/// `__metatable` hides it from `getmetatable` and refuses `setmetatable`, so a script can
+/// neither unmark a list nor change the table every list shares.
+#[derive(Clone)]
+pub(crate) struct ListMark(Table);
+
+impl ListMark {
+    pub(crate) fn new(lua: &mlua::Lua) -> mlua::Result<Self> {
+        let metatable = lua.create_table()?;
+        metatable.raw_set("__metatable", "list")?;
+        Ok(Self(metatable))
+    }
+
+    /// Mark `table` as a list.
+    pub(crate) fn mark(&self, table: &Table) -> mlua::Result<()> {
+        table.set_metatable(Some(self.0.clone()))
+    }
+
+    /// Whether `table` is marked as a list.
+    pub(crate) fn is_list(&self, table: &Table) -> bool {
+        table.metatable().is_some_and(|mt| mt == self.0)
+    }
+
+    /// Whether `table` may be marked: it has no metatable, or it is a list already. Marking
+    /// any other table would strip the metatable it has, a record table's or `meta`'s.
+    pub(crate) fn accepts(&self, table: &Table) -> bool {
+        table.metatable().is_none() || self.is_list(table)
+    }
+}
+
 /// What the script gets: every present field under its OTLP name, maps as tables of JSON
-/// values, `body` as the JSON value it is, every list marked with `list`. `id` is an
-/// integer, or its decimal text when it does not fit Lua's signed 64 bits.
-pub(crate) fn to_table(lua: &mlua::Lua, record: &Record, list: &Table) -> mlua::Result<Table> {
+/// values, `body` as the JSON value it is, every list marked. `id` is an integer, or its
+/// decimal text when it does not fit Lua's signed 64 bits.
+pub(crate) fn to_table(lua: &mlua::Lua, record: &Record, list: &ListMark) -> mlua::Result<Table> {
     let t = lua.create_table_with_capacity(0, 12)?;
     if let Some(id) = record.id {
         t.raw_set("id", id_value(lua, id)?)?;
@@ -93,7 +123,7 @@ fn unsigned(n: u64) -> LuaValue {
     Integer::try_from(n).map_or(LuaValue::Number(n as f64), LuaValue::Integer)
 }
 
-fn map_to_table(lua: &mlua::Lua, map: &Map<String, Value>, list: &Table) -> mlua::Result<Table> {
+fn map_to_table(lua: &mlua::Lua, map: &Map<String, Value>, list: &ListMark) -> mlua::Result<Table> {
     let t = lua.create_table_with_capacity(0, map.len())?;
     for (k, v) in map {
         t.raw_set(k.as_str(), json_to_lua(lua, v, list)?)?;
@@ -101,7 +131,7 @@ fn map_to_table(lua: &mlua::Lua, map: &Map<String, Value>, list: &Table) -> mlua
     Ok(t)
 }
 
-fn json_to_lua(lua: &mlua::Lua, v: &Value, list: &Table) -> mlua::Result<LuaValue> {
+fn json_to_lua(lua: &mlua::Lua, v: &Value, list: &ListMark) -> mlua::Result<LuaValue> {
     Ok(match v {
         Value::Null => LuaValue::NULL,
         Value::Bool(b) => LuaValue::Boolean(*b),
@@ -120,21 +150,16 @@ fn json_to_lua(lua: &mlua::Lua, v: &Value, list: &Table) -> mlua::Result<LuaValu
             for (i, item) in items.iter().enumerate() {
                 t.raw_seti(i + 1, json_to_lua(lua, item, list)?)?;
             }
-            t.set_metatable(Some(list.clone()))?;
+            list.mark(&t)?;
             LuaValue::Table(t)
         }
         Value::Object(map) => LuaValue::Table(map_to_table(lua, map, list)?),
     })
 }
 
-/// Whether `table` is marked as a list by `list`, the VM's list metatable.
-pub(crate) fn is_list(table: &Table, list: &Table) -> bool {
-    table.metatable().is_some_and(|mt| mt == *list)
-}
-
 /// The length of a table read as a list, whose only keys must be its positions `1..n`: any
 /// other key would be lost, and a `nil` below the last position is a hole Lua cannot keep.
-pub(crate) fn positions(table: &Table, field: &str) -> Result<usize, OutputError> {
+pub(crate) fn list_len(table: &Table, field: &str) -> Result<usize, OutputError> {
     let mut count = 0;
     let mut last = 0;
     for pair in table.pairs::<LuaValue, LuaValue>() {
@@ -174,8 +199,8 @@ struct Reader<'l> {
     cap: usize,
     /// How many tables the value being read is inside.
     depth: usize,
-    /// The metatable that marks a table as a list.
-    list: &'l Table,
+    /// The mark of a table that is a list.
+    list: &'l ListMark,
 }
 
 impl Reader<'_> {
@@ -208,7 +233,7 @@ impl Reader<'_> {
                 .map_err(|_| OutputError(format!("a `{field}` key is not valid UTF-8")))?
                 .to_owned();
             let at = format!("{field}.{key}");
-            let value = self.json(&value, &at)?.unwrap_or(Value::Null);
+            let value = self.json(&value, &at)?;
             map.insert(key, value);
         }
         self.depth -= 1;
@@ -227,29 +252,29 @@ impl Reader<'_> {
         Ok(())
     }
 
-    /// A table's entries as a JSON array, its keys checked by [`positions`].
+    /// A table's entries as a JSON array, its keys checked by [`list_len`].
     fn items(&mut self, table: &Table, field: &str) -> Result<Vec<Value>, OutputError> {
         self.enter(field)?;
-        let len = positions(table, field)?;
+        let len = list_len(table, field)?;
         let mut items = Vec::with_capacity(len);
         for i in 1..=len {
             let item: LuaValue = table
                 .raw_get(i)
                 .map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
             let at = format!("{field}[{i}]");
-            items.push(self.json(&item, &at)?.unwrap_or(Value::Null));
+            items.push(self.json(&item, &at)?);
         }
         self.depth -= 1;
         Ok(items)
     }
 
-    /// A Lua value as JSON: `nil` is absent and `json.null` is `null`; a table is an array
-    /// when it is marked as a list or its keys are `1..n`, and an object otherwise. Every
-    /// string counts against the cap.
-    fn json(&mut self, value: &LuaValue, field: &str) -> Result<Option<Value>, OutputError> {
-        Ok(Some(match value {
-            LuaValue::Nil => return Ok(None),
-            null if null.is_null() => Value::Null,
+    /// A Lua value as JSON: `nil` and `json.null` are `null` (a table's reader never meets
+    /// `nil`, and a field treats both as absent); a table is an array when it is marked as a
+    /// list or its keys are `1..n`, and an object otherwise. Every string counts against the
+    /// cap.
+    fn json(&mut self, value: &LuaValue, field: &str) -> Result<Value, OutputError> {
+        Ok(match value {
+            absent if absent.is_nil() || absent.is_null() => Value::Null,
             LuaValue::Boolean(b) => Value::Bool(*b),
             LuaValue::Integer(i) => Value::from(*i),
             LuaValue::Number(f) => serde_json::Number::from_f64(*f)
@@ -264,7 +289,7 @@ impl Reader<'_> {
                 )
             }
             LuaValue::Table(t) => {
-                if is_list(t, self.list) || t.raw_len() > 0 {
+                if self.list.is_list(t) || t.raw_len() > 0 {
                     Value::Array(self.items(t, field)?)
                 } else {
                     Value::Object(self.entries(t, field)?)
@@ -276,7 +301,7 @@ impl Reader<'_> {
                     type_name(other)
                 ));
             }
-        }))
+        })
     }
 }
 
@@ -287,7 +312,7 @@ impl Reader<'_> {
 pub(crate) fn from_table(
     table: &Table,
     output_bytes: usize,
-    list: &Table,
+    list: &ListMark,
 ) -> Result<Record, OutputError> {
     let mut record = Record::default();
     let mut reader = Reader {
@@ -325,8 +350,8 @@ pub(crate) fn from_table(
             }
             Some(TopLevel::Field(path)) => {
                 // `json.null` on a field is left out, as `nil` is: a field is never `null`.
-                let value = reader.json(&value, &key)?.filter(|value| !value.is_null());
-                if let Some(value) = value {
+                let value = reader.json(&value, &key)?;
+                if !value.is_null() {
                     write(&path, &mut record, value)?;
                 }
             }

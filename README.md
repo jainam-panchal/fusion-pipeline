@@ -267,7 +267,7 @@ local seen = 0                           -- upvalues persist across records on o
 function process(record, meta)   -- meta: id, tenant, ingestion_time, delivery_count
   seen = seen + 1
   local status = record.attributes["http.status"]
-  if status then
+  if status ~= nil and status ~= json.null then
     record.attributes["http.status_class"] = string.format("%dxx", status // 100)
   end
   if type(record.body) ~= "string" or not record.body:find("\n") then return record end
@@ -291,8 +291,9 @@ strings together stay under `output_kib`. `meta` is read-only: writing to it is 
 error. Anything else is a Lua error of kind `output`. A record the script leaves alone, or
 copies, comes back unchanged: a JSON list stays a list even when empty, and a JSON `null` in
 a list or a map is `json.null`, which is truthy, so test it with `== json.null`.
-`json.list(t)` makes a table the script builds a list, so `json.list()` leaves as `[]`. A
-list, the one `process` returns for a split included, may hold only its positions `1..n`:
+`json.list(t)` makes a table the script builds a list, so a field set to `json.list()`
+leaves as `[]`; returned as the whole result, an empty list is refused like an empty table.
+A list, the one `process` returns for a split included, may hold only its positions `1..n`:
 write `json.null`, not `nil`, for a null entry. A field set to `json.null` is left out, as
 with `nil`. A script that loops is stopped by the instruction budget (`instructions`, per
 record), one that allocates without bound by the memory cap (`memory_kib`, at least 64, on

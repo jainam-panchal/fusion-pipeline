@@ -62,7 +62,7 @@ nodes:
     limits: { instructions: 1000000, memory_kib: 16384, output_kib: 1024 }
     source: |
       local function class_of(status)
-        if status == nil then return nil end
+        if status == nil or status == json.null then return nil end
         return string.format("%dxx", status // 100)
       end
 

@@ -623,7 +623,7 @@ fn a_script_read_from_a_file_runs_over_records() {
 /// The issue's demo: what `edit` cannot do. Split a multi-line body into one record per
 /// line and derive `http.status_class` from `http.status`.
 const DEMO: &str = r#"local function class_of(status)
-  if status == nil then return nil end
+  if status == nil or status == json.null then return nil end
   return string.format("%dxx", status // 100)
 end
 
@@ -659,6 +659,10 @@ fn the_demo_script_splits_lines_and_derives_the_status_class() {
                     json!({"body": "single", "attributes": {"http.status": 200}}),
                 ),
                 record(3, json!({"body": "no status"})),
+                record(
+                    4,
+                    json!({"body": "null status", "attributes": {"http.status": null}}),
+                ),
             ],
         );
         let lines: Vec<_> = out
@@ -689,8 +693,16 @@ fn the_demo_script_splits_lines_and_derives_the_status_class() {
             .find(|r| r.id == Some(fusion_core::record::RecordId(3)))
             .expect("record 3");
         assert_eq!(none.attributes.get("http.status_class"), None);
-        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 5);
-        assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
+        let null = out
+            .iter()
+            .find(|r| r.id == Some(fusion_core::record::RecordId(4)))
+            .expect("record 4");
+        assert_eq!(null.attributes.get("http.status_class"), None);
+        assert_eq!(null.attributes.get("http.status"), Some(&Value::Null));
+        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 6);
+        for kind in ["output", "runtime"] {
+            assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error(kind)), 0);
+        }
         h.finish();
     });
 }
@@ -1192,6 +1204,79 @@ fn a_returned_split_list_may_hold_only_its_positions() {
     for script in [
         "function process(record)\n  return { record, extra = record:copy() }\nend",
         "function process(record)\n  return { record, nil, record:copy() }\nend",
+    ] {
+        let yaml = config("    on_error: drop\n", script);
+        let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+        assert!(out.is_empty(), "{script}");
+        assert_eq!(
+            h.counter(CounterMetric::LuaErrors, &lua_error("output")),
+            1,
+            "{script}"
+        );
+        h.finish();
+    }
+}
+
+#[test]
+fn what_a_script_does_to_json_is_gone_by_the_next_record() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  record.attributes.null_ok = record.attributes.nothing == json.null
+  record.attributes.list_ok = type(json.list) == "function"
+  rawset(json, "null", 1)
+  json = nil
+  return record
+end"#,
+    );
+    let (out, h) = run(
+        &yaml,
+        1,
+        vec![record(1, composites()), record(2, composites())],
+    );
+    assert_eq!(out.len(), 2);
+    for r in &out {
+        assert_eq!(
+            r.attributes.get("null_ok"),
+            Some(&json!(true)),
+            "{:?}",
+            r.id
+        );
+        assert_eq!(
+            r.attributes.get("list_ok"),
+            Some(&json!(true)),
+            "{:?}",
+            r.id
+        );
+    }
+    h.finish();
+}
+
+#[test]
+fn json_is_there_at_the_top_level_and_list_keeps_a_list() {
+    let yaml = config(
+        "",
+        r#"local empty = json.list()
+function process(record)
+  record.attributes.same = json.list(empty) == empty
+  record.attributes.kept = json.list(record.attributes.holes) == record.attributes.holes
+  record.attributes.empty = empty
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, composites())]);
+    let a = &out[0].attributes;
+    assert_eq!(a.get("same"), Some(&json!(true)));
+    assert_eq!(a.get("kept"), Some(&json!(true)));
+    assert_eq!(a.get("empty"), Some(&json!([])));
+    h.finish();
+}
+
+#[test]
+fn a_returned_list_with_no_records_is_an_output_error() {
+    for script in [
+        "function process(record)\n  return json.list()\nend",
+        "function process(record)\n  return json.list({ name = record })\nend",
     ] {
         let yaml = config("    on_error: drop\n", script);
         let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);

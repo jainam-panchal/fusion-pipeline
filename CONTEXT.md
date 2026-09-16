@@ -173,7 +173,7 @@ A `lua` node's `on_error`: `pass` forwards the record as it entered the node (th
 _Avoid_: fallback, on_fail
 
 **Output check**:
-The validation of what `process` returned before it leaves the stage: every key a record field, strings under the output cap, not an empty table, and every value, once converted from Lua (an integral float to an integer, an `id` given as decimal text to the integer), accepted by core's write rules onto a fresh record. No field is required and none must come back unchanged. A refusal is a Lua error of kind `output` with core's message.
+The validation of what `process` returned before it leaves the stage: every key a record field, strings under the output cap, not an empty table or list, every table read as a list (a marked one, one with keys `1..n`, or the list returned for a split) holding only its positions `1..n`, and every value, once converted from Lua (an integral float to an integer, an `id` given as decimal text to the integer), accepted by core's write rules onto a fresh record. No field is required and none must come back unchanged. A refusal is a Lua error of kind `output` with core's message.
 _Avoid_: schema validation, sanitising
 
 **Sandbox**:
