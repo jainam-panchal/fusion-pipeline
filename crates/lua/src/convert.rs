@@ -2,6 +2,13 @@
 //! converted to JSON, strings under the size cap, and every field written through core's
 //! write rules, so no field's type is spelled here (issue #43). Every field is payload
 //! (ADR 0005), so a script may change or drop any of them.
+//!
+//! A value crosses both ways unchanged when the script leaves it alone. Lua has no empty
+//! list and no `nil` inside a table, so a JSON list becomes a table marked with the VM's
+//! list metatable, and a JSON `null` inside a list or a map becomes `json.null`; the way
+//! back reads a marked table as a list, whatever its length, and `json.null` as `null`. A
+//! record field is never `null` (the decoder leaves it out), and a field set to
+//! `json.null` is left out, as `nil` is.
 
 use fusion_core::meta::{Meta, MetaField, MetaValue};
 use fusion_core::path::{FieldPath, TopLevel};
@@ -23,10 +30,10 @@ fn refuse<T>(message: impl Into<String>) -> Result<T, OutputError> {
     Err(OutputError(message.into()))
 }
 
-/// What the script gets: every present field under its OTLP name, maps as tables of
-/// scalars, `body` as the JSON value it is. `id` is an integer, or its decimal text when
-/// it does not fit Lua's signed 64 bits.
-pub(crate) fn to_table(lua: &mlua::Lua, record: &Record) -> mlua::Result<Table> {
+/// What the script gets: every present field under its OTLP name, maps as tables of JSON
+/// values, `body` as the JSON value it is, every list marked with `list`. `id` is an
+/// integer, or its decimal text when it does not fit Lua's signed 64 bits.
+pub(crate) fn to_table(lua: &mlua::Lua, record: &Record, list: &Table) -> mlua::Result<Table> {
     let t = lua.create_table_with_capacity(0, 12)?;
     if let Some(id) = record.id {
         t.raw_set("id", id_value(lua, id)?)?;
@@ -45,11 +52,11 @@ pub(crate) fn to_table(lua: &mlua::Lua, record: &Record) -> mlua::Result<Table> 
         t.raw_set("severity_number", Integer::from(n))?;
     }
     if let Some(body) = &record.body {
-        t.raw_set("body", json_to_lua(lua, body)?)?;
+        t.raw_set("body", json_to_lua(lua, body, list)?)?;
     }
-    t.raw_set("attributes", map_to_table(lua, &record.attributes)?)?;
-    t.raw_set("resource", map_to_table(lua, &record.resource)?)?;
-    t.raw_set("scope", map_to_table(lua, &record.scope)?)?;
+    t.raw_set("attributes", map_to_table(lua, &record.attributes, list)?)?;
+    t.raw_set("resource", map_to_table(lua, &record.resource, list)?)?;
+    t.raw_set("scope", map_to_table(lua, &record.scope, list)?)?;
     if let Some(s) = &record.trace_id {
         t.raw_set("trace_id", s.as_str())?;
     }
@@ -86,17 +93,17 @@ fn unsigned(n: u64) -> LuaValue {
     Integer::try_from(n).map_or(LuaValue::Number(n as f64), LuaValue::Integer)
 }
 
-fn map_to_table(lua: &mlua::Lua, map: &Map<String, Value>) -> mlua::Result<Table> {
+fn map_to_table(lua: &mlua::Lua, map: &Map<String, Value>, list: &Table) -> mlua::Result<Table> {
     let t = lua.create_table_with_capacity(0, map.len())?;
     for (k, v) in map {
-        t.raw_set(k.as_str(), json_to_lua(lua, v)?)?;
+        t.raw_set(k.as_str(), json_to_lua(lua, v, list)?)?;
     }
     Ok(t)
 }
 
-fn json_to_lua(lua: &mlua::Lua, v: &Value) -> mlua::Result<LuaValue> {
+fn json_to_lua(lua: &mlua::Lua, v: &Value, list: &Table) -> mlua::Result<LuaValue> {
     Ok(match v {
-        Value::Null => LuaValue::Nil,
+        Value::Null => LuaValue::NULL,
         Value::Bool(b) => LuaValue::Boolean(*b),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -111,12 +118,47 @@ fn json_to_lua(lua: &mlua::Lua, v: &Value) -> mlua::Result<LuaValue> {
         Value::Array(items) => {
             let t = lua.create_table_with_capacity(items.len(), 0)?;
             for (i, item) in items.iter().enumerate() {
-                t.raw_seti(i + 1, json_to_lua(lua, item)?)?;
+                t.raw_seti(i + 1, json_to_lua(lua, item, list)?)?;
             }
+            t.set_metatable(Some(list.clone()))?;
             LuaValue::Table(t)
         }
-        Value::Object(map) => LuaValue::Table(map_to_table(lua, map)?),
+        Value::Object(map) => LuaValue::Table(map_to_table(lua, map, list)?),
     })
+}
+
+/// Whether `table` is marked as a list by `list`, the VM's list metatable.
+pub(crate) fn is_list(table: &Table, list: &Table) -> bool {
+    table.metatable().is_some_and(|mt| mt == *list)
+}
+
+/// The length of a table read as a list, whose only keys must be its positions `1..n`: any
+/// other key would be lost, and a `nil` below the last position is a hole Lua cannot keep.
+pub(crate) fn positions(table: &Table, field: &str) -> Result<usize, OutputError> {
+    let mut count = 0;
+    let mut last = 0;
+    for pair in table.pairs::<LuaValue, LuaValue>() {
+        let (key, _) = pair.map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
+        let position = match key {
+            LuaValue::Integer(i) => usize::try_from(i).ok().filter(|&i| i > 0),
+            _ => None,
+        };
+        let Some(position) = position else {
+            return refuse(format!(
+                "`{field}` is a list, and its key {} is not a position in it",
+                key.to_string()
+                    .unwrap_or_else(|_| type_name(&key).to_owned())
+            ));
+        };
+        count += 1;
+        last = last.max(position);
+    }
+    if count != last {
+        return refuse(format!(
+            "`{field}` is a list with a `nil` below position {last}; write `json.null` for a null"
+        ));
+    }
+    Ok(last)
 }
 
 /// How many tables below the record a returned value may nest: serde_json's recursion limit,
@@ -127,14 +169,16 @@ const MAX_DEPTH: usize = 128;
 
 /// The way back: Lua values read as JSON, with the bytes of every string counted against
 /// the output cap. One reader per returned record, so the cap is per record.
-struct Reader {
+struct Reader<'l> {
     used: usize,
     cap: usize,
     /// How many tables the value being read is inside.
     depth: usize,
+    /// The metatable that marks a table as a list.
+    list: &'l Table,
 }
 
-impl Reader {
+impl Reader<'_> {
     /// Charge `bytes` to the cap, naming `field` if that is what exceeds it.
     fn take(&mut self, bytes: usize, field: &str) -> Result<(), OutputError> {
         self.used += bytes;
@@ -183,11 +227,29 @@ impl Reader {
         Ok(())
     }
 
-    /// A Lua value as JSON: `nil` is absent, a table is an array when its keys are `1..n`
-    /// and an object otherwise. Every string counts against the cap.
+    /// A table's entries as a JSON array, its keys checked by [`positions`].
+    fn items(&mut self, table: &Table, field: &str) -> Result<Vec<Value>, OutputError> {
+        self.enter(field)?;
+        let len = positions(table, field)?;
+        let mut items = Vec::with_capacity(len);
+        for i in 1..=len {
+            let item: LuaValue = table
+                .raw_get(i)
+                .map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
+            let at = format!("{field}[{i}]");
+            items.push(self.json(&item, &at)?.unwrap_or(Value::Null));
+        }
+        self.depth -= 1;
+        Ok(items)
+    }
+
+    /// A Lua value as JSON: `nil` is absent and `json.null` is `null`; a table is an array
+    /// when it is marked as a list or its keys are `1..n`, and an object otherwise. Every
+    /// string counts against the cap.
     fn json(&mut self, value: &LuaValue, field: &str) -> Result<Option<Value>, OutputError> {
         Ok(Some(match value {
             LuaValue::Nil => return Ok(None),
+            null if null.is_null() => Value::Null,
             LuaValue::Boolean(b) => Value::Bool(*b),
             LuaValue::Integer(i) => Value::from(*i),
             LuaValue::Number(f) => serde_json::Number::from_f64(*f)
@@ -202,20 +264,10 @@ impl Reader {
                 )
             }
             LuaValue::Table(t) => {
-                let len = t.raw_len();
-                if len == 0 {
-                    Value::Object(self.entries(t, field)?)
+                if is_list(t, self.list) || t.raw_len() > 0 {
+                    Value::Array(self.items(t, field)?)
                 } else {
-                    self.enter(field)?;
-                    let mut items = Vec::with_capacity(len);
-                    for (i, item) in t.sequence_values::<LuaValue>().enumerate() {
-                        let item =
-                            item.map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
-                        let at = format!("{field}[{}]", i + 1);
-                        items.push(self.json(&item, &at)?.unwrap_or(Value::Null));
-                    }
-                    self.depth -= 1;
-                    Value::Array(items)
+                    Value::Object(self.entries(t, field)?)
                 }
             }
             other => {
@@ -232,12 +284,17 @@ impl Reader {
 /// A key must be a record field, so a typo cannot silently drop data; a map field must be a
 /// table (or `nil`, the empty map); every value goes through core's write rules. Every field
 /// is optional (`kind` is `log` when left out).
-pub(crate) fn from_table(table: &Table, output_bytes: usize) -> Result<Record, OutputError> {
+pub(crate) fn from_table(
+    table: &Table,
+    output_bytes: usize,
+    list: &Table,
+) -> Result<Record, OutputError> {
     let mut record = Record::default();
     let mut reader = Reader {
         used: 0,
         cap: output_bytes,
         depth: 0,
+        list,
     };
     for pair in table.pairs::<LuaValue, LuaValue>() {
         let (key, value) =
@@ -267,7 +324,9 @@ pub(crate) fn from_table(table: &Table, output_bytes: usize) -> Result<Record, O
                 }
             }
             Some(TopLevel::Field(path)) => {
-                if let Some(value) = reader.json(&value, &key)? {
+                // `json.null` on a field is left out, as `nil` is: a field is never `null`.
+                let value = reader.json(&value, &key)?.filter(|value| !value.is_null());
+                if let Some(value) = value {
                     write(&path, &mut record, value)?;
                 }
             }
@@ -296,7 +355,10 @@ fn write(path: &FieldPath, record: &mut Record, value: Value) -> Result<(), Outp
 fn integral(value: &Value) -> Option<Value> {
     // 2^63, the first float outside `i64`.
     const I64_END: f64 = 9_223_372_036_854_775_808.0;
-    let f = value.as_f64().filter(|_| value.is_f64())?;
+    if !value.is_f64() {
+        return None;
+    }
+    let f = value.as_f64()?;
     (f.fract() == 0.0 && (-I64_END..I64_END).contains(&f)).then(|| Value::from(f as i64))
 }
 

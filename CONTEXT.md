@@ -177,7 +177,7 @@ The validation of what `process` returned before it leaves the stage: every key 
 _Avoid_: schema validation, sanitising
 
 **Sandbox**:
-The VM a script runs in: `string`, `table`, `math` and `utf8`, plus `state`, `log`, `now_ns()`, `record:copy()` on every record table, the read-only `meta` table `process` receives as its second argument, and a `pcall`/`xpcall` that let guardrails and state errors through; no `os`, `io`, `package`, `require`, `load`, `debug` or `print`. A script that names one of those is refused at load.
+The VM a script runs in: `string`, `table`, `math` and `utf8`, plus `state`, `log`, `now_ns()`, a read-only `json` (`json.null`, `json.list`), `record:copy()` on every record table, the read-only `meta` table `process` receives as its second argument, and a `pcall`/`xpcall` that let guardrails and state errors through; no `os`, `io`, `package`, `require`, `load`, `debug` or `print`. A script that names one of those is refused at load.
 _Avoid_: jail, container
 
 ### Telemetry

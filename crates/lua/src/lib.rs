@@ -21,6 +21,12 @@
 //! field, and the strings together stay under `output_kib`; anything else is refused and
 //! counts as an error of kind `output`.
 //!
+//! A record the script leaves alone, or copies, comes back unchanged. A JSON list is a table
+//! marked as a list, so `[]` stays a list, and `json.list(t)` marks a table the script
+//! builds; a table read as a list may hold only its positions `1..n`, so a `null` entry is
+//! written as `json.null`, never `nil`. A JSON `null` in a list or a map is `json.null`,
+//! which is truthy like any value; a field set to `json.null` is left out, as with `nil`.
+//!
 //! A script that loops is stopped by the instruction budget (`instructions`), one that
 //! allocates without bound by the memory cap (`memory_kib`), each per record; a runtime
 //! error is `runtime`. Every kind counts on `lua_errors_total{kind}` and then `on_error`
@@ -28,11 +34,12 @@
 //! `lua_error`, `nak` fails it so the source message redelivers.
 //!
 //! The sandbox has `string`, `table`, `math` and `utf8`, plus `state.get/set_nx/incr/del`
-//! on the node's state handle, `log.info/warn`, `now_ns()` and `record:copy()`. `os`, `io`,
-//! `package`, `require`, `load` and `debug` are not there, and a script that names one of
-//! them is refused at load, as is one that does not parse (the message carries the line) or does
-//! not define `process`. One VM per worker per node, the script loaded once, so a counter
-//! in its upvalues persists across the records that worker sees.
+//! on the node's state handle, `log.info/warn`, `now_ns()`, a read-only `json` with `null`
+//! and `list`, and `record:copy()`. `os`, `io`, `package`, `require`, `load` and `debug`
+//! are not there, and a script that names one of them is refused at load, as is one that
+//! does not parse (the message carries the line) or does not define `process`. One VM per
+//! worker per node, the script loaded once, so a counter in its upvalues persists across
+//! the records that worker sees.
 
 mod convert;
 mod scan;

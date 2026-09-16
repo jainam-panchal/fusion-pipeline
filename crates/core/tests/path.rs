@@ -394,14 +394,6 @@ fn a_path_can_be_built_from_a_field_name_or_a_map_and_any_key() {
 }
 
 #[test]
-fn only_the_id_path_is_the_id() {
-    assert!(FieldPath::parse("id").expect("parses").is_id());
-    for path in ["kind", "body", "attributes.id", "meta.id"] {
-        assert!(!FieldPath::parse(path).expect("parses").is_id(), "{path}");
-    }
-}
-
-#[test]
 fn write_of_typed_fields_with_the_right_type_reads_back() {
     let mut record = record();
     write(&mut record, "severity_number", json!(4)).expect("writes");

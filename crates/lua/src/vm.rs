@@ -1,6 +1,6 @@
 //! One worker's VM for one `lua` node: the sandbox, the API a script sees (`state`, `log`,
-//! `now_ns`, `record:copy()`, the read-only `meta` argument), the guardrails, and one run of
-//! `process` over one record.
+//! `now_ns`, `json`, `record:copy()`, the read-only `meta` argument), the guardrails,
+//! and one run of `process` over one record.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -171,6 +171,8 @@ pub(crate) struct Vm {
     meta_metatable: Table,
     /// The metatable of every record table `process` receives: it gives the table `copy`.
     record_metatable: Table,
+    /// The metatable that marks a table as a JSON list, so an empty one stays a list.
+    list_metatable: Table,
     /// Instructions used by the current run, counted by the hook in steps of the trigger.
     used: Rc<Cell<u64>>,
     script: Arc<Script>,
@@ -192,7 +194,9 @@ impl Vm {
         install_api(&lua, &script.node).map_err(runtime)?;
         install_pcall(&lua).map_err(runtime)?;
         let meta_metatable = meta_metatable(&lua).map_err(runtime)?;
-        let record_metatable = record_metatable(&lua).map_err(runtime)?;
+        let list_metatable = list_metatable(&lua).map_err(runtime)?;
+        install_json(&lua, &list_metatable).map_err(runtime)?;
+        let record_metatable = record_metatable(&lua, &list_metatable).map_err(runtime)?;
         lua.set_memory_limit(script.memory_bytes).map_err(runtime)?;
 
         let used = Rc::new(Cell::new(0));
@@ -235,6 +239,7 @@ impl Vm {
             process,
             meta_metatable,
             record_metatable,
+            list_metatable,
             used,
             script,
         })
@@ -247,7 +252,7 @@ impl Vm {
             meta: ctx.meta.clone(),
         });
         self.used.set(0);
-        let table = convert::to_table(&self.lua, record).map_err(classify)?;
+        let table = convert::to_table(&self.lua, record, &self.list_metatable).map_err(classify)?;
         table
             .set_metatable(Some(self.record_metatable.clone()))
             .map_err(classify)?;
@@ -272,19 +277,23 @@ impl Vm {
                             "an empty table is neither a record nor a list".to_owned(),
                         )));
                     }
-                    return convert::from_table(&t, output_bytes)
+                    return convert::from_table(&t, output_bytes, &self.list_metatable)
                         .map(|record| Returned::Record(Box::new(record)))
                         .map_err(output);
                 }
-                let mut records = Vec::with_capacity(t.raw_len());
-                for item in t.sequence_values::<LuaValue>() {
-                    let item = item.map_err(classify)?;
+                let len = convert::positions(&t, "the returned list").map_err(output)?;
+                let mut records = Vec::with_capacity(len);
+                for i in 1..=len {
+                    let item: LuaValue = t.raw_get(i).map_err(classify)?;
                     let LuaValue::Table(item) = item else {
                         return Err(output(OutputError(
                             "every entry of a returned list must be a record table".to_owned(),
                         )));
                     };
-                    records.push(convert::from_table(&item, output_bytes).map_err(output)?);
+                    records.push(
+                        convert::from_table(&item, output_bytes, &self.list_metatable)
+                            .map_err(output)?,
+                    );
                 }
                 Ok(Returned::Split(records))
             }
@@ -479,18 +488,58 @@ fn install_api(lua: &mlua::Lua, node: &str) -> mlua::Result<()> {
     Ok(())
 }
 
+/// `json`, read-only: `json.null`, the value a JSON `null` is while a script holds it, and
+/// `json.list(t)`, which marks `t` (a new table when omitted) as a list and returns it, so a
+/// script can make a list that stays one when empty. A table that already has a metatable
+/// is refused, so a record table or `meta` cannot lose theirs.
+fn install_json(lua: &mlua::Lua, list: &Table) -> mlua::Result<()> {
+    let fields = lua.create_table()?;
+    fields.raw_set("null", LuaValue::NULL)?;
+    let list = list.clone();
+    fields.raw_set(
+        "list",
+        lua.create_function(move |lua, table: Option<Table>| {
+            let table = match table {
+                Some(table) => table,
+                None => lua.create_table()?,
+            };
+            if table.metatable().is_some() && !convert::is_list(&table, &list) {
+                return Err(mlua::Error::runtime(
+                    "`json.list` takes a plain table, one without a metatable",
+                ));
+            }
+            table.set_metatable(Some(list.clone()))?;
+            Ok(table)
+        })?,
+    )?;
+    let metatable = lua.create_table()?;
+    metatable.raw_set("__index", fields)?;
+    metatable.raw_set(
+        "__newindex",
+        lua.create_function(|_, _: MultiValue| -> mlua::Result<()> {
+            Err(mlua::Error::runtime("`json` is read-only"))
+        })?,
+    )?;
+    metatable.raw_set("__metatable", "json")?;
+    let json = lua.create_table()?;
+    json.set_metatable(Some(metatable))?;
+    lua.globals().raw_set("json", json)
+}
+
 /// `record:copy()`: a deep copy of the table, shared structure and cycles kept as they are,
-/// with the record metatable so the copy can be copied too. Written in Lua so it runs under
-/// the instruction budget and the memory cap like the script's own code. The chunk takes the
-/// metatable and returns the method.
+/// every list still marked as one, with the record metatable so the copy can be copied too.
+/// Written in Lua so it runs under the instruction budget and the memory cap like the
+/// script's own code. The chunk takes the metatable and a function that marks the copy of a
+/// list, and returns the method.
 const COPY: &str = r#"
-local metatable = ...
+local metatable, mark = ...
 local next, type, setmetatable = next, type, setmetatable
 local function deep(value, seen)
   if type(value) ~= "table" then return value end
   local done = seen[value]
   if done then return done end
   local out = {}
+  mark(value, out)
   seen[value] = out
   for k, v in next, value do
     out[deep(k, seen)] = deep(v, seen)
@@ -505,16 +554,33 @@ end
 /// The metatable behind every record table: `__index` holds `copy`, and `__metatable` hides
 /// the table from `getmetatable` and refuses `setmetatable`, so a script cannot change
 /// `copy` for the records after it.
-fn record_metatable(lua: &mlua::Lua) -> mlua::Result<Table> {
+fn record_metatable(lua: &mlua::Lua, list: &Table) -> mlua::Result<Table> {
     let metatable = lua.create_table()?;
+    // A script cannot read the list metatable, so the copy asks Rust which tables carry it.
+    let list = list.clone();
+    let mark = lua.create_function(move |_, (from, to): (Table, Table)| {
+        if convert::is_list(&from, &list) {
+            to.set_metatable(Some(list.clone()))?;
+        }
+        Ok(())
+    })?;
     let copy: Function = lua
         .load(COPY)
         .set_name("=record:copy")
-        .call(metatable.clone())?;
+        .call((metatable.clone(), mark))?;
     let methods = lua.create_table()?;
     methods.raw_set("copy", copy)?;
     metatable.raw_set("__index", methods)?;
     metatable.raw_set("__metatable", "record")?;
+    Ok(metatable)
+}
+
+/// The metatable that marks a table as a JSON list. It has no fields, and `__metatable`
+/// hides it from `getmetatable` and refuses `setmetatable`, so a script can neither unmark a
+/// list nor change the one table every list shares.
+fn list_metatable(lua: &mlua::Lua) -> mlua::Result<Table> {
+    let metatable = lua.create_table()?;
+    metatable.raw_set("__metatable", "list")?;
     Ok(metatable)
 }
 

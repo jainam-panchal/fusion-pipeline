@@ -8,7 +8,7 @@ use common::{WAIT, for_each_worker_count, start};
 use fusion_core::memory::AckOutcome;
 use fusion_core::meta::{Arrival, IngestionTime, unix_nanos_now};
 use fusion_core::metrics::CounterMetric;
-use fusion_core::record::{Record, RecordId};
+use fusion_core::record::{Kind, Record, RecordId};
 use serde_json::{Value, json};
 
 const STAGE: [(&str, &str); 2] = [("tenant", "acme"), ("stage", "script")];
@@ -1024,4 +1024,183 @@ fn a_large_integral_float_is_the_integer_it_stands_for() {
     let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
     assert_eq!(out[0].time_unix_nano, Some(1_789_000_000_000_000_000));
     h.finish();
+}
+
+/// Composite values of every shape a record can decode into, `[]` and `null` included.
+fn composites() -> Value {
+    json!({
+        "body": [[], null, {"k": null}],
+        "attributes": {
+            "empty": [],
+            "holes": [1, null, 2],
+            "trailing": [null],
+            "nothing": null,
+            "nested": {"a": [], "b": null}
+        }
+    })
+}
+
+#[test]
+fn an_untouched_or_copied_record_comes_back_with_its_lists_and_nulls() {
+    for script in [
+        "function process(record) return record end",
+        "function process(record) return record:copy() end",
+    ] {
+        let yaml = config("", script);
+        let sent = record(1, composites());
+        let (out, h) = run(&yaml, 1, vec![sent.clone()]);
+        assert_eq!(out, vec![sent], "{script}");
+        h.finish();
+    }
+}
+
+#[test]
+fn a_script_sees_json_null_inside_lists_and_maps_and_may_write_it() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  local a = record.attributes
+  a.length = #a.holes
+  a.hole_is_null = a.holes[2] == json.null
+  a.nothing_is_null = a.nothing == json.null
+  a.written = json.null
+  table.insert(a.empty, "x")
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, composites())]);
+    let a = &out[0].attributes;
+    assert_eq!(a.get("length"), Some(&json!(3)));
+    assert_eq!(a.get("hole_is_null"), Some(&json!(true)));
+    assert_eq!(a.get("nothing_is_null"), Some(&json!(true)));
+    assert_eq!(a.get("written"), Some(&Value::Null));
+    assert_eq!(a.get("empty"), Some(&json!(["x"])));
+    h.finish();
+}
+
+#[test]
+fn a_list_given_a_key_that_is_not_its_position_is_an_output_error() {
+    let yaml = config(
+        "    on_error: drop\n",
+        r#"function process(record)
+  record.attributes.empty.name = "x"
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, composites())]);
+    assert!(out.is_empty());
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 1);
+    h.finish();
+}
+
+#[test]
+fn a_script_cannot_unmark_or_change_the_list_metatable() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  local list = record.attributes.empty
+  record.attributes.mt = getmetatable(list)
+  record.attributes.locked = not pcall(setmetatable, list, nil)
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, composites())]);
+    assert_eq!(out[0].attributes.get("mt"), Some(&json!("list")));
+    assert_eq!(out[0].attributes.get("locked"), Some(&json!(true)));
+    assert_eq!(out[0].attributes.get("empty"), Some(&json!([])));
+    h.finish();
+}
+
+#[test]
+fn a_list_with_a_nil_hole_is_an_output_error_naming_the_hole() {
+    let yaml = config(
+        "    on_error: drop\n",
+        r#"function process(record)
+  record.attributes.holes[2] = nil
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, composites())]);
+    assert!(out.is_empty());
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 1);
+    h.finish();
+}
+
+#[test]
+fn a_field_set_to_json_null_is_left_out_like_nil() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  record.severity_text = json.null
+  record.body = json.null
+  record.kind = json.null
+  return record
+end"#,
+    );
+    let (out, h) = run(
+        &yaml,
+        1,
+        vec![record(1, json!({"severity_text": "WARN", "body": "x"}))],
+    );
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].severity_text, None);
+    assert_eq!(out[0].body, None);
+    assert_eq!(out[0].kind, Kind::Log);
+    h.finish();
+}
+
+#[test]
+fn json_list_makes_a_list_that_stays_one_when_empty() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  record.attributes.fresh = json.list()
+  record.attributes.given = json.list({})
+  record.attributes.filled = json.list({ "a", json.null })
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({}))]);
+    let a = &out[0].attributes;
+    assert_eq!(a.get("fresh"), Some(&json!([])));
+    assert_eq!(a.get("given"), Some(&json!([])));
+    assert_eq!(a.get("filled"), Some(&json!(["a", null])));
+    h.finish();
+}
+
+#[test]
+fn a_script_cannot_change_json() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  record.attributes.refused = not pcall(function() json.null = 1 end)
+  record.attributes.mt = getmetatable(json)
+  record.attributes.still_null = record.attributes.nothing == json.null
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, composites())]);
+    let a = &out[0].attributes;
+    assert_eq!(a.get("refused"), Some(&json!(true)));
+    assert_eq!(a.get("mt"), Some(&json!("json")));
+    assert_eq!(a.get("still_null"), Some(&json!(true)));
+    h.finish();
+}
+
+#[test]
+fn a_returned_split_list_may_hold_only_its_positions() {
+    for script in [
+        "function process(record)\n  return { record, extra = record:copy() }\nend",
+        "function process(record)\n  return { record, nil, record:copy() }\nend",
+    ] {
+        let yaml = config("    on_error: drop\n", script);
+        let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+        assert!(out.is_empty(), "{script}");
+        assert_eq!(
+            h.counter(CounterMetric::LuaErrors, &lua_error("output")),
+            1,
+            "{script}"
+        );
+        h.finish();
+    }
 }
