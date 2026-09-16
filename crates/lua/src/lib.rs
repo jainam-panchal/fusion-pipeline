@@ -96,11 +96,12 @@ pub enum OnError {
 
 /// The `lua` stage.
 pub struct Lua {
-    /// Distinguishes this node's VMs from another node's in the worker's cache. A new
-    /// compiled pipeline takes new ids, so its records build their own VMs; the ones the
-    /// replaced pipeline left behind are not removed (#40), which is why nothing may read
-    /// this as a swap releasing them.
-    key: u64,
+    /// Distinguishes this node's VMs from another node's in the worker's cache. Not a key
+    /// in the glossary's sense: nothing about the state store is named here. A new compiled
+    /// pipeline takes new ids, so its records build their own VMs; the ones the replaced
+    /// pipeline left behind are not removed (#40), which is why nothing may read this as a
+    /// swap releasing them.
+    vm_id: u64,
     script: Arc<Script>,
     on_error: OnError,
     on_state_error: StateErrorPolicy,
@@ -116,10 +117,11 @@ impl std::fmt::Debug for Lua {
     }
 }
 
-static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
+static NEXT_VM_ID: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
-    /// This worker's VMs, one per `lua` node it has seen a record for.
+    /// This worker's VMs, one per `lua` node it has seen a record for, under that node's
+    /// [`Lua::vm_id`].
     static VMS: RefCell<HashMap<u64, Rc<Vm>>> = RefCell::new(HashMap::new());
 }
 
@@ -192,7 +194,7 @@ impl Lua {
         // `process` or a top level that misbehaves fails the config, not the first record.
         Vm::new(Arc::clone(&script)).map_err(|error| node.invalid_params(error.describe()))?;
         Ok(Self {
-            key: NEXT_KEY.fetch_add(1, Ordering::Relaxed),
+            vm_id: NEXT_VM_ID.fetch_add(1, Ordering::Relaxed),
             script,
             on_error: params.on_error,
             on_state_error: params.on_state_error.unwrap_or(StateErrorPolicy::Nak),
@@ -212,11 +214,11 @@ impl Lua {
     /// This worker's VM for this node, built on the worker's first record through it.
     fn vm(&self) -> Result<Rc<Vm>, LuaError> {
         VMS.with(|vms| {
-            if let Some(vm) = vms.borrow().get(&self.key) {
+            if let Some(vm) = vms.borrow().get(&self.vm_id) {
                 return Ok(Rc::clone(vm));
             }
             let vm = Rc::new(Vm::new(Arc::clone(&self.script))?);
-            vms.borrow_mut().insert(self.key, Rc::clone(&vm));
+            vms.borrow_mut().insert(self.vm_id, Rc::clone(&vm));
             Ok(vm)
         })
     }
@@ -238,7 +240,7 @@ impl Stage for Lua {
         if matches!(error, LuaError::Memory) {
             // A VM at its cap stays there when the growth is in the script's upvalues, so
             // the next record starts a fresh one; the persistent state is what was leaking.
-            VMS.with(|vms| vms.borrow_mut().remove(&self.key));
+            VMS.with(|vms| vms.borrow_mut().remove(&self.vm_id));
         }
         ctx.metrics.lua_error(error.kind());
         let message = error.describe();
