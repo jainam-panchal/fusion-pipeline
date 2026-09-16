@@ -386,6 +386,15 @@ The compose end-to-end boundary is the chaos test above, run as a script that re
 
 Amended 2026-09-16 (issue #45, ADR 0005): the NATS transport parsers are tested below the trait boundary too, on their public functions: which subject names a tenant under `tenant_prefix`, and which `Fusion-*` pipeline header is accepted, refused or repeated. The in-memory source takes an `Arrival` as given, so neither is observable through it; the round trip of the headers through a real server is an ignored JetStream test. Harness tests that need a tenant or an ingestion time give it through the arrival, as a source does, never inside the record.
 
+Amended 2026-09-16 (issue #12, ADR 0006): the events and record traces are two more seams, `EventLog` and `TraceSink`, with in-memory fakes. What the engine logs and traces is asserted through the harness, with tracing on and with tracing off. Below the boundary are:
+
+- the closed sets of event kinds, severities, span outcomes and settlements;
+- the OTLP event log and trace sink, on the SDK's in-memory exporters, and on one test exporter that blocks until released, which shows their bounded queues drop rather than wait;
+- the `OTEL_TRACES_SAMPLER_ARG` parser, whose refusal is a startup error;
+- `TraceKey`'s id derivation, whose "never zero" guard no record reaches.
+
+The NATS source's dead-letter events are asserted in the ignored JetStream tests. An ignored harness test measures throughput (performance is observed, not asserted), and the deploy configs (Loki, Tempo, collector, datasources, tenant dashboard) are checked by a test that reads them, with `deploy/metrics-check.sh` as the live round trip.
+
 There is no prior art in this repository; it is empty apart from the feature catalogue.
 
 Tests are written before implementation for each stage and for the engine's ack logic. The chaos test is written alongside the harness, before the pipeline binary is wired.
