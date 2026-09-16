@@ -191,6 +191,23 @@ fn ops_run_in_order_on_the_same_record() {
     assert_eq!(out[0].attributes.get("b"), Some(&json!("set")));
     assert_eq!(out[0].attributes.get("a"), None);
     h.finish();
+
+    // set the new name, then rename an absent old name onto it: the set value stays and
+    // the rename is unapplied.
+    let yaml = config(
+        "",
+        "      - set: { field: attributes.b, value: set }\n      - rename: { from: attributes.a, to: attributes.b }\n",
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"attributes": {}}))]);
+    assert_eq!(out[0].attributes.get("b"), Some(&json!("set")));
+    assert_eq!(
+        h.counter(
+            Metric::EditUnapplied,
+            &unapplied("rename", "attributes.a", "absent")
+        ),
+        1
+    );
+    h.finish();
 }
 
 #[test]
@@ -222,7 +239,7 @@ fn an_absent_source_leaves_the_record_and_counts_absent_for_that_op_and_field() 
     for_each_worker_count(|workers| {
         let yaml = config(
             "",
-            "      - rename: { from: attributes.http.path, to: attributes.http.route }\n      - copy: { from: attributes.nothing, to: attributes.copy }\n      - hash: { field: attributes.nil }\n      - set: { field: attributes.after, value: ran }\n",
+            "      - rename: { from: 'attributes.\"http.path\"', to: attributes.http.route }\n      - copy: { from: attributes.nothing, to: attributes.copy }\n      - hash: { field: attributes.nil }\n      - set: { field: attributes.after, value: ran }\n",
         );
         let before = json!({"body": "x", "attributes": {"nil": null}});
         let (out, h) = run(&yaml, workers, vec![record(1, before)]);
@@ -232,7 +249,7 @@ fn an_absent_source_leaves_the_record_and_counts_absent_for_that_op_and_field() 
                 .as_object()
                 .cloned()
                 .expect("object"),
-            "workers {workers}: nothing written, the op after the misses still ran"
+            "workers {workers}: nothing written, the op after the unapplied ones still ran"
         );
         assert_eq!(
             h.counter(

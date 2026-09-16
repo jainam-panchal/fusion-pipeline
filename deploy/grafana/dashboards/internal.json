@@ -1326,7 +1326,7 @@
       ]
     },
     {
-      "id": 13,
+      "id": 1002,
       "type": "timeseries",
       "title": "Edit ops that could not apply (by op, field, cause)",
       "description": "edit_unapplied_total for this stage: ops/s whose source read as null (cause=absent) or whose target refused the value (cause=type). Under on_unapplied: skip this is the only sign the node is not doing its job; under drop the same records show in \"Why records left here\" as edit_unapplied. Empty for stages that are not edit nodes.",

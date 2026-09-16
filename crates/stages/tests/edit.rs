@@ -196,6 +196,7 @@ fn a_set_literal_of_the_right_type_or_null_is_accepted() {
         "set: { field: attributes.flag, value: true }",
         "set: { field: attributes.x, value: null }",
         "set: { field: body, value: 'replaced' }",
+        "set: { field: time_unix_nano, value: 1700000000000000000 }",
     ] {
         assert!(build(&format!("    ops:\n      - {op}\n")).is_ok(), "{op}");
     }

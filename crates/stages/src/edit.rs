@@ -32,7 +32,6 @@
 //! `from` and `to` differ. Every refusal names the node and the op's position.
 
 use std::collections::BTreeMap;
-use std::sync::LazyLock;
 
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::metrics::{EditCause, EditOp};
@@ -97,30 +96,40 @@ pub struct Edit {
     on_unapplied: OnUnapplied,
 }
 
-/// One op, with its source path in canonical form for the `field` label.
+/// One op as parsed. `source` is the op's source path in canonical form, the `field`
+/// label of `edit_unapplied_total`, fixed at load so no record pays for the display.
 #[derive(Debug)]
-struct Op {
-    kind: EditOp,
-    source: String,
-    action: Action,
-}
-
-#[derive(Debug)]
-enum Action {
-    Set { field: FieldPath, value: Value },
-    Rename { from: FieldPath, to: FieldPath },
-    Copy { from: FieldPath, to: FieldPath },
-    Hash { field: FieldPath },
-    Delete { fields: Vec<FieldPath> },
+enum Op {
+    Set {
+        field: FieldPath,
+        value: Value,
+    },
+    Rename {
+        from: FieldPath,
+        to: FieldPath,
+        source: String,
+    },
+    Copy {
+        from: FieldPath,
+        to: FieldPath,
+        source: String,
+    },
+    Hash {
+        field: FieldPath,
+        source: String,
+    },
+    Delete {
+        fields: Vec<FieldPath>,
+    },
 }
 
 /// The op kinds as an error message lists them.
 const OP_NAMES: &str = "set, rename, copy, hash or delete";
 
-/// The tenant's path, which no op may name: the engine reads the tenant once per record
-/// for every label and state key, so an edit changing it would leave them disagreeing.
-static TENANT: LazyLock<FieldPath> =
-    LazyLock::new(|| FieldPath::parse("resource.tenant.id").unwrap_or_else(|_| unreachable!()));
+/// The tenant's path, which no op may write or remove: the engine reads the tenant once
+/// per record for every label and state key, so an edit changing it would leave them
+/// disagreeing.
+const TENANT: &str = "resource.tenant.id";
 
 /// Where in the config an error is: the node, the op's position, and the op's kind once
 /// that is known.
@@ -149,7 +158,7 @@ impl At<'_> {
         if !path.is_writable() {
             return Err(self.error(format!("`{key}`: `{path}` is read-only")));
         }
-        if path == *TENANT {
+        if FieldPath::parse(TENANT).ok().as_ref() == Some(&path) {
             return Err(self.error(format!(
                 "`{key}`: `{path}` is the tenant and cannot be edited"
             )));
@@ -214,10 +223,9 @@ fn parse_op(
         index,
         kind: None,
     };
-    if entry.len() != 1 {
+    let Some((name, body)) = entry.pop_first().filter(|_| entry.is_empty()) else {
         return Err(at.error(format!("one op per entry, one of {OP_NAMES}")));
-    }
-    let (name, body) = entry.pop_first().unwrap_or_else(|| unreachable!());
+    };
     let kind = match name.as_str() {
         "set" => EditOp::Set,
         "rename" => EditOp::Rename,
@@ -227,7 +235,7 @@ fn parse_op(
         other => return Err(at.error(format!("unknown op `{other}`; use {OP_NAMES}"))),
     };
     at.kind = Some(kind);
-    let (source, action) = match kind {
+    Ok(match kind {
         EditOp::Set => {
             let p: SetParams = at.params(body)?;
             if matches!(p.value, Value::Array(_) | Value::Object(_)) {
@@ -239,13 +247,10 @@ fn parse_op(
             field
                 .write(&mut Record::default(), p.value.clone())
                 .map_err(|e| at.error(format!("value {}: {e}", p.value)))?;
-            (
-                field.to_string(),
-                Action::Set {
-                    field,
-                    value: p.value,
-                },
-            )
+            Op::Set {
+                field,
+                value: p.value,
+            }
         }
         EditOp::Rename | EditOp::Copy => {
             let p: MoveParams = at.params(body)?;
@@ -259,12 +264,11 @@ fn parse_op(
                 return Err(at.error("`from` and `to` are the same field"));
             }
             let source = from.to_string();
-            let action = if kind == EditOp::Rename {
-                Action::Rename { from, to }
+            if kind == EditOp::Rename {
+                Op::Rename { from, to, source }
             } else {
-                Action::Copy { from, to }
-            };
-            (source, action)
+                Op::Copy { from, to, source }
+            }
         }
         EditOp::Hash => {
             let p: HashParams = at.params(body)?;
@@ -272,7 +276,10 @@ fn parse_op(
             field
                 .write(&mut Record::default(), Value::String(String::new()))
                 .map_err(|e| at.error(format!("{e}; hash writes a string")))?;
-            (field.to_string(), Action::Hash { field })
+            Op::Hash {
+                source: field.to_string(),
+                field,
+            }
         }
         EditOp::Delete => {
             let p: DeleteParams = at.params(body)?;
@@ -284,40 +291,52 @@ fn parse_op(
                 .iter()
                 .map(|f| at.editable("fields", f))
                 .collect::<Result<Vec<_>, _>>()?;
-            let source = fields
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
-            (source, Action::Delete { fields })
+            Op::Delete { fields }
         }
-    };
-    Ok(Op {
-        kind,
-        source,
-        action,
     })
 }
 
 impl Op {
+    /// The `op` label.
+    const fn kind(&self) -> EditOp {
+        match self {
+            Self::Set { .. } => EditOp::Set,
+            Self::Rename { .. } => EditOp::Rename,
+            Self::Copy { .. } => EditOp::Copy,
+            Self::Hash { .. } => EditOp::Hash,
+            Self::Delete { .. } => EditOp::Delete,
+        }
+    }
+
+    /// The `field` label: the source path of an op that can be unapplied. `set` and
+    /// `delete` never are, so they carry none.
+    fn source(&self) -> &str {
+        match self {
+            Self::Rename { source, .. } | Self::Copy { source, .. } | Self::Hash { source, .. } => {
+                source
+            }
+            Self::Set { .. } | Self::Delete { .. } => "",
+        }
+    }
+
     /// Apply to `record`, or say why it could not; the record is unchanged on `Err`.
     fn apply(&self, record: &mut Record) -> Result<(), EditCause> {
-        match &self.action {
+        match self {
             // The literal was written to an empty record at load, so this cannot refuse.
-            Action::Set { field, value } => field
+            Self::Set { field, value } => field
                 .write(record, value.clone())
                 .map_err(|_| EditCause::Type),
-            Action::Rename { from, to } => {
+            Self::Rename { from, to, .. } => {
                 let value = owned(from.read(record)).ok_or(EditCause::Absent)?;
                 to.write(record, value).map_err(|_| EditCause::Type)?;
                 // `from` held a value a moment ago and is not `to`, so this cannot refuse.
                 from.remove(record).map(|_| ()).map_err(|_| EditCause::Type)
             }
-            Action::Copy { from, to } => {
+            Self::Copy { from, to, .. } => {
                 let value = owned(from.read(record)).ok_or(EditCause::Absent)?;
                 to.write(record, value).map_err(|_| EditCause::Type)
             }
-            Action::Hash { field } => {
+            Self::Hash { field, .. } => {
                 let digest = match field.read(record) {
                     FieldValue::Null => return Err(EditCause::Absent),
                     FieldValue::Str(s) => sha256_hex(s.as_bytes()),
@@ -332,7 +351,7 @@ impl Op {
                     .write(record, Value::String(digest))
                     .map_err(|_| EditCause::Type)
             }
-            Action::Delete { fields } => {
+            Self::Delete { fields } => {
                 // Every field was checked writable at load, so `remove` cannot refuse; an
                 // absent field is nothing to do, not an unapplied op.
                 for field in fields {
@@ -350,12 +369,10 @@ fn owned(value: FieldValue<'_>) -> Option<Value> {
         FieldValue::Null => None,
         FieldValue::Bool(b) => Some(Value::Bool(b)),
         FieldValue::Str(s) => Some(Value::String(s.to_owned())),
-        FieldValue::Num(Num::Int(i)) => Some(
-            i64::try_from(i)
-                .map(Value::from)
-                .or_else(|_| u64::try_from(i).map(Value::from))
-                .unwrap_or(Value::Null),
-        ),
+        FieldValue::Num(Num::Int(i)) => i64::try_from(i)
+            .map(Value::from)
+            .or_else(|_| u64::try_from(i).map(Value::from))
+            .ok(),
         FieldValue::Num(Num::Float(f)) => {
             Some(serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number))
         }
@@ -365,19 +382,14 @@ fn owned(value: FieldValue<'_>) -> Option<Value> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    hex
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 impl Stage for Edit {
     fn process(&self, mut record: Record, ctx: &Context<'_>) -> StageOutput {
         for op in &self.ops {
             if let Err(cause) = op.apply(&mut record) {
-                ctx.metrics.edit_unapplied(op.kind, &op.source, cause);
+                ctx.metrics.edit_unapplied(op.kind(), op.source(), cause);
                 if self.on_unapplied == OnUnapplied::Drop {
                     return StageOutput::Drop(DropReason::EditUnapplied);
                 }

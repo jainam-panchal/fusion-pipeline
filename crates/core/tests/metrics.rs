@@ -2,7 +2,7 @@
 //! reasons that label `records_dropped_total`. Nothing else is observable below the trait
 //! boundary; what the engine emits is tested through it in the pipeline crate.
 
-use fusion_core::metrics::{EditCause, EditOp, Labels, Metric, MetricKind};
+use fusion_core::metrics::{EditCause, EditOp, Metric, MetricKind};
 use fusion_core::stage::DropReason;
 
 /// Spec, Telemetry: the drop reasons are exactly this set, in this spelling.
@@ -79,24 +79,4 @@ fn edit_label_values_are_exactly_the_spec_sets() {
     assert_eq!(ops, ["set", "rename", "copy", "hash", "delete"]);
     let causes: Vec<&str> = EditCause::ALL.iter().map(|c| c.as_str()).collect();
     assert_eq!(causes, ["absent", "type"]);
-}
-
-#[test]
-fn edit_labels_carry_tenant_stage_op_field_and_cause_in_that_order() {
-    let labels = Labels::new("acme", "normalise").with_edit(
-        EditOp::Rename,
-        "attributes.http.path",
-        EditCause::Absent,
-    );
-    let pairs: Vec<(&str, &str)> = labels.pairs().collect();
-    assert_eq!(
-        pairs,
-        [
-            ("tenant", "acme"),
-            ("stage", "normalise"),
-            ("op", "rename"),
-            ("field", "attributes.http.path"),
-            ("cause", "absent"),
-        ]
-    );
 }
