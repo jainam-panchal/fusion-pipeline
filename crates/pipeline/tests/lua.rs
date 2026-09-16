@@ -6,7 +6,7 @@ mod common;
 
 use common::{WAIT, for_each_worker_count, start};
 use fusion_core::memory::AckOutcome;
-use fusion_core::meta::{Arrival, unix_nanos_now};
+use fusion_core::meta::{Arrival, IngestionTime, unix_nanos_now};
 use fusion_core::metrics::CounterMetric;
 use fusion_core::record::Record;
 use serde_json::{Value, json};
@@ -21,10 +21,9 @@ fn config(node_lines: &str, source: &str) -> String {
     )
 }
 
-/// A tenant `acme` record from a JSON object, with `id` and `resource.tenant.id` filled in.
+/// A record from a JSON object, with `id` filled in. The harness pushes it as tenant `acme`.
 fn record(id: u64, mut json: Value) -> Record {
     json["id"] = json!(id);
-    json["resource"]["tenant.id"] = json!("acme");
     Record::from_json(&json.to_string()).expect("record parses")
 }
 
@@ -32,7 +31,7 @@ fn record(id: u64, mut json: Value) -> Record {
 /// received in id order plus the harness for counter assertions.
 fn run(yaml: &str, workers: usize, records: Vec<Record>) -> (Vec<Record>, common::Harness) {
     let h = start(yaml, workers);
-    let probes: Vec<_> = records.into_iter().map(|r| h.source.push(r)).collect();
+    let probes: Vec<_> = records.into_iter().map(|r| h.push(r)).collect();
     for (i, probe) in probes.iter().enumerate() {
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "record {i}");
     }
@@ -68,7 +67,11 @@ end"#,
         assert_eq!(r.attributes.get("http.path"), None);
         assert_eq!(r.severity_text.as_deref(), Some("WARN"));
         assert_eq!(r.body, Some(json!("DISK FULL")));
-        assert_eq!(r.resource.get("tenant.id"), Some(&json!("acme")));
+        assert_eq!(
+            r.resource.get("tenant.id"),
+            None,
+            "the pipeline adds no tenant"
+        );
         h.finish();
     });
 }
@@ -124,7 +127,7 @@ fn a_script_returning_a_list_splits_the_record_and_the_ack_fires_once() {
 end"#,
         );
         let h = start(&yaml, workers);
-        let probe = h.source.push(record(9, json!({"body": "a\nb"})));
+        let probe = h.push(record(9, json!({"body": "a\nb"})));
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
         let mut bodies: Vec<_> = h
             .sinks
@@ -216,7 +219,7 @@ fn on_error_nak_fails_the_record_so_the_source_message_is_nakked() {
         LOOPS,
     );
     let h = start(&yaml, 1);
-    let probe = h.source.push(record(1, json!({"body": "x"})));
+    let probe = h.push(record(1, json!({"body": "x"})));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Nak(None)));
     assert!(h.sinks.records("out").is_empty());
     assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 1);
@@ -384,7 +387,7 @@ fn a_state_error_is_handled_by_on_state_error_not_by_on_error() {
     // Default: nak, the safe choice for a stage that may produce data from state.
     let h = start(&config("    on_error: drop\n", source), 1);
     h.state.fail_all(true);
-    let probe = h.source.push(record(1, json!({})));
+    let probe = h.push(record(1, json!({})));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Nak(None)));
     assert_eq!(h.counter(CounterMetric::StateErrors, &STAGE), 1);
     assert_eq!(
@@ -406,7 +409,7 @@ fn a_state_error_is_handled_by_on_state_error_not_by_on_error() {
     // `pass` forwards the record as it came in.
     let h = start(&config("    on_state_error: pass\n", source), 1);
     h.state.fail_all(true);
-    let probe = h.source.push(record(1, json!({"body": "x"})));
+    let probe = h.push(record(1, json!({"body": "x"})));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     assert_eq!(h.sinks.records("out").len(), 1);
     h.finish();
@@ -577,11 +580,11 @@ fn a_script_stamping_the_clock_into_a_time_field_does_not_move_a_downstream_wind
             (101, 1_000, 2),
         ];
         for (id, ingested_s, delivery_count) in sends {
-            let mut r = record(id, json!({"body": "disk full"}));
-            r.observed_time_unix_nano = Some(ingested_s * 1_000_000_000);
+            let r = record(id, json!({"body": "disk full"}));
             let arrival = Arrival {
+                tenant: Some("acme".to_owned()),
+                ingestion_time: Some(IngestionTime::Reported(ingested_s * 1_000_000_000)),
                 delivery_count,
-                ..Arrival::default()
             };
             let probe = h.source.push_arrival(r, arrival);
             assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
@@ -727,7 +730,7 @@ fn pcall_cannot_swallow_a_state_error_so_on_state_error_still_applies() {
     );
     let h = start(&yaml, 1);
     h.state.fail_all(true);
-    let probe = h.source.push(record(1, json!({})));
+    let probe = h.push(record(1, json!({})));
     assert_eq!(
         probe.wait(WAIT),
         Some(AckOutcome::Nak(None)),
@@ -899,7 +902,7 @@ end"#,
         1,
         vec![record(
             1,
-            json!({"body": "first", "time_unix_nano": 5, "trace_id": "ab", "attributes": {"a": 1}}),
+            json!({"body": "first", "time_unix_nano": 5, "trace_id": "ab", "attributes": {"a": 1}, "resource": {"service.name": "api"}}),
         )],
     );
     let bodies: Vec<_> = out.iter().map(|r| r.body.clone()).collect();
@@ -920,7 +923,7 @@ end"#,
         assert_eq!(r.attributes.get("only"), Some(&json!("copy")));
         assert_eq!(r.time_unix_nano, Some(5), "every field is copied");
         assert_eq!(r.trace_id.as_deref(), Some("ab"));
-        assert_eq!(r.resource.get("tenant.id"), Some(&json!("acme")));
+        assert_eq!(r.resource.get("service.name"), Some(&json!("api")));
     }
     assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
     h.finish();
@@ -941,7 +944,7 @@ end"#,
     assert!(out.is_empty());
     assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 1);
     // The worker is still serving.
-    let probe = h.source.push(record(2, json!({"body": "x"})));
+    let probe = h.push(record(2, json!({"body": "x"})));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     h.finish();
 }

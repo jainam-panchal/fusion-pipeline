@@ -6,7 +6,6 @@
 
 use fusion_core::metrics::{
     CounterMetric, EditCause, EditOp, EngineLabel, HistogramMetric, LuaErrorKind, Metric,
-    MetricKind,
 };
 use fusion_core::stage::DropReason;
 
@@ -67,13 +66,11 @@ fn metric_names_are_exactly_the_spec_set() {
 
 #[test]
 fn every_total_is_a_counter_and_every_seconds_is_a_histogram() {
-    for metric in Metric::ALL {
-        let expected = if metric.as_str().ends_with("_total") {
-            MetricKind::Counter
-        } else {
-            MetricKind::Histogram
-        };
-        assert_eq!(metric.kind(), expected, "{}", metric.as_str());
+    for counter in CounterMetric::ALL {
+        assert!(counter.as_str().ends_with("_total"), "{counter}");
+    }
+    for histogram in HistogramMetric::ALL {
+        assert!(histogram.as_str().ends_with("_seconds"), "{histogram}");
     }
 }
 
@@ -101,8 +98,8 @@ fn engine_label_values_are_exactly_the_spec_set() {
     assert_eq!(EngineLabel::Backtracking.to_string(), "backtracking");
 }
 
-/// The counters and the histograms together are every metric, each once, and each subset
-/// holds only its own instrument.
+/// The counters and the histograms together are every metric, each once, under the same
+/// name.
 #[test]
 fn the_typed_subsets_partition_the_metrics_by_instrument() {
     let mut split: Vec<Metric> = CounterMetric::ALL
@@ -115,15 +112,9 @@ fn the_typed_subsets_partition_the_metrics_by_instrument() {
     all.sort_unstable();
     assert_eq!(split, all);
     for counter in CounterMetric::ALL {
-        assert_eq!(counter.metric().kind(), MetricKind::Counter, "{counter}");
         assert_eq!(counter.as_str(), counter.metric().as_str());
     }
     for histogram in HistogramMetric::ALL {
-        assert_eq!(
-            histogram.metric().kind(),
-            MetricKind::Histogram,
-            "{histogram}"
-        );
         assert_eq!(histogram.as_str(), histogram.metric().as_str());
     }
 }

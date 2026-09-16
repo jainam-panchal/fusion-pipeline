@@ -145,7 +145,7 @@ fn parentheses_group() {
 fn dotted_paths_name_flat_map_keys() {
     assert!(eval(r#"attributes.http.path == "/api/v1""#));
     assert!(eval("attributes.http.status >= 500"));
-    assert!(eval(r#"resource.tenant.id == "acme""#));
+    assert!(eval(r#"resource.service.name == "api""#));
     assert!(eval(r#"resource.service.name == "api""#));
     assert!(eval(r#"body == "disk full on /var""#));
     assert!(eval(r#"kind == "log""#));

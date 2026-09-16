@@ -21,8 +21,8 @@
 //! comes back.
 //!
 //! A pipeline header that does not parse is left out of the arrival, reported on stderr and
-//! counted on `source_invalid_headers_total` under the subject's tenant; the message is
-//! walked as if the header were absent.
+//! counted on `source_invalid_headers_total` under the tenant the record's `Meta` gets; the
+//! message is walked as if the header were absent.
 //!
 //! A payload that is not a record is nak'd like any other failure and reported on stderr; it
 //! runs out `max_deliver` the same way a record without an id does, which is where the
@@ -33,9 +33,9 @@
 //! sink that is down does not burn through `max_deliver` in milliseconds.
 //!
 //! The engine counts a redelivered record on `source_redeliveries_total` under its `Meta`
-//! tenant. A payload that does not decode has no record and no `Meta`, so the source counts
-//! it itself, the redelivery and the nak it issues (`source_naks_total`), under the tenant
-//! the subject names.
+//! tenant. A payload that does not decode has no record, so the source counts it itself,
+//! the redelivery and the nak it issues (`source_naks_total`), under the tenant its arrival
+//! gives, which is the tenant `Meta` would have had.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,15 +43,14 @@ use std::time::Duration;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{AckKind, message::Acker};
 use fusion_core::io::{AckHandle, Envelope, Intake, Source, SourceError};
-use fusion_core::meta::UNKNOWN_TENANT;
+use fusion_core::meta::Meta;
 use fusion_core::metrics::Metrics;
 use fusion_core::record::Record;
 use futures::StreamExt;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
-use crate::headers::{self, Message};
-use crate::subject::tenant_from_subject;
+use crate::headers::{self, InvalidHeader, Received};
 
 /// Longest redelivery delay [`nak_delay`] asks for. A consumer with `max_deliver` 5, as the
 /// compose stack creates, never reaches it (1s, 2s, 4s, 8s, then the final delivery); the cap
@@ -127,19 +126,31 @@ impl NatsSource {
                 .as_ref()
                 .and_then(|info| u64::try_from(info.published.unix_timestamp_nanos()).ok());
             let (message, acker) = message.split();
-            let subject_tenant = tenant_from_subject(&message.subject, &self.tenant_prefix);
+            let (arrival, invalid_headers) = headers::arrival(
+                &self.tenant_prefix,
+                Received {
+                    subject: &message.subject,
+                    headers: message.headers.as_ref(),
+                    published,
+                    delivered,
+                },
+            );
+            // The tenant the engine will give the record, so every series the source counts
+            // agrees with the record's others; for a payload that does not decode, the only
+            // tenant there is.
+            let tenant = Meta::tenant_of(&arrival);
+            self.report_invalid_headers(&message.subject, &invalid_headers, &tenant);
             let record = match serde_json::from_slice::<Record>(&message.payload) {
                 Ok(record) => record,
                 Err(err) => {
-                    let tenant = subject_tenant.unwrap_or(UNKNOWN_TENANT);
                     if delivered > 1 {
-                        self.metrics.source_redelivery(tenant);
+                        self.metrics.source_redelivery(&tenant);
                     }
                     eprintln!(
                         "nats source: nak of undecodable message on `{}` (delivery {delivered}): {err}",
                         message.subject
                     );
-                    self.metrics.source_nak(tenant);
+                    self.metrics.source_nak(&tenant);
                     // Settled here, on the runtime: `NatsAck` blocks on the runtime and
                     // cannot be used from inside it.
                     let nak = AckKind::Nak(Some(nak_delay(delivered)));
@@ -149,21 +160,6 @@ impl NatsSource {
                     continue;
                 }
             };
-            let arrived = headers::arrival(Message {
-                subject: &message.subject,
-                tenant_prefix: &self.tenant_prefix,
-                headers: message.headers.as_ref(),
-                published,
-                delivered,
-            });
-            for invalid in &arrived.invalid {
-                eprintln!(
-                    "nats source: ignored a pipeline header on `{}`: {invalid}",
-                    message.subject
-                );
-                self.metrics
-                    .source_invalid_header(subject_tenant.unwrap_or(UNKNOWN_TENANT));
-            }
             let ack = Box::new(NatsAck {
                 runtime: Arc::clone(&self.runtime),
                 acker,
@@ -173,9 +169,17 @@ impl NatsSource {
             // message redelivers after `ack_wait`.
             intake.send(Envelope {
                 record,
-                arrival: arrived.arrival,
+                arrival,
                 ack,
             })?;
+        }
+    }
+
+    /// Log and count every pipeline header the arrival left out, under `tenant`.
+    fn report_invalid_headers(&self, subject: &str, invalid: &[InvalidHeader], tenant: &str) {
+        for problem in invalid {
+            eprintln!("nats source: ignored a pipeline header on `{subject}`: {problem}");
+            self.metrics.source_invalid_header(tenant);
         }
     }
 }

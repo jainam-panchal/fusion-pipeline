@@ -9,7 +9,7 @@
 //! | `Fusion-Ingestion-Time` | the ingestion time, nanoseconds since the Unix epoch, decimal |
 //! | `Fusion-Ingestion-Time-Kind` | `reported` or `clock` |
 //!
-//! The source reads them back into the message's [`Arrival`] with [`arrival`], so a pipeline
+//! The source reads them back into the message's [`Arrival`] with [`arrival()`], so a pipeline
 //! consuming another's output keeps the first pipeline's tenant and ingestion time. The
 //! subject's tenant wins over the header, because NATS permissions back the subject and any
 //! producer can set a header; the header's time wins over the JetStream publish time, so the
@@ -17,7 +17,7 @@
 //! arrival and reported, never a reason to nak: the record is still valid.
 
 use async_nats::{HeaderMap, HeaderValue};
-use fusion_core::meta::{Arrival, IngestionTime, Meta, is_valid_tenant};
+use fusion_core::meta::{Arrival, IngestionTime, Meta, TimeKind, is_valid_tenant};
 
 use crate::subject::tenant_from_subject;
 
@@ -38,10 +38,7 @@ pub fn for_meta(meta: &Meta) -> HeaderMap {
     for (name, value) in [
         (TENANT, meta.tenant.to_string()),
         (INGESTION_TIME, meta.ingestion_time.unix_nanos().to_string()),
-        (
-            INGESTION_TIME_KIND,
-            meta.ingestion_time.kind_name().to_owned(),
-        ),
+        (INGESTION_TIME_KIND, meta.ingestion_time.kind().to_string()),
     ] {
         if let Ok(value) = value.parse::<HeaderValue>() {
             headers.insert(name, value);
@@ -71,47 +68,36 @@ pub enum InvalidHeader {
     Unpaired(&'static str),
 }
 
-/// What a message says about itself: the arrival the engine resolves `Meta` from, and the
-/// pipeline headers that were left out of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Arrived {
-    /// The arrival for the envelope.
-    pub arrival: Arrival,
-    /// The pipeline headers that did not parse, each left out of the arrival.
-    pub invalid: Vec<InvalidHeader>,
-}
-
-/// Where a message came from: its subject, its headers, the JetStream publish time
-/// (nanoseconds since the Unix epoch) and how many times it has been delivered.
+/// What JetStream handed the source for one message, apart from its payload.
 #[derive(Debug, Clone, Copy)]
-pub struct Message<'m> {
+pub struct Received<'m> {
     /// The subject it was published on.
     pub subject: &'m str,
-    /// The first token of the subjects that name a tenant.
-    pub tenant_prefix: &'m str,
     /// Its headers, if any.
     pub headers: Option<&'m HeaderMap>,
-    /// The JetStream publish time.
+    /// The JetStream publish time, nanoseconds since the Unix epoch.
     pub published: Option<u64>,
     /// The JetStream delivery count.
     pub delivered: u64,
 }
 
-/// The arrival of `message`:
+/// The arrival of `received` by a source whose tenant subjects are
+/// `{tenant_prefix}.{tenant}.>`, and the pipeline headers left out of it because they did
+/// not parse:
 ///
-/// - tenant: the subject's `{tenant_prefix}.{tenant}.>` token, else `Fusion-Tenant`;
+/// - tenant: the subject's tenant token, else `Fusion-Tenant`, each only when it passes
+///   [`is_valid_tenant`];
 /// - ingestion time: `Fusion-Ingestion-Time` with its kind, else the publish time as
 ///   reported;
 /// - delivery count: the delivery count.
 #[must_use]
-pub fn arrival(message: Message<'_>) -> Arrived {
-    let Message {
+pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<InvalidHeader>) {
+    let Received {
         subject,
-        tenant_prefix,
         headers,
         published,
         delivered,
-    } = message;
+    } = received;
     let mut invalid = Vec::new();
     let mut read = |name| {
         header(headers, name).unwrap_or_else(|problem| {
@@ -137,14 +123,12 @@ pub fn arrival(message: Message<'_>) -> Arrived {
         invalid.extend(problems);
         None
     });
-    Arrived {
-        arrival: Arrival {
-            tenant,
-            ingestion_time: header_time.or(published.map(IngestionTime::Reported)),
-            delivery_count: delivered,
-        },
-        invalid,
-    }
+    let arrival = Arrival {
+        tenant,
+        ingestion_time: header_time.or(published.map(IngestionTime::Reported)),
+        delivery_count: delivered,
+    };
+    (arrival, invalid)
 }
 
 /// The ingestion time the two time headers give, `None` when neither is present.
@@ -158,18 +142,18 @@ fn ingestion_time(
         (None, Some(_)) => Err(vec![InvalidHeader::Unpaired(INGESTION_TIME_KIND)]),
         (Some(time), Some(kind)) => {
             let nanos = time.parse::<u64>().ok().filter(|_| is_decimal(time));
-            let mut problems = Vec::new();
-            if nanos.is_none() {
-                problems.push(InvalidHeader::Time(time.to_owned()));
-            }
-            let parsed = nanos.and_then(|nanos| IngestionTime::from_kind_name(kind, nanos));
-            if IngestionTime::from_kind_name(kind, 0).is_none() {
-                problems.push(InvalidHeader::Kind(kind.to_owned()));
-            }
-            if problems.is_empty() {
-                Ok(parsed)
-            } else {
-                Err(problems)
+            match (nanos, TimeKind::parse(kind)) {
+                (Some(nanos), Some(kind)) => Ok(Some(IngestionTime::new(kind, nanos))),
+                (nanos, parsed_kind) => {
+                    let mut problems = Vec::new();
+                    if nanos.is_none() {
+                        problems.push(InvalidHeader::Time(time.to_owned()));
+                    }
+                    if parsed_kind.is_none() {
+                        problems.push(InvalidHeader::Kind(kind.to_owned()));
+                    }
+                    Err(problems)
+                }
             }
         }
     }

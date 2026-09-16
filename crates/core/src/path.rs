@@ -20,7 +20,7 @@ use std::sync::LazyLock;
 use serde_json::{Map, Value};
 
 use crate::closed_set::closed_set;
-use crate::meta::Meta;
+use crate::meta::{Meta, MetaField, MetaValue};
 use crate::record::{Kind, Record, RecordId};
 
 /// Errors from parsing a path or writing through one. Each message says what is wrong and
@@ -149,17 +149,6 @@ closed_set! {
         ObservedTimeUnixNano = "observed_time_unix_nano",
         TraceId = "trace_id",
         SpanId = "span_id",
-    }
-}
-
-closed_set! {
-    /// A value of the record's `Meta`, by its spelling after `meta.`.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum MetaField {
-        Id = "id",
-        Tenant = "tenant",
-        IngestionTime = "ingestion_time",
-        DeliveryCount = "delivery_count",
     }
 }
 
@@ -694,12 +683,6 @@ impl FieldPath {
         }
     }
 
-    /// Whether the path names a value of the record's `Meta` rather than of the record.
-    #[must_use]
-    pub const fn is_meta(&self) -> bool {
-        matches!(self.target, Target::Meta(_))
-    }
-
     /// Read the field as a borrowed view: from `record`, or from `meta` for a meta path. An
     /// absent field is [`FieldValue::Null`].
     #[must_use]
@@ -718,11 +701,9 @@ impl FieldPath {
                     .map_or(FieldValue::Null, FieldValue::from_json);
             }
             Target::Meta(field) => {
-                return match field {
-                    MetaField::Id => num(meta.record_id.0),
-                    MetaField::Tenant => FieldValue::Str(&meta.tenant),
-                    MetaField::IngestionTime => num(meta.ingestion_time.unix_nanos()),
-                    MetaField::DeliveryCount => num(meta.delivery_count),
+                return match meta.get(*field) {
+                    MetaValue::Str(text) => FieldValue::Str(text),
+                    MetaValue::U64(n) => num(n),
                 };
             }
             Target::Field(field) => *field,

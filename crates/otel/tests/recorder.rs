@@ -2,9 +2,7 @@
 //! out of a meter provider as instruments named as the spec spells them, with the labels as
 //! attributes and durations in seconds. The in-memory exporter stands in for the collector.
 
-use fusion_core::metrics::{
-    CounterMetric, HistogramMetric, Labels, Metric, MetricKind, Metrics, Recorder,
-};
+use fusion_core::metrics::{CounterMetric, HistogramMetric, Labels, Metric, Metrics, Recorder};
 use fusion_core::stage::DropReason;
 use fusion_otel::OtlpRecorder;
 use opentelemetry::metrics::MeterProvider as _;
@@ -62,16 +60,18 @@ fn every_spec_metric_exports_under_the_spec_name_with_seconds_on_histograms() {
         }
     });
 
-    let mut expected: Vec<(String, String)> = Metric::ALL
+    let counters = CounterMetric::ALL
         .iter()
-        .map(|m| {
-            let unit = match m.kind() {
-                MetricKind::Counter => "",
-                MetricKind::Histogram => "s",
-            };
-            (m.as_str().to_owned(), unit.to_owned())
-        })
-        .collect();
+        .map(|m| (m.as_str().to_owned(), String::new()));
+    let histograms = HistogramMetric::ALL
+        .iter()
+        .map(|m| (m.as_str().to_owned(), "s".to_owned()));
+    let mut expected: Vec<(String, String)> = counters.chain(histograms).collect();
+    assert_eq!(
+        expected.len(),
+        Metric::ALL.len(),
+        "every metric is one or the other"
+    );
     expected.sort();
     assert_eq!(exported_names(&exported), expected);
 }

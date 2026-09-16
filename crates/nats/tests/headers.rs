@@ -6,7 +6,7 @@ use async_nats::HeaderMap;
 use fusion_core::meta::{Arrival, IngestionTime, Meta};
 use fusion_core::record::RecordId;
 use fusion_nats::headers::{
-    self, INGESTION_TIME, INGESTION_TIME_KIND, InvalidHeader, Message, TENANT,
+    self, INGESTION_TIME, INGESTION_TIME_KIND, InvalidHeader, Received, TENANT,
 };
 
 fn meta(ingestion_time: IngestionTime) -> Meta {
@@ -26,20 +26,29 @@ fn map(pairs: &[(&str, &str)]) -> HeaderMap {
     headers
 }
 
+/// What [`headers::arrival`] gave for one message.
+struct Arrived {
+    arrival: Arrival,
+    invalid: Vec<InvalidHeader>,
+}
+
 /// The arrival of a message on `subject` under the default `logs` prefix.
 fn arrival(
     subject: &str,
     headers: Option<&HeaderMap>,
     published: Option<u64>,
     delivered: u64,
-) -> headers::Arrived {
-    headers::arrival(Message {
-        subject,
-        tenant_prefix: "logs",
-        headers,
-        published,
-        delivered,
-    })
+) -> Arrived {
+    let (arrival, invalid) = headers::arrival(
+        "logs",
+        Received {
+            subject,
+            headers,
+            published,
+            delivered,
+        },
+    );
+    Arrived { arrival, invalid }
 }
 
 fn value<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {

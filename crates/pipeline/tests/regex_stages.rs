@@ -29,10 +29,7 @@ nodes:
 }
 
 fn record(id: u64, body: &str) -> Record {
-    Record::from_json(
-        &json!({"id": id, "body": body, "resource": {"tenant.id": "acme"}}).to_string(),
-    )
-    .expect("record parses")
+    Record::from_json(&json!({"id": id, "body": body}).to_string()).expect("record parses")
 }
 
 fn attributes(h: &Harness, sink: &str, id: u64) -> serde_json::Map<String, Value> {
@@ -50,7 +47,7 @@ fn named_groups_become_attributes_and_the_body_is_kept() {
         let h = start(&extract_yaml(LINUX_PATTERN), workers);
         let line = "Jun 14 15:16:01 combo sshd(pam_unix)[19939]: authentication failure; logname= uid=0 euid=0 tty=NODEVssh ruser= rhost=218.188.2.4 ";
 
-        let probe = h.source.push(record(1, line));
+        let probe = h.push(record(1, line));
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
 
         let attrs = attributes(&h, "out", 1);
@@ -75,7 +72,7 @@ fn a_non_matching_line_passes_unchanged_and_is_counted() {
     for_each_worker_count(|workers| {
         let h = start(&extract_yaml(LINUX_PATTERN), workers);
 
-        let probe = h.source.push(record(7, "not a syslog line"));
+        let probe = h.push(record(7, "not a syslog line"));
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
 
         let out = h.sinks.records("out");
@@ -103,10 +100,7 @@ fn a_non_matching_line_passes_unchanged_and_is_counted() {
 #[test]
 fn regex_node_metrics_carry_the_engine_label_and_other_nodes_do_not() {
     let h = start(&extract_yaml(LINUX_PATTERN), 1);
-    assert_eq!(
-        h.source.push(record(1, "x")).wait(WAIT),
-        Some(AckOutcome::Ack)
-    );
+    assert_eq!(h.push(record(1, "x")).wait(WAIT), Some(AckOutcome::Ack));
     let linear = [
         ("tenant", "acme"),
         ("stage", "parse_linux"),
@@ -130,10 +124,7 @@ fn regex_node_metrics_carry_the_engine_label_and_other_nodes_do_not() {
 
     // Lookbehind keeps the pattern off the linear engine.
     let h = start(&extract_yaml(r"(?<=id=)(?<Id>\d+)"), 1);
-    assert_eq!(
-        h.source.push(record(2, "id=42")).wait(WAIT),
-        Some(AckOutcome::Ack)
-    );
+    assert_eq!(h.push(record(2, "id=42")).wait(WAIT), Some(AckOutcome::Ack));
     let backtracking = [
         ("tenant", "acme"),
         ("stage", "parse_linux"),
@@ -180,10 +171,7 @@ fn on_redos_risk_reject_refuses_a_pattern_the_canary_trips() {
 fn on_redos_risk_warn_loads_the_pattern_and_serves_records() {
     let yaml = extract_yaml_with(r"(?<x>(?:a|b)*)(?=c)", "    on_redos_risk: warn");
     let h = start(&yaml, 1);
-    assert_eq!(
-        h.source.push(record(1, "abc")).wait(WAIT),
-        Some(AckOutcome::Ack)
-    );
+    assert_eq!(h.push(record(1, "abc")).wait(WAIT), Some(AckOutcome::Ack));
     assert_eq!(
         attributes(&h, "out", 1),
         json!({"x": "ab"}).as_object().cloned().expect("object")
@@ -197,8 +185,8 @@ fn a_record_over_input_bytes_is_dropped_with_reason_regex_limit() {
         let yaml = extract_yaml_with(LINUX_PATTERN, "    limits: { input_bytes: 16 }");
         let h = start(&yaml, workers);
 
-        let big = h.source.push(record(1, &"x".repeat(17)));
-        let fits = h.source.push(record(2, &"x".repeat(16)));
+        let big = h.push(record(1, &"x".repeat(17)));
+        let fits = h.push(record(2, &"x".repeat(16)));
         assert_eq!(big.wait(WAIT), Some(AckOutcome::Ack), "a drop acks");
         assert_eq!(fits.wait(WAIT), Some(AckOutcome::Ack));
 
@@ -232,13 +220,10 @@ fn a_tripped_match_limit_drops_the_record_and_the_stage_keeps_serving() {
     adversarial.push('!');
 
     assert_eq!(
-        h.source.push(record(1, &adversarial)).wait(WAIT),
+        h.push(record(1, &adversarial)).wait(WAIT),
         Some(AckOutcome::Ack)
     );
-    assert_eq!(
-        h.source.push(record(2, "aaaa")).wait(WAIT),
-        Some(AckOutcome::Ack)
-    );
+    assert_eq!(h.push(record(2, "aaaa")).wait(WAIT), Some(AckOutcome::Ack));
 
     assert_eq!(h.ids("out"), vec![2]);
     assert_eq!(
@@ -272,7 +257,6 @@ fn redact_record(id: u64, body: &str, msg: Value, other: &str) -> Record {
             "id": id,
             "body": body,
             "attributes": {"msg": msg, "other": other},
-            "resource": {"tenant.id": "acme"},
         })
         .to_string(),
     )
@@ -283,7 +267,7 @@ fn redact_record(id: u64, body: &str, msg: Value, other: &str) -> Record {
 fn redact_replaces_every_match_in_each_listed_field_and_nothing_else() {
     for_each_worker_count(|workers| {
         let h = start(REDACT, workers);
-        let probe = h.source.push(redact_record(
+        let probe = h.push(redact_record(
             1,
             "call 555-1234 or 555-9876",
             json!("cell 555-0000"),
@@ -308,9 +292,7 @@ fn redact_replaces_every_match_in_each_listed_field_and_nothing_else() {
 #[test]
 fn redact_counts_a_record_where_no_listed_field_matched_once_and_skips_non_strings() {
     let h = start(REDACT, 1);
-    let probe = h
-        .source
-        .push(redact_record(1, "no phone", json!(42), "555-1111 stays"));
+    let probe = h.push(redact_record(1, "no phone", json!(42), "555-1111 stays"));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
 
     let out = &h.sinks.records("out")[0];
@@ -332,9 +314,7 @@ fn redact_over_input_bytes_drops_with_reason_regex_limit_and_nothing_reaches_the
         "    limits: { input_bytes: 8 }\n    replace:",
     );
     let h = start(&yaml, 1);
-    let probe = h
-        .source
-        .push(redact_record(1, "555-1234 too long", json!("x"), "y"));
+    let probe = h.push(redact_record(1, "555-1234 too long", json!("x"), "y"));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
 
     assert!(h.ids("out").is_empty());

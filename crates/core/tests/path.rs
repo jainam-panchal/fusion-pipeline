@@ -11,8 +11,8 @@ fn map_paths_join_the_rest_into_one_key() {
     let path = FieldPath::parse("attributes.http.status").expect("parses");
     assert_eq!(path.map_key(), Some("http.status"));
 
-    let path = FieldPath::parse("resource.tenant.id").expect("parses");
-    assert_eq!(path.map_key(), Some("tenant.id"));
+    let path = FieldPath::parse("resource.service.name").expect("parses");
+    assert_eq!(path.map_key(), Some("service.name"));
 
     let path = FieldPath::parse("resource.env").expect("parses");
     assert_eq!(path.map_key(), Some("env"));
@@ -82,7 +82,7 @@ fn record() -> Record {
             "severity_number": 17,
             "body": "disk full on /var",
             "attributes": {"http.path": "/api/v1", "http.status": 503},
-            "resource": {"tenant.id": "acme", "env": "prod"}
+            "resource": {"tenant.id": "acme", "service.name": "api", "env": "prod"}
         }"#,
     )
     .expect("record parses")
@@ -143,7 +143,7 @@ fn read(path: &str) -> Option<Value> {
 fn read_resolves_map_keys_and_top_level_fields() {
     assert_eq!(read("attributes.http.status"), Some(json!(503)));
     assert_eq!(read("attributes.http.path"), Some(json!("/api/v1")));
-    assert_eq!(read("resource.tenant.id"), Some(json!("acme")));
+    assert_eq!(read("resource.service.name"), Some(json!("api")));
     assert_eq!(read("resource.env"), Some(json!("prod")));
     assert_eq!(read("attributes.nope"), None);
     assert_eq!(read("scope.nope"), None);
@@ -340,7 +340,13 @@ fn accepts_answers_exactly_what_write_would_without_a_record() {
 
 #[test]
 fn writable_is_every_record_field_and_no_meta_path() {
-    for path in ["id", "kind", "body", "attributes.x", "resource.tenant.id"] {
+    for path in [
+        "id",
+        "kind",
+        "body",
+        "attributes.x",
+        "resource.service.name",
+    ] {
         FieldPath::parse(path)
             .expect("parses")
             .writable()
@@ -642,15 +648,10 @@ fn a_meta_path_is_one_field_and_displays_as_written() {
         "meta.delivery_count",
     ] {
         let path = FieldPath::parse(text).expect("parses");
-        assert!(path.is_meta(), "{text}");
+        assert!(path.writable().is_err(), "{text}");
         assert_eq!(path.map_key(), None, "{text}");
         assert_eq!(path.to_string(), text);
     }
-    assert!(
-        !FieldPath::parse("resource.tenant.id")
-            .expect("parses")
-            .is_meta()
-    );
 }
 
 #[test]

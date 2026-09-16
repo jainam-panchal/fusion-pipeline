@@ -19,18 +19,16 @@ nodes:
     type: sink.memory
 "#;
 
-fn record(id: u64, observed_nanos_ago: u64) -> Record {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock is after the epoch")
-        .as_nanos() as u64;
+fn record(id: u64) -> Record {
     Record::from_json(&format!(
-        r#"{{"id": {id}, "severity_text": "ERROR", "body": "disk full",
-             "observed_time_unix_nano": {},
-             "resource": {{"tenant.id": "acme"}}}}"#,
-        now - observed_nanos_ago
+        r#"{{"id": {id}, "severity_text": "ERROR", "body": "disk full"}}"#
     ))
     .expect("record parses")
+}
+
+/// The transport time of a message published `nanos_ago` before now.
+fn published_ago(nanos_ago: u64) -> u64 {
+    fusion_core::meta::unix_nanos_now() - nanos_ago
 }
 
 #[test]
@@ -39,7 +37,7 @@ fn every_stage_run_leaves_one_non_negative_duration_sample() {
 
     for id in 1..=3 {
         assert_eq!(
-            h.source.push(record(id, 0)).wait(WAIT),
+            h.push_at(record(id), published_ago(0)).wait(WAIT),
             Some(AckOutcome::Ack)
         );
     }
@@ -58,7 +56,7 @@ fn every_sink_write_leaves_one_publish_duration_sample() {
     let h = start(KEEP_ERRORS, 1);
 
     assert_eq!(
-        h.source.push(record(1, 0)).wait(WAIT),
+        h.push_at(record(1), published_ago(0)).wait(WAIT),
         Some(AckOutcome::Ack)
     );
 
@@ -74,12 +72,13 @@ fn every_sink_write_leaves_one_publish_duration_sample() {
 }
 
 #[test]
-fn a_settled_record_leaves_one_end_to_end_sample_measured_from_its_observed_time() {
+fn a_settled_record_leaves_one_end_to_end_sample_measured_from_its_ingestion_time() {
     let h = start(KEEP_ERRORS, 1);
 
-    // Observed a full second before it entered the pipeline.
+    // Published a full second before the pipeline took it.
     assert_eq!(
-        h.source.push(record(1, 1_000_000_000)).wait(WAIT),
+        h.push_at(record(1), published_ago(1_000_000_000))
+            .wait(WAIT),
         Some(AckOutcome::Ack)
     );
 
@@ -90,14 +89,14 @@ fn a_settled_record_leaves_one_end_to_end_sample_measured_from_its_observed_time
 }
 
 #[test]
-fn a_record_without_an_observed_time_leaves_no_end_to_end_sample() {
+fn a_record_whose_source_gives_no_time_leaves_no_end_to_end_sample() {
     let h = start(KEEP_ERRORS, 1);
 
-    let bare = Record::from_json(
-        r#"{"id": 1, "severity_text": "ERROR", "body": "x", "resource": {"tenant.id": "acme"}}"#,
-    )
-    .expect("record parses");
-    assert_eq!(h.source.push(bare).wait(WAIT), Some(AckOutcome::Ack));
+    // The record says when it was observed; only a transport's time counts, and there is
+    // none, so the ingestion time is the worker clock's and end to end is not measured.
+    let mut observed = record(1);
+    observed.observed_time_unix_nano = Some(published_ago(1_000_000_000));
+    assert_eq!(h.push(observed).wait(WAIT), Some(AckOutcome::Ack));
 
     assert!(
         h.samples(HistogramMetric::EndToEnd, &[("tenant", "acme")])
@@ -112,7 +111,8 @@ fn a_nakked_record_leaves_no_end_to_end_sample() {
     h.sinks.fail_writes_to("out");
 
     assert_eq!(
-        h.source.push(record(1, 1_000_000_000)).wait(WAIT),
+        h.push_at(record(1), published_ago(1_000_000_000))
+            .wait(WAIT),
         Some(AckOutcome::Nak(None))
     );
 

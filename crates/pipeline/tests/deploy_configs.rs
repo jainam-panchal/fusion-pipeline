@@ -10,7 +10,7 @@ mod common;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use common::{WAIT, acme_host_record, for_each_worker_count, start_with};
+use common::{WAIT, for_each_worker_count, host_record, start_with};
 use fusion_core::config::Config;
 use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::metrics::CounterMetric;
@@ -57,10 +57,7 @@ fn archived_host() -> &'static str {
             registry(&sinks),
         );
         let probes: Vec<_> = (1..=FIXTURE_HOSTS)
-            .map(|id| {
-                h.source
-                    .push(record_from_host(id, "INFO", "Linux", &format!("web-{id}")))
-            })
+            .map(|id| h.push(record_from_host(id, "INFO", "Linux", &format!("web-{id}"))))
             .collect();
         for probe in &probes {
             assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
@@ -89,9 +86,9 @@ fn record(id: u64, severity: &str, format: &str) -> Record {
     record_from_host(id, severity, format, archived_host())
 }
 
-/// [`acme_host_record`] with the severity and log format the routing example switches on.
+/// [`host_record`] with the severity and log format the routing example switches on.
 fn record_from_host(id: u64, severity: &str, format: &str, host: &str) -> Record {
-    let mut record = acme_host_record(id, Some(host));
+    let mut record = host_record(id, Some(host));
     record.body = Some(serde_json::Value::String("line".to_owned()));
     record.severity_text = Some(severity.to_owned());
     record.resource.insert(
@@ -132,8 +129,8 @@ fn the_compose_pipeline_delivers_every_record_and_keeps_only_parsed_lines_on_the
             sinks.clone(),
             registry(&sinks),
         );
-        let parsed = h.source.push(common::acme_record(1, SYSLOG_LINE));
-        let plain = h.source.push(common::acme_record(2, "disk full"));
+        let parsed = h.push(common::body_record(1, SYSLOG_LINE));
+        let plain = h.push(common::body_record(2, "disk full"));
         assert_eq!(
             parsed.wait(WAIT),
             Some(AckOutcome::Ack),
@@ -209,10 +206,10 @@ fn the_routing_example_drops_debug_and_fans_each_format_to_its_sinks() {
         );
 
         let probes = [
-            h.source.push(record(1, "ERROR", "Linux")),
-            h.source.push(record(2, "WARN", "Apache")),
-            h.source.push(record(3, "INFO", "Mac")),
-            h.source.push(record(4, "DEBUG", "Linux")),
+            h.push(record(1, "ERROR", "Linux")),
+            h.push(record(2, "WARN", "Apache")),
+            h.push(record(3, "INFO", "Mac")),
+            h.push(record(4, "DEBUG", "Linux")),
         ];
 
         for probe in &probes {
@@ -236,8 +233,8 @@ fn a_failing_branch_of_the_routing_example_naks_the_record_once() {
         registry(&sinks),
     );
 
-    let linux = h.source.push(record(1, "ERROR", "Linux"));
-    let apache = h.source.push(record(2, "WARN", "Apache"));
+    let linux = h.push(record(1, "ERROR", "Linux"));
+    let apache = h.push(record(2, "WARN", "Apache"));
 
     assert!(matches!(linux.wait(WAIT), Some(AckOutcome::Nak(_))));
     assert_eq!(apache.wait(WAIT), Some(AckOutcome::Ack));
@@ -262,7 +259,7 @@ fn the_routing_example_archives_every_record_of_half_the_linux_hosts() {
         .flat_map(|host| (0..3).map(move |copy| (host, copy)))
         .map(|(host, copy)| {
             let host_name = format!("web-{host}");
-            h.source.push(record_from_host(
+            h.push(record_from_host(
                 host * 10 + copy,
                 "INFO",
                 "Linux",

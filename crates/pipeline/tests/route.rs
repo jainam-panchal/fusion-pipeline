@@ -62,7 +62,7 @@ fn start(yaml: &str, workers: usize) -> Harness {
 
 fn record(id: u64, format: &str) -> Record {
     Record::from_json(&format!(
-        r#"{{"id": {id}, "body": "line", "resource": {{"log.format": "{format}", "tenant.id": "acme"}}}}"#
+        r#"{{"id": {id}, "body": "line", "resource": {{"log.format": "{format}"}}}}"#
     ))
     .expect("record parses")
 }
@@ -73,9 +73,9 @@ fn each_record_lands_on_exactly_the_branch_its_condition_selects() {
         let h = start(BY_FORMAT, workers);
 
         let probes = [
-            h.source.push(record(1, "Linux")),
-            h.source.push(record(2, "Apache")),
-            h.source.push(record(3, "Mac")),
+            h.push(record(1, "Linux")),
+            h.push(record(2, "Apache")),
+            h.push(record(3, "Mac")),
         ];
 
         for probe in &probes {
@@ -95,8 +95,8 @@ fn default_drop_drops_unmatched_records_and_still_acks() {
         .replace("from: by_format.other", "from: by_format.linux");
     let h = start(&yaml, 1);
 
-    let dropped = h.source.push(record(3, "Mac"));
-    let kept = h.source.push(record(1, "Linux"));
+    let dropped = h.push(record(3, "Mac"));
+    let kept = h.push(record(1, "Linux"));
 
     assert_eq!(dropped.wait(WAIT), Some(AckOutcome::Ack));
     assert_eq!(kept.wait(WAIT), Some(AckOutcome::Ack));
@@ -135,7 +135,7 @@ nodes:
     from: by_format.linux
 "#;
     let h = start(yaml, 1);
-    let probe = h.source.push(record(1, "Linux"));
+    let probe = h.push(record(1, "Linux"));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     assert_eq!(h.ids("any_out"), [1]);
     assert!(h.ids("linux_out").is_empty());
@@ -162,7 +162,7 @@ fn fan_out_reaches_both_sinks_and_acks_once_after_both() {
     for_each_worker_count(|workers| {
         let h = start(FAN_OUT, workers);
 
-        let probe = h.source.push(record(1, "Linux"));
+        let probe = h.push(record(1, "Linux"));
 
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
         // The ack is observed only after the walk finished, so both sinks already hold it.
@@ -178,7 +178,7 @@ fn one_sink_failing_on_a_fan_out_record_naks_the_message_once() {
         let h = start(FAN_OUT, workers);
         h.sinks.fail_writes_to("search");
 
-        let probe = h.source.push(record(1, "Linux"));
+        let probe = h.push(record(1, "Linux"));
 
         assert!(
             matches!(probe.wait(WAIT), Some(AckOutcome::Nak(_))),
@@ -216,9 +216,9 @@ nodes:
         let h = start(yaml, workers);
 
         let probes = [
-            h.source.push(record(1, "Linux")),
-            h.source.push(record(2, "Apache")),
-            h.source.push(record(3, "Mac")),
+            h.push(record(1, "Linux")),
+            h.push(record(2, "Apache")),
+            h.push(record(3, "Mac")),
         ];
 
         for probe in &probes {
@@ -251,9 +251,9 @@ nodes:
         let h = start(yaml, workers);
 
         let probes = [
-            h.source.push(record(1, "Linux")),
-            h.source.push(record(2, "Apache")),
-            h.source.push(record(3, "Mac")),
+            h.push(record(1, "Linux")),
+            h.push(record(2, "Apache")),
+            h.push(record(3, "Mac")),
         ];
 
         for probe in &probes {
@@ -287,7 +287,7 @@ nodes:
 "#;
     let h = start(yaml, 1);
 
-    let probe = h.source.push(record(1, "Linux"));
+    let probe = h.push(record(1, "Linux"));
 
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     let touched = h.sinks.records("touched_out");

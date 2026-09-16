@@ -22,7 +22,7 @@ nodes:
 
 fn error_record(id: u64) -> Record {
     Record::from_json(&format!(
-        r#"{{"id": {id}, "severity_text": "ERROR", "body": "disk full", "resource": {{"tenant.id": "acme"}}}}"#
+        r#"{{"id": {id}, "severity_text": "ERROR", "body": "disk full"}}"#
     ))
     .expect("record parses")
 }
@@ -39,7 +39,7 @@ fn record_passing_filter_reaches_sink_and_is_acked() {
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
 
-        let probe = h.source.push(error_record(1));
+        let probe = h.push(error_record(1));
 
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
         let delivered = h.sinks.records("out");
@@ -57,7 +57,7 @@ fn record_dropped_by_filter_does_not_reach_sink_and_is_still_acked() {
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
 
-        let probe = h.source.push(info_record(2));
+        let probe = h.push(info_record(2));
 
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
         assert!(h.sinks.records("out").is_empty(), "workers={workers}");
@@ -70,8 +70,8 @@ fn drop_action_inverts_the_filter() {
     let yaml = KEEP_ERRORS.replace("action: keep", "action: drop");
     let h = start(&yaml, 1);
 
-    let kept = h.source.push(info_record(3));
-    let dropped = h.source.push(error_record(4));
+    let kept = h.push(info_record(3));
+    let dropped = h.push(error_record(4));
 
     assert_eq!(kept.wait(WAIT), Some(AckOutcome::Ack));
     assert_eq!(dropped.wait(WAIT), Some(AckOutcome::Ack));
@@ -88,7 +88,7 @@ fn record_without_id_reaches_no_sink_and_is_nakked() {
         let record = Record::from_json(r#"{"severity_text": "ERROR", "body": "no id"}"#)
             .expect("record parses");
 
-        let probe = h.source.push(record);
+        let probe = h.push(record);
 
         assert!(
             matches!(probe.wait(WAIT), Some(AckOutcome::Nak(_))),
@@ -111,7 +111,7 @@ fn many_records_are_all_settled_across_workers() {
                 } else {
                     info_record(i)
                 };
-                h.source.push(record)
+                h.push(record)
             })
             .collect();
 
@@ -168,8 +168,8 @@ fn metric_and_span_records_are_rejected_and_acked_without_reaching_a_sink() {
         let span = Record::from_json(r#"{"id": 10, "kind": "span", "severity_text": "ERROR"}"#)
             .expect("record parses");
 
-        let metric_probe = h.source.push(metric);
-        let span_probe = h.source.push(span);
+        let metric_probe = h.push(metric);
+        let span_probe = h.push(span);
 
         assert_eq!(
             metric_probe.wait(WAIT),

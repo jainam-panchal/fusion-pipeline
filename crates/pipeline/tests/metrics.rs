@@ -51,10 +51,7 @@ fn a_record_that_reaches_a_sink_is_counted_in_and_out_of_every_node_it_touched()
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
 
-        assert_eq!(
-            h.source.push(record(1, "ERROR")).wait(WAIT),
-            Some(AckOutcome::Ack)
-        );
+        assert_eq!(h.push(record(1, "ERROR")).wait(WAIT), Some(AckOutcome::Ack));
 
         for stage in ["keep_errors", "out"] {
             let labels = [("tenant", "acme"), ("stage", stage)];
@@ -90,10 +87,7 @@ fn a_filtered_record_is_counted_in_but_dropped_with_reason_filter_and_never_leav
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
 
-        assert_eq!(
-            h.source.push(record(1, "INFO")).wait(WAIT),
-            Some(AckOutcome::Ack)
-        );
+        assert_eq!(h.push(record(1, "INFO")).wait(WAIT), Some(AckOutcome::Ack));
 
         let stage = [("tenant", "acme"), ("stage", "keep_errors")];
         assert_eq!(
@@ -136,7 +130,7 @@ fn a_route_default_of_drop_is_counted_with_reason_route_default_drop() {
 
         let mut mac = record(1, "ERROR");
         mac.resource.insert("log.format".to_owned(), "Mac".into());
-        assert_eq!(h.source.push(mac).wait(WAIT), Some(AckOutcome::Ack));
+        assert_eq!(h.push(mac).wait(WAIT), Some(AckOutcome::Ack));
 
         assert_eq!(
             h.counter(
@@ -155,7 +149,7 @@ fn a_route_default_of_drop_is_counted_with_reason_route_default_drop() {
 }
 
 #[test]
-fn a_record_without_a_tenant_is_counted_under_tenant_unknown() {
+fn a_record_whose_source_names_no_tenant_is_counted_under_tenant_unknown() {
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
 
@@ -183,7 +177,7 @@ fn a_record_without_an_id_is_dropped_at_the_source_with_reason_missing_id_and_na
 
         let mut no_id = record(1, "ERROR");
         no_id.id = None;
-        assert_eq!(h.source.push(no_id).wait(WAIT), Some(AckOutcome::Nak(None)));
+        assert_eq!(h.push(no_id).wait(WAIT), Some(AckOutcome::Nak(None)));
 
         assert_eq!(
             h.counter(
@@ -213,7 +207,7 @@ fn a_non_log_record_is_dropped_at_the_source_with_reason_invalid_record_and_acks
 
         let mut metric = record(1, "ERROR");
         metric.kind = fusion_core::record::Kind::Metric;
-        assert_eq!(h.source.push(metric).wait(WAIT), Some(AckOutcome::Ack));
+        assert_eq!(h.push(metric).wait(WAIT), Some(AckOutcome::Ack));
 
         assert_eq!(
             h.counter(
@@ -243,7 +237,7 @@ fn a_sink_that_cannot_confirm_durable_acceptance_counts_an_error_a_publish_error
         h.sinks.fail_writes_to("out");
 
         assert_eq!(
-            h.source.push(record(1, "ERROR")).wait(WAIT),
+            h.push(record(1, "ERROR")).wait(WAIT),
             Some(AckOutcome::Nak(None))
         );
 
@@ -295,10 +289,7 @@ nodes:
     for_each_worker_count(|workers| {
         let h = start(FAN_OUT, workers);
 
-        assert_eq!(
-            h.source.push(record(1, "ERROR")).wait(WAIT),
-            Some(AckOutcome::Ack)
-        );
+        assert_eq!(h.push(record(1, "ERROR")).wait(WAIT), Some(AckOutcome::Ack));
 
         assert_eq!(
             h.counter(
@@ -330,11 +321,7 @@ fn source_counts_every_record_in_and_only_those_entering_the_graph_out() {
         no_id.id = None;
         let mut metric = record(2, "ERROR");
         metric.kind = fusion_core::record::Kind::Metric;
-        let probes = [
-            h.source.push(record(3, "ERROR")),
-            h.source.push(no_id),
-            h.source.push(metric),
-        ];
+        let probes = [h.push(record(3, "ERROR")), h.push(no_id), h.push(metric)];
         for probe in &probes {
             assert!(probe.wait(WAIT).is_some(), "workers={workers}");
         }
@@ -394,7 +381,7 @@ nodes:
     let h = common::start_with(PANICS, 1, sinks, registry);
 
     assert_eq!(
-        h.source.push(record(1, "ERROR")).wait(WAIT),
+        h.push(record(1, "ERROR")).wait(WAIT),
         Some(AckOutcome::Nak(None))
     );
 

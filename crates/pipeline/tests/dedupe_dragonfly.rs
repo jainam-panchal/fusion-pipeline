@@ -6,9 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{
-    DEDUPE_DROP, WAIT, acme_record as record, acme_record_observed_at, registry, start_with_state,
-};
+use common::{DEDUPE_DROP, WAIT, body_record as record, registry, start_with_state};
 use fusion_core::engine::{Engine, EngineError};
 use fusion_core::memory::{AckOutcome, MemorySinks, MemorySource};
 use fusion_core::metrics::{CounterMetric, Metrics};
@@ -40,21 +38,21 @@ fn on_dragonfly_a_repeat_drops_a_redelivery_passes_and_workers_share_the_window(
     );
 
     assert_eq!(
-        h.source.push(record(101, "disk full")).wait(WAIT),
+        h.push(record(101, "disk full")).wait(WAIT),
         Some(AckOutcome::Ack)
     );
     assert_eq!(
-        h.source.push(record(102, "disk full")).wait(WAIT),
+        h.push(record(102, "disk full")).wait(WAIT),
         Some(AckOutcome::Ack),
         "a different record with the same key"
     );
     assert_eq!(
-        h.source.push(record(101, "disk full")).wait(WAIT),
+        h.push(record(101, "disk full")).wait(WAIT),
         Some(AckOutcome::Ack),
         "the first record again"
     );
     assert_eq!(
-        h.source.push(record(103, "other")).wait(WAIT),
+        h.push(record(103, "other")).wait(WAIT),
         Some(AckOutcome::Ack)
     );
 
@@ -95,12 +93,12 @@ fn on_dragonfly_a_repeat_after_the_window_passes_again() {
     let state = Arc::new(Dragonfly::from_env().expect("url parses"));
     let short = yaml(&unique_name()).replace("window: 10s", "window: 300ms");
     let h = start_with_state(&short, 1, sinks.clone(), registry(&sinks), state);
-    let at = |id: u64, ms: u64| acme_record_observed_at(id, "x", ms * 1_000_000);
+    let at = |id: u64, ms: u64| h.push_at(record(id, "x"), ms * 1_000_000);
 
-    assert_eq!(h.source.push(at(1, 0)).wait(WAIT), Some(AckOutcome::Ack));
-    assert_eq!(h.source.push(at(2, 100)).wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(at(1, 0).wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(at(2, 100).wait(WAIT), Some(AckOutcome::Ack));
     std::thread::sleep(std::time::Duration::from_millis(500));
-    assert_eq!(h.source.push(at(3, 600)).wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(at(3, 600).wait(WAIT), Some(AckOutcome::Ack));
 
     assert_eq!(h.ids("out"), vec![1, 3]);
     h.finish();

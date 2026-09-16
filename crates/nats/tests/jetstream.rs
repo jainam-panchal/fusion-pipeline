@@ -793,3 +793,54 @@ fn the_subject_beats_a_spoofed_tenant_header_and_a_bad_header_is_counted_not_nak
     nats.shutdown();
     engine.join().expect("clean shutdown");
 }
+
+/// A message whose subject names no tenant and which has no `Fusion-Tenant` header is
+/// `unknown`, whatever `resource.tenant.id` its payload carries: the pipeline never reads its
+/// tenant from the record.
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn a_payload_tenant_is_never_read_when_the_transport_names_none() {
+    let fixture = Fixture::new("notenant");
+    let recorder = InMemoryRecorder::new();
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
+    let sinks = MemorySinks::new();
+    let mut registry = Registry::new();
+    registry.register_sink("sink.memory", sinks.clone());
+    let engine = Engine::start(
+        Pipeline::from_yaml("nodes:\n  - id: out\n    type: sink.memory\n", &registry)
+            .expect("pipeline loads"),
+        Box::new(nats.source(&fixture.source_params()).expect("source")),
+        1,
+        Metrics::new(recorder.clone()),
+        no_state(),
+    )
+    .expect("engine starts");
+
+    // `{prefix}.acme` has no token after the tenant, so it names none.
+    let payload = r#"{"id": 42, "body": "who", "resource": {"tenant.id": "acme"}}"#;
+    fixture
+        .client
+        .publish(&format!("{}.acme", fixture.tenant_prefix), payload);
+
+    assert!(
+        wait_until(SETTLE_TIMEOUT, || sinks.written("out").len() == 1),
+        "the record is walked"
+    );
+    let written = &sinks.written("out")[0];
+    assert_eq!(&*written.meta.tenant, "unknown");
+    assert_eq!(
+        written.record,
+        Record::from_json(payload).expect("record parses"),
+        "the payload keeps its own tenant, untouched"
+    );
+    assert_eq!(
+        recorder.counter(
+            CounterMetric::RecordsIn,
+            &[("tenant", "acme"), ("stage", "out")]
+        ),
+        0
+    );
+
+    nats.shutdown();
+    engine.join().expect("clean shutdown");
+}

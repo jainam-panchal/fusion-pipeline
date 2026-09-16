@@ -37,21 +37,9 @@ macro_rules! metrics {
             }
         }
 
-        impl Metric {
-            /// Counter or histogram.
-            #[must_use]
-            pub const fn kind(self) -> MetricKind {
-                match self {
-                    $(Self::$variant => metrics!(@kind $kind),)+
-                }
-            }
-        }
-
         metrics!(@counters [] $($kind $variant = $wire,)+);
         metrics!(@histograms [] $($kind $variant = $wire,)+);
     };
-    (@kind counter) => { MetricKind::Counter };
-    (@kind histogram) => { MetricKind::Histogram };
     (@counters [$($v:ident = $w:literal,)*]) => {
         closed_set! {
             /// The metrics that are counters, recorded with [`Recorder::count`]. An exporter
@@ -148,15 +136,6 @@ metrics! {
     counter SinkPublishErrors = "sink_publish_errors_total",
     /// `pipeline_end_to_end_seconds{tenant}`: ingestion time to settlement.
     histogram EndToEnd = "pipeline_end_to_end_seconds",
-}
-
-/// Which instrument a metric is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetricKind {
-    /// A monotonic count.
-    Counter,
-    /// A distribution of durations, in seconds.
-    Histogram,
 }
 
 closed_set! {
@@ -325,7 +304,36 @@ impl<'a> Labels<'a> {
 }
 
 /// Where measurements go. Implemented by exporters; shared across worker threads. Each call
-/// takes only metrics of its instrument.
+/// takes only metrics of its instrument:
+///
+/// ```
+/// use fusion_core::metrics::{CounterMetric, HistogramMetric, InMemoryRecorder, Labels, Recorder};
+///
+/// let recorder = InMemoryRecorder::new();
+/// let labels = Labels::new("acme", "keep_errors");
+/// recorder.count(CounterMetric::RecordsIn, &labels, 1);
+/// recorder.observe(HistogramMetric::StageDuration, &labels, 0.5);
+/// ```
+///
+/// so a histogram cannot be counted:
+///
+/// ```compile_fail
+/// use fusion_core::metrics::{HistogramMetric, InMemoryRecorder, Labels, Recorder};
+///
+/// let recorder = InMemoryRecorder::new();
+/// let labels = Labels::new("acme", "keep_errors");
+/// recorder.count(HistogramMetric::StageDuration, &labels, 1);
+/// ```
+///
+/// and a counter cannot be observed:
+///
+/// ```compile_fail
+/// use fusion_core::metrics::{CounterMetric, InMemoryRecorder, Labels, Recorder};
+///
+/// let recorder = InMemoryRecorder::new();
+/// let labels = Labels::new("acme", "keep_errors");
+/// recorder.observe(CounterMetric::RecordsIn, &labels, 0.5);
+/// ```
 pub trait Recorder: Send + Sync {
     /// Add `by` to a counter.
     fn count(&self, metric: CounterMetric, labels: &Labels<'_>, by: u64);

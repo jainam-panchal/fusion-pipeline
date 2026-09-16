@@ -97,7 +97,7 @@ fn meta_of(record: &Record, key: &str) -> Value {
 }
 
 #[test]
-fn the_transports_tenant_and_time_come_before_the_records() {
+fn the_tenant_and_the_time_are_the_transports_and_the_records_are_never_read() {
     let (out, h) = reveal(
         REVEAL,
         record(&json!({
@@ -216,20 +216,6 @@ fn a_clock_time_an_upstream_pipeline_passed_on_stays_a_clock_time() {
 }
 
 #[test]
-fn a_tenant_field_that_is_not_a_string_is_no_tenant_and_the_transports_stands() {
-    let (out, h) = reveal(
-        REVEAL,
-        record(&json!({"id": 7, "resource": {"tenant.id": 42}})),
-        Arrival {
-            tenant: Some("acme".to_owned()),
-            ..Arrival::default()
-        },
-    );
-    assert_eq!(meta_of(&out[0], "tenant"), json!("acme"));
-    h.finish();
-}
-
-#[test]
 fn a_redelivery_is_counted_under_the_tenant_every_other_metric_of_the_record_carries() {
     let (_, h) = reveal(
         REVEAL,
@@ -262,19 +248,33 @@ fn a_first_delivery_is_not_a_redelivery() {
 }
 
 #[test]
-fn a_source_that_says_nothing_leaves_the_engine_to_read_the_record_at_intake() {
+fn a_source_that_names_nothing_gives_unknown_and_the_clock_whatever_the_record_carries() {
+    let before = unix_nanos_now();
     let (out, h) = reveal(
         REVEAL,
         record(&json!({
             "id": 7,
             "time_unix_nano": 4_000_000_000_u64,
+            "observed_time_unix_nano": 5_000_000_000_u64,
             "resource": {"tenant.id": "acme"}
         })),
         Arrival::default(),
     );
-    assert_eq!(meta_of(&out[0], "tenant"), json!("acme"));
-    assert_eq!(meta_of(&out[0], "ingestion_time"), json!(4_000_000_000_u64));
+    let after = unix_nanos_now();
+    assert_eq!(meta_of(&out[0], "tenant"), json!("unknown"));
+    let ingested = meta_of(&out[0], "ingestion_time")
+        .as_u64()
+        .expect("a number");
+    assert!(
+        (before..=after).contains(&ingested),
+        "the worker clock, not the record's 4 or 5 s: {ingested}"
+    );
     assert_eq!(meta_of(&out[0], "delivery_count"), json!(1));
+    assert!(
+        h.samples(HistogramMetric::EndToEnd, &[("tenant", "unknown")])
+            .is_empty(),
+        "a clock time is not measured end to end"
+    );
     h.finish();
 }
 
@@ -298,15 +298,11 @@ fn a_record_with_no_tenant_and_no_time_gets_unknown_and_the_worker_clock() {
 fn every_record_a_split_emits_continues_under_its_parents_meta() {
     let (out, h) = reveal(
         SPLIT_THEN_REVEAL,
-        record(&json!({
-            "id": 7,
-            "body": "first",
-            "observed_time_unix_nano": 5_000_000_000_u64,
-            "resource": {"tenant.id": "acme"}
-        })),
+        record(&json!({"id": 7, "body": "first"})),
         Arrival {
+            tenant: Some("acme".to_owned()),
+            ingestion_time: Some(IngestionTime::Reported(5_000_000_000)),
             delivery_count: 2,
-            ..Arrival::default()
         },
     );
     assert_eq!(out.len(), 2);
@@ -534,28 +530,21 @@ nodes:
 }
 
 #[test]
-fn a_tenant_that_is_empty_or_holds_a_control_character_is_no_tenant() {
+fn a_transport_tenant_that_is_empty_or_holds_a_control_character_is_unknown() {
     for bad in ["", "a\nb", "a\tb"] {
         let (out, h) = reveal(
             REVEAL,
-            record(&json!({"id": 7, "resource": {"tenant.id": bad}})),
-            Arrival::default(),
+            record(&json!({"id": 7, "resource": {"tenant.id": "acme"}})),
+            Arrival {
+                tenant: Some(bad.to_owned()),
+                ..Arrival::default()
+            },
         );
-        assert_eq!(meta_of(&out[0], "tenant"), json!("unknown"), "{bad:?}");
+        assert_eq!(
+            meta_of(&out[0], "tenant"),
+            json!("unknown"),
+            "{bad:?}, and the record's tenant is never a fallback"
+        );
         h.finish();
     }
-    let (out, h) = reveal(
-        REVEAL,
-        record(&json!({"id": 7, "resource": {"tenant.id": "acme"}})),
-        Arrival {
-            tenant: Some("a\nb".to_owned()),
-            ..Arrival::default()
-        },
-    );
-    assert_eq!(
-        meta_of(&out[0], "tenant"),
-        json!("acme"),
-        "an invalid transport tenant is skipped for the record's"
-    );
-    h.finish();
 }

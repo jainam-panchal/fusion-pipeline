@@ -90,7 +90,8 @@ pub struct Record {
     /// Record attributes.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub attributes: Map<String, Value>,
-    /// Resource attributes. The producer's tenant lives at `resource.tenant.id`.
+    /// Resource attributes. Payload: a `tenant.id` key here is the producer's data, and the
+    /// pipeline never reads its own tenant from it.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub resource: Map<String, Value>,
     /// Instrumentation scope attributes.
@@ -121,15 +122,5 @@ impl Record {
     /// Returns the serde error if a value cannot be serialized (it cannot for this shape).
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
-    }
-
-    /// The `resource` key that carries the producer's tenant.
-    pub const TENANT_KEY: &'static str = "tenant.id";
-
-    /// The producer's tenant, `resource.tenant.id` when it is a string. The engine reads it
-    /// at intake only for a record whose arrival names no tenant.
-    #[must_use]
-    pub fn tenant(&self) -> Option<&str> {
-        self.resource.get(Self::TENANT_KEY).and_then(Value::as_str)
     }
 }

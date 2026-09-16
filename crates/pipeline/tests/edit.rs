@@ -50,10 +50,9 @@ fn config(node_lines: &str, ops: &str) -> String {
     )
 }
 
-/// A tenant `acme` record from a JSON object, with `id` and `resource.tenant.id` filled in.
+/// A record from a JSON object, with `id` filled in. The harness pushes it as tenant `acme`.
 fn record(id: u64, mut json: Value) -> Record {
     json["id"] = json!(id);
-    json["resource"]["tenant.id"] = json!("acme");
     Record::from_json(&json.to_string()).expect("record parses")
 }
 
@@ -61,7 +60,7 @@ fn record(id: u64, mut json: Value) -> Record {
 /// received in id order plus the harness for counter assertions.
 fn run(yaml: &str, workers: usize, records: Vec<Record>) -> (Vec<Record>, common::Harness) {
     let h = start(yaml, workers);
-    let probes: Vec<_> = records.into_iter().map(|r| h.source.push(r)).collect();
+    let probes: Vec<_> = records.into_iter().map(|r| h.push(r)).collect();
     for (i, probe) in probes.iter().enumerate() {
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "record {i}");
     }
@@ -87,7 +86,7 @@ fn filter_then_edit_then_sink_acks_every_record_and_the_sink_sees_the_edits() {
         let h = start(EXAMPLE, workers);
         let probes: Vec<_> = (1..=100)
             .map(|id| {
-                h.source.push(record(
+                h.push(record(
                     id,
                     json!({
                         "severity_text": if id % 2 == 0 { "ERROR" } else { "INFO" },
@@ -488,7 +487,7 @@ nodes:
     for_each_worker_count(|workers| {
         let h = start(REKIND, workers);
         for id in [1, 2] {
-            let probe = h.source.push(record(id, json!({"body": "x"})));
+            let probe = h.push(record(id, json!({"body": "x"})));
             assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
         }
         let out = h.sinks.records("out");
