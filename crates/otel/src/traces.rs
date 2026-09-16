@@ -24,7 +24,9 @@ use opentelemetry::trace::{
 use opentelemetry::{InstrumentationScope, KeyValue, Value};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
-use opentelemetry_sdk::trace::{BatchSpanProcessor, SpanData, SpanExporter, SpanProcessor};
+use opentelemetry_sdk::trace::{
+    BatchConfig, BatchConfigBuilder, BatchSpanProcessor, SpanData, SpanExporter, SpanProcessor,
+};
 
 use crate::{SERVICE_NAME, saturating_i64};
 
@@ -36,10 +38,36 @@ pub struct OtlpTraceSink {
 }
 
 impl OtlpTraceSink {
-    /// Export through a batch processor to `exporter`, under `resource`.
+    /// Export through a batch processor to `exporter`, under `resource`, with the queue the
+    /// `OTEL_BSP_*` environment sizes (2048 spans by default).
     #[must_use]
     pub fn with_exporter(exporter: impl SpanExporter + 'static, resource: Resource) -> Self {
-        let mut processor = BatchSpanProcessor::builder(exporter).build();
+        Self::with_config(exporter, resource, BatchConfigBuilder::default().build())
+    }
+
+    /// As [`OtlpTraceSink::with_exporter`], with a queue of `max_queue` spans, which is also
+    /// the most spans one export carries. A full queue drops the span.
+    #[must_use]
+    pub fn with_queue(
+        exporter: impl SpanExporter + 'static,
+        resource: Resource,
+        max_queue: usize,
+    ) -> Self {
+        let config = BatchConfigBuilder::default()
+            .with_max_queue_size(max_queue)
+            .with_max_export_batch_size(max_queue)
+            .build();
+        Self::with_config(exporter, resource, config)
+    }
+
+    fn with_config(
+        exporter: impl SpanExporter + 'static,
+        resource: Resource,
+        config: BatchConfig,
+    ) -> Self {
+        let mut processor = BatchSpanProcessor::builder(exporter)
+            .with_batch_config(config)
+            .build();
         processor.set_resource(&resource);
         Self {
             processor: Arc::new(processor),

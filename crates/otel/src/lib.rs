@@ -228,6 +228,21 @@ fn configured(specific: &str) -> bool {
         .any(|var| std::env::var(var).is_ok_and(|v| !v.trim().is_empty()))
 }
 
+/// The exporter of `signal`, built by `build` when the environment names a collector for it
+/// (its own endpoint variable is `specific`), else `None`.
+fn exporter<T>(
+    signal: &'static str,
+    specific: &str,
+    build: impl FnOnce() -> Result<T, opentelemetry_otlp::ExporterBuildError>,
+) -> Result<Option<T>, OtelError> {
+    if !configured(specific) {
+        return Ok(None);
+    }
+    build()
+        .map(Some)
+        .map_err(|source| OtelError::Exporter { signal, source })
+}
+
 /// The share of passing records to trace, from the value of `OTEL_TRACES_SAMPLER_ARG`:
 /// the default when unset or blank.
 ///
@@ -257,47 +272,27 @@ pub fn sampling(arg: Option<&str>) -> Result<TraceSampling, OtelError> {
 /// unusable.
 pub fn init() -> Result<Telemetry, OtelError> {
     let resource = resource();
-    let meters = if configured(OTEL_EXPORTER_OTLP_METRICS_ENDPOINT) {
-        let exporter = MetricExporter::builder()
-            .with_http()
+    let meters = exporter("metrics", OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, || {
+        MetricExporter::builder().with_http().build()
+    })?
+    .map(|exporter| {
+        SdkMeterProvider::builder()
+            .with_resource(resource.clone())
+            .with_periodic_exporter(exporter)
             .build()
-            .map_err(|source| OtelError::Exporter {
-                signal: "metrics",
-                source,
-            })?;
-        Some(
-            SdkMeterProvider::builder()
-                .with_resource(resource.clone())
-                .with_periodic_exporter(exporter)
-                .build(),
-        )
-    } else {
-        None
-    };
-    let logs = if configured(OTEL_EXPORTER_OTLP_LOGS_ENDPOINT) {
-        let exporter = LogExporter::builder()
-            .with_http()
-            .build()
-            .map_err(|source| OtelError::Exporter {
-                signal: "logs",
-                source,
-            })?;
-        Some(OtlpEventLog::with_exporter(exporter, resource.clone()))
-    } else {
-        None
-    };
-    let traces = if configured(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) {
-        let sampling = sampling(std::env::var(OTEL_TRACES_SAMPLER_ARG).ok().as_deref())?;
-        let exporter = SpanExporter::builder()
-            .with_http()
-            .build()
-            .map_err(|source| OtelError::Exporter {
-                signal: "traces",
-                source,
-            })?;
-        Some((OtlpTraceSink::with_exporter(exporter, resource), sampling))
-    } else {
-        None
+    });
+    let logs = exporter("logs", OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, || {
+        LogExporter::builder().with_http().build()
+    })?
+    .map(|exporter| OtlpEventLog::with_exporter(exporter, resource.clone()));
+    let traces = match exporter("traces", OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, || {
+        SpanExporter::builder().with_http().build()
+    })? {
+        Some(exporter) => Some((
+            OtlpTraceSink::with_exporter(exporter, resource),
+            sampling(std::env::var(OTEL_TRACES_SAMPLER_ARG).ok().as_deref())?,
+        )),
+        None => None,
     };
 
     let metrics = meters.as_ref().map_or_else(Metrics::noop, |provider| {

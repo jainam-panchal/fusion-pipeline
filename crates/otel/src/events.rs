@@ -15,7 +15,9 @@ use opentelemetry::logs::{AnyValue, LogRecord as _, Logger as _, LoggerProvider 
 use opentelemetry::trace::{SpanId, TraceId};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
-use opentelemetry_sdk::logs::{LogExporter, SdkLogger, SdkLoggerProvider};
+use opentelemetry_sdk::logs::{
+    BatchConfig, BatchConfigBuilder, BatchLogProcessor, LogExporter, SdkLogger, SdkLoggerProvider,
+};
 
 use crate::{SERVICE_NAME, saturating_i64};
 
@@ -27,12 +29,39 @@ pub struct OtlpEventLog {
 }
 
 impl OtlpEventLog {
-    /// Log through a batch processor exporting to `exporter`, under `resource`.
+    /// Log through a batch processor exporting to `exporter`, under `resource`, with the
+    /// queue the `OTEL_BLRP_*` environment sizes (2048 records by default).
     #[must_use]
     pub fn with_exporter(exporter: impl LogExporter + 'static, resource: Resource) -> Self {
+        Self::with_config(exporter, resource, BatchConfigBuilder::default().build())
+    }
+
+    /// As [`OtlpEventLog::with_exporter`], with a queue of `max_queue` records, which is also
+    /// the most records one export carries. A full queue drops the record.
+    #[must_use]
+    pub fn with_queue(
+        exporter: impl LogExporter + 'static,
+        resource: Resource,
+        max_queue: usize,
+    ) -> Self {
+        let config = BatchConfigBuilder::default()
+            .with_max_queue_size(max_queue)
+            .with_max_export_batch_size(max_queue)
+            .build();
+        Self::with_config(exporter, resource, config)
+    }
+
+    fn with_config(
+        exporter: impl LogExporter + 'static,
+        resource: Resource,
+        config: BatchConfig,
+    ) -> Self {
+        let processor = BatchLogProcessor::builder(exporter)
+            .with_batch_config(config)
+            .build();
         let provider = SdkLoggerProvider::builder()
             .with_resource(resource)
-            .with_batch_exporter(exporter)
+            .with_log_processor(processor)
             .build();
         let logger = provider.logger(SERVICE_NAME);
         Self { provider, logger }
