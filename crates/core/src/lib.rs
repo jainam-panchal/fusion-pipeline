@@ -1,6 +1,7 @@
 //! Pipeline core: record model, config loader, DAG validation, engine, stage and I/O traits,
 //! and the condition grammar.
 
+mod closed_set;
 pub mod condition;
 pub mod config;
 pub mod dag;

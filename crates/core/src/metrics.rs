@@ -16,49 +16,54 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::closed_set::closed_set;
 use crate::memory::lock_unpoisoned;
 use crate::stage::DropReason;
 
-/// Every metric the pipeline exports. Closed set: adding one is a spec amendment, and
-/// [`Metric::ALL`] lists them all. The spelling is [`Metric::as_str`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Metric {
-    /// `records_in_total{tenant, stage}`: records handed to a node.
-    RecordsIn,
-    /// `records_out_total{tenant, stage}`: records a node passed on, or a sink accepted.
-    RecordsOut,
-    /// `records_dropped_total{tenant, stage, reason}`: intentional drops. The spine metric.
-    RecordsDropped,
-    /// `records_errored_total{tenant, stage}`: stage errors and sink failures.
-    RecordsErrored,
-    /// `stage_duration_seconds{tenant, stage}`: one stage run.
-    StageDuration,
-    /// `state_ops_total{tenant, stage}`: state store operations. Emitted by stateful stages.
-    StateOps,
-    /// `state_op_duration_seconds{tenant, stage}`: one state store operation.
-    StateOpDuration,
-    /// `state_errors_total{tenant, stage}`: state store failures.
-    StateErrors,
-    /// `lua_errors_total{tenant, stage, kind}`: Lua stage errors by kind.
-    LuaErrors,
-    /// `regex_nonmatch_total{tenant, stage, engine}`: records a regex stage's pattern did not
-    /// match, passed on unchanged. Emitted by the regex stages.
-    RegexNonmatch,
-    /// `edit_unapplied_total{tenant, stage, op, field, cause}`: `edit` ops that could not
-    /// apply to a record. Emitted by the edit stage.
-    EditUnapplied,
-    /// `source_naks_total{tenant}`: messages the engine negatively acknowledged.
-    SourceNaks,
-    /// `source_redeliveries_total{tenant}`: messages the source saw more than once.
-    SourceRedeliveries,
-    /// `dlq_total{tenant}`: messages sent to the dead-letter queue.
-    Dlq,
-    /// `sink_publish_duration_seconds{tenant, stage}`: one sink write, until durable acceptance.
-    SinkPublishDuration,
-    /// `sink_publish_errors_total{tenant, stage}`: sink writes without durable acceptance.
-    SinkPublishErrors,
-    /// `pipeline_end_to_end_seconds{tenant}`: ingestion time to settlement.
-    EndToEnd,
+closed_set! {
+    /// Every metric the pipeline exports. Closed set: adding one is a spec amendment, and
+    /// [`Metric::ALL`] lists them all; an exporter creates its instruments from it up front.
+    /// The spelling is [`Metric::as_str`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum Metric {
+        /// `records_in_total{tenant, stage}`: records handed to a node.
+        RecordsIn = "records_in_total",
+        /// `records_out_total{tenant, stage}`: records a node passed on, or a sink accepted.
+        RecordsOut = "records_out_total",
+        /// `records_dropped_total{tenant, stage, reason}`: intentional drops. The spine metric.
+        RecordsDropped = "records_dropped_total",
+        /// `records_errored_total{tenant, stage}`: stage errors and sink failures.
+        RecordsErrored = "records_errored_total",
+        /// `stage_duration_seconds{tenant, stage}`: one stage run.
+        StageDuration = "stage_duration_seconds",
+        /// `state_ops_total{tenant, stage}`: state store operations. Emitted by stateful stages.
+        StateOps = "state_ops_total",
+        /// `state_op_duration_seconds{tenant, stage}`: one state store operation.
+        StateOpDuration = "state_op_duration_seconds",
+        /// `state_errors_total{tenant, stage}`: state store failures.
+        StateErrors = "state_errors_total",
+        /// `lua_errors_total{tenant, stage, kind}`: Lua stage errors by kind.
+        LuaErrors = "lua_errors_total",
+        /// `regex_nonmatch_total{tenant, stage, engine}`: records a regex stage's pattern did not
+        /// match, passed on unchanged. Emitted by the regex stages.
+        RegexNonmatch = "regex_nonmatch_total",
+        /// `edit_unapplied_total{tenant, stage, op, field, cause}`: `edit` ops that could not
+        /// apply to a record. Emitted by the edit stage.
+        EditUnapplied = "edit_unapplied_total",
+        /// `source_naks_total{tenant}`: messages the engine negatively acknowledged.
+        SourceNaks = "source_naks_total",
+        /// `source_redeliveries_total{tenant}`: messages the source saw more than once.
+        SourceRedeliveries = "source_redeliveries_total",
+        /// `dlq_total{tenant}`: messages sent to the dead-letter queue.
+        Dlq = "dlq_total",
+        /// `sink_publish_duration_seconds{tenant, stage}`: one sink write, until durable
+        /// acceptance.
+        SinkPublishDuration = "sink_publish_duration_seconds",
+        /// `sink_publish_errors_total{tenant, stage}`: sink writes without durable acceptance.
+        SinkPublishErrors = "sink_publish_errors_total",
+        /// `pipeline_end_to_end_seconds{tenant}`: ingestion time to settlement.
+        EndToEnd = "pipeline_end_to_end_seconds",
+    }
 }
 
 /// Which instrument a metric is.
@@ -71,51 +76,6 @@ pub enum MetricKind {
 }
 
 impl Metric {
-    /// Every metric, for an exporter that creates its instruments up front.
-    pub const ALL: [Self; 17] = [
-        Self::RecordsIn,
-        Self::RecordsOut,
-        Self::RecordsDropped,
-        Self::RecordsErrored,
-        Self::StageDuration,
-        Self::StateOps,
-        Self::StateOpDuration,
-        Self::StateErrors,
-        Self::LuaErrors,
-        Self::RegexNonmatch,
-        Self::EditUnapplied,
-        Self::SourceNaks,
-        Self::SourceRedeliveries,
-        Self::Dlq,
-        Self::SinkPublishDuration,
-        Self::SinkPublishErrors,
-        Self::EndToEnd,
-    ];
-
-    /// The exported name, as the spec spells it.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::RecordsIn => "records_in_total",
-            Self::RecordsOut => "records_out_total",
-            Self::RecordsDropped => "records_dropped_total",
-            Self::RecordsErrored => "records_errored_total",
-            Self::StageDuration => "stage_duration_seconds",
-            Self::StateOps => "state_ops_total",
-            Self::StateOpDuration => "state_op_duration_seconds",
-            Self::StateErrors => "state_errors_total",
-            Self::LuaErrors => "lua_errors_total",
-            Self::RegexNonmatch => "regex_nonmatch_total",
-            Self::EditUnapplied => "edit_unapplied_total",
-            Self::SourceNaks => "source_naks_total",
-            Self::SourceRedeliveries => "source_redeliveries_total",
-            Self::Dlq => "dlq_total",
-            Self::SinkPublishDuration => "sink_publish_duration_seconds",
-            Self::SinkPublishErrors => "sink_publish_errors_total",
-            Self::EndToEnd => "pipeline_end_to_end_seconds",
-        }
-    }
-
     /// Counter or histogram.
     #[must_use]
     pub const fn kind(self) -> MetricKind {
