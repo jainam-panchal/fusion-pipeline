@@ -118,9 +118,10 @@ SPEC_METRICS=(
 # Reported, not required, until its ticket lands. `state_errors_total` has a producer but a
 # healthy run gives it nothing to count, and so do the `regex_limit`, `lua_drop` and
 # `lua_error` drop reasons: no pattern in deploy/pipeline.yaml trips a limit on this traffic,
-# the lua node returns nil for nothing, and its `on_error` is `pass`.
+# the lua node returns nil for nothing, and its `on_error` is `pass`. Nothing publishes a
+# malformed pipeline header, so `source_invalid_headers_total` stays empty too.
 PENDING_METRICS=(
-    state_errors_total dlq_total
+    state_errors_total dlq_total source_invalid_headers_total
 )
 for expr in "${SPEC_METRICS[@]}"; do
     wait_for 30 "$expr" prom_has "$expr"

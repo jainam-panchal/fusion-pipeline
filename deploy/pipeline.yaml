@@ -16,7 +16,7 @@
 # the regex panels a producer: a body that is not a syslog line is a non-match and passes
 # unchanged. The edit node gives `edit_unapplied_total` a producer: it copies the extracted
 # component into `attributes.service`, which is unapplied on a body that was not a syslog line,
-# and stamps the pipeline name. The redact node masks IPv4 addresses in the body and the
+# and sets the pipeline name. The redact node masks IPv4 addresses in the body and the
 # extracted content. The lua node gives `lua_errors_total` a producer: it derives
 # `attributes.http.status_class` from `attributes.http.status` and splits a multi-line body
 # into one record per line, and a record whose status is not a number makes it raise, a

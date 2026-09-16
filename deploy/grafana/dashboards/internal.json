@@ -497,7 +497,7 @@
       "id": 5,
       "type": "timeseries",
       "title": "Is anything failing?  (errors, naks, redeliveries)",
-      "description": "Flat at zero is healthy. errored counts a stage error or a sink without PubAck once, under its node; each failed record naks; JetStream redelivers up to max_deliver, then the dead-letter queue (#10) takes it.",
+      "description": "Flat at zero is healthy. errored counts a stage error or a sink without PubAck once, under its node; pipeline headers ignored counts a Fusion-* header the source could not parse (the message is still walked); each failed record naks; JetStream redelivers up to max_deliver, then the dead-letter queue (#10) takes it.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -618,6 +618,15 @@
           "expr": "(sum(rate(dlq_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
           "legendFormat": "dead-lettered",
           "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(rate(source_invalid_headers_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
+          "legendFormat": "pipeline headers ignored",
+          "refId": "E"
         }
       ]
     },
