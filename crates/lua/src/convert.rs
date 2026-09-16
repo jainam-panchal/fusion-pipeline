@@ -291,12 +291,11 @@ fn kind(value: &LuaValue) -> Result<Kind, OutputError> {
     const EXPECTED: &str = "`kind` must be `log`, `metric` or `span`";
     match value {
         LuaValue::Nil => Ok(Kind::Log),
-        LuaValue::String(s) => match s.to_str().as_deref() {
-            Ok("log") => Ok(Kind::Log),
-            Ok("metric") => Ok(Kind::Metric),
-            Ok("span") => Ok(Kind::Span),
-            _ => refuse(EXPECTED),
-        },
+        LuaValue::String(s) => s
+            .to_str()
+            .ok()
+            .and_then(|s| Kind::parse(&s))
+            .ok_or_else(|| OutputError(EXPECTED.into())),
         other => refuse(format!("{EXPECTED}, not {}", type_name(other))),
     }
 }

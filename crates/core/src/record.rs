@@ -51,6 +51,17 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The kind whose wire name is `name`, the inverse of [`Kind::as_str`].
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "log" => Some(Self::Log),
+            "metric" => Some(Self::Metric),
+            "span" => Some(Self::Span),
+            _ => None,
+        }
+    }
+
     /// The wire name of this kind.
     #[must_use]
     pub const fn as_str(self) -> &'static str {

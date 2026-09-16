@@ -343,11 +343,8 @@ impl Op {
                     .ok_or_else(|| from.unapplied(EditCause::Absent))?;
                 to.write(record, value)
                     .map_err(|_| from.unapplied(EditCause::Type))?;
-                // `from` held a value a moment ago and is not `to`, so this cannot refuse.
-                from.path
-                    .remove(record)
-                    .map(|_| ())
-                    .map_err(|_| from.unapplied(EditCause::Type))
+                from.path.remove(record);
+                Ok(())
             }
             Self::Copy { from, to } => {
                 let value = owned(from.path.read(record))
@@ -375,10 +372,9 @@ impl Op {
                     .map_err(|_| field.unapplied(EditCause::Type))
             }
             Self::Delete { fields } => {
-                // Every field was checked writable at load, so `remove` cannot refuse; an
-                // absent field is nothing to do, not an unapplied op.
+                // An absent field is nothing to do, not an unapplied op.
                 for field in fields {
-                    let _ = field.remove(record);
+                    field.remove(record);
                 }
                 Ok(())
             }

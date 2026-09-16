@@ -349,37 +349,25 @@ fn remove_deletes_the_field_and_returns_the_old_value() {
         |record: &mut Record, path: &str| FieldPath::parse(path).expect("parses").remove(record);
 
     assert_eq!(
-        remove(&mut record, "attributes.http.path").expect("removes"),
+        remove(&mut record, "attributes.http.path"),
         Some(json!("/api/v1"))
     );
     assert!(record.attributes.get("http.path").is_none());
-    assert_eq!(
-        remove(&mut record, "attributes.http.path").expect("absent is fine"),
-        None
-    );
+    assert_eq!(remove(&mut record, "attributes.http.path"), None);
 
-    assert_eq!(
-        remove(&mut record, "severity_text").expect("removes"),
-        Some(json!("ERROR"))
-    );
+    assert_eq!(remove(&mut record, "severity_text"), Some(json!("ERROR")));
     assert_eq!(record.severity_text, None);
     assert_eq!(
-        remove(&mut record, "body").expect("removes"),
+        remove(&mut record, "body"),
         Some(json!("disk full on /var"))
     );
     assert_eq!(record.body, None);
-    assert_eq!(
-        remove(&mut record, "trace_id").expect("absent is fine"),
-        None
-    );
+    assert_eq!(remove(&mut record, "trace_id"), None);
 
     record.kind = Kind::Span;
-    assert_eq!(remove(&mut record, "id").expect("removes"), Some(json!(7)));
+    assert_eq!(remove(&mut record, "id"), Some(json!(7)));
     assert_eq!(record.id, None);
-    assert_eq!(
-        remove(&mut record, "kind").expect("removes"),
-        Some(json!("span"))
-    );
+    assert_eq!(remove(&mut record, "kind"), Some(json!("span")));
     assert_eq!(record.kind, Kind::Log, "a removed kind is the wire default");
 }
 

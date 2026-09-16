@@ -51,8 +51,9 @@ impl Redact {
     /// # Errors
     ///
     /// [`ConfigError::InvalidParams`] naming the node when a parameter is missing or
-    /// unknown, `fields` is empty, a field is not a path or does not take any string (`id`,
-    /// `kind`, `severity_number` and the time fields do not), or the pattern does not compile under the node's limits and ReDoS policy.
+    /// unknown, `fields` is empty, a field is not a path or does not take any string
+    /// (`id`, `kind`, `severity_number` and the time fields do not), or the pattern does
+    /// not compile under the node's limits and ReDoS policy.
     pub fn from_node(node: &NodeConfig) -> Result<Self, ConfigError> {
         let params: Params = node.parse_params()?;
         if params.fields.is_empty() {

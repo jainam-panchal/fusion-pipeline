@@ -647,18 +647,14 @@ impl FieldPath {
         Ok(())
     }
 
-    /// Remove the field, returning the old value. Absent is `Ok(None)`. `kind` is never
-    /// absent: removing it leaves the wire default, `log`.
-    ///
-    /// # Errors
-    ///
-    /// None today; the `Result` keeps removal symmetric with [`FieldPath::write`].
-    pub fn remove(&self, record: &mut Record) -> Result<Option<Value>, PathError> {
+    /// Remove the field, returning the old value, or `None` when it was absent. Every field
+    /// can be removed. `kind` is never absent: removing it leaves the wire default, `log`.
+    pub fn remove(&self, record: &mut Record) -> Option<Value> {
         let field = match &self.target {
-            Target::Key(map, key) => return Ok(map.get_mut(record).remove(key)),
+            Target::Key(map, key) => return map.get_mut(record).remove(key),
             Target::Field(field) => *field,
         };
-        Ok(match field {
+        match field {
             Field::Id => record.id.take().map(|id| Value::from(id.0)),
             Field::Kind => Some(Value::from(std::mem::take(&mut record.kind).as_str())),
             Field::TimeUnixNano => record.time_unix_nano.take().map(Value::from),
@@ -668,7 +664,7 @@ impl FieldPath {
             Field::Body => record.body.take(),
             Field::TraceId => record.trace_id.take().map(Value::from),
             Field::SpanId => record.span_id.take().map(Value::from),
-        })
+        }
     }
 
     fn wrong_type(&self, expected: &'static str, actual: &Value) -> PathError {
@@ -700,15 +696,10 @@ impl FieldPath {
 
     fn expect_kind(&self, value: &Value) -> Result<Kind, PathError> {
         const KINDS: &str = "`log`, `metric` or `span`";
-        match value {
-            Value::String(s) => match s.as_str() {
-                "log" => Ok(Kind::Log),
-                "metric" => Ok(Kind::Metric),
-                "span" => Ok(Kind::Span),
-                _ => Err(self.wrong_type(KINDS, value)),
-            },
-            _ => Err(self.wrong_type(KINDS, value)),
-        }
+        value
+            .as_str()
+            .and_then(Kind::parse)
+            .ok_or_else(|| self.wrong_type(KINDS, value))
     }
 
     fn expect_i32(&self, value: Value) -> Result<Option<i32>, PathError> {
