@@ -286,17 +286,17 @@ fn id(value: &LuaValue) -> Result<Option<RecordId>, OutputError> {
     }
 }
 
-/// A `kind`: `log`, `metric` or `span`; `log` when absent, the wire default.
+/// A `kind`: one of [`Kind::ONE_OF`]; `log` when absent, the wire default.
 fn kind(value: &LuaValue) -> Result<Kind, OutputError> {
-    const EXPECTED: &str = "`kind` must be `log`, `metric` or `span`";
+    let expected = || format!("`kind` must be {}", Kind::ONE_OF);
     match value {
         LuaValue::Nil => Ok(Kind::Log),
         LuaValue::String(s) => s
             .to_str()
             .ok()
             .and_then(|s| Kind::parse(&s))
-            .ok_or_else(|| OutputError(EXPECTED.into())),
-        other => refuse(format!("{EXPECTED}, not {}", type_name(other))),
+            .ok_or_else(|| OutputError(expected())),
+        other => refuse(format!("{}, not {}", expected(), type_name(other))),
     }
 }
 
