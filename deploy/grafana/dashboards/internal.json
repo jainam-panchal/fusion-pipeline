@@ -256,7 +256,7 @@
       "id": 3,
       "type": "timeseries",
       "title": "How slow?  (end to end, and the slowest stage)",
-      "description": "End-to-end: observed time on the record to settlement. Slowest stage p99: the worst stage run or sink PubAck wait right now; find which in the per-stage rows below. Rule of thumb: watch above 1 s, problem above 5 s. Gaps are minutes with no records: latency is undefined without them; the grey bars show how many records the number is based on.",
+      "description": "End-to-end: the record's ingestion time to settlement. Slowest stage p99: the worst stage run or sink PubAck wait right now; find which in the per-stage rows below. Rule of thumb: watch above 1 s, problem above 5 s. Gaps are minutes with no records: latency is undefined without them; the grey bars show how many records the number is based on.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
