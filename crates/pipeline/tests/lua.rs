@@ -945,3 +945,44 @@ end"#,
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     h.finish();
 }
+
+#[test]
+fn a_script_cannot_reach_or_replace_the_record_metatable() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  record.attributes["mt"] = getmetatable(record)
+  record.attributes["locked"] = not pcall(setmetatable, record, nil)
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+    assert_eq!(out[0].attributes.get("mt"), Some(&json!("record")));
+    assert_eq!(out[0].attributes.get("locked"), Some(&json!(true)));
+    h.finish();
+}
+
+#[test]
+fn a_body_nested_as_deep_as_a_record_can_decode_comes_back_unchanged() {
+    let yaml = config("", "function process(record) return record end");
+    let mut body = json!("leaf");
+    for _ in 0..100 {
+        body = json!({ "n": body });
+    }
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({ "body": body.clone() }))]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].body, Some(body));
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
+    h.finish();
+}
+
+#[test]
+fn a_large_integral_float_is_the_integer_it_stands_for() {
+    let yaml = config(
+        "",
+        "function process(record)\n  record.time_unix_nano = 1789000000000 * 1e6\n  return record\nend",
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+    assert_eq!(out[0].time_unix_nano, Some(1_789_000_000_000_000_000));
+    h.finish();
+}

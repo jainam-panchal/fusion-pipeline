@@ -480,10 +480,12 @@ fn install_api(lua: &mlua::Lua, node: &str) -> mlua::Result<()> {
 }
 
 /// `record:copy()`: a deep copy of the table, shared structure and cycles kept as they are,
-/// with the same metatable so the copy can be copied too. Written in Lua so it runs under the
-/// instruction budget and the memory cap like the script's own code.
+/// with the record metatable so the copy can be copied too. Written in Lua so it runs under
+/// the instruction budget and the memory cap like the script's own code. The chunk takes the
+/// metatable and returns the method.
 const COPY: &str = r#"
-local next, type, getmetatable, setmetatable = next, type, getmetatable, setmetatable
+local metatable = ...
+local next, type, setmetatable = next, type, setmetatable
 local function deep(value, seen)
   if type(value) ~= "table" then return value end
   local done = seen[value]
@@ -496,17 +498,23 @@ local function deep(value, seen)
   return out
 end
 return function(record)
-  return setmetatable(deep(record, {}), getmetatable(record))
+  return setmetatable(deep(record, {}), metatable)
 end
 "#;
 
-/// The metatable behind every record table: `__index` holds `copy`.
+/// The metatable behind every record table: `__index` holds `copy`, and `__metatable` hides
+/// the table from `getmetatable` and refuses `setmetatable`, so a script cannot change
+/// `copy` for the records after it.
 fn record_metatable(lua: &mlua::Lua) -> mlua::Result<Table> {
-    let copy: Function = lua.load(COPY).set_name("=record:copy").eval()?;
+    let metatable = lua.create_table()?;
+    let copy: Function = lua
+        .load(COPY)
+        .set_name("=record:copy")
+        .call(metatable.clone())?;
     let methods = lua.create_table()?;
     methods.raw_set("copy", copy)?;
-    let metatable = lua.create_table()?;
     metatable.raw_set("__index", methods)?;
+    metatable.raw_set("__metatable", "record")?;
     Ok(metatable)
 }
 

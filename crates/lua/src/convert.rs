@@ -121,9 +121,10 @@ fn json_to_lua(lua: &mlua::Lua, v: &Value) -> mlua::Result<LuaValue> {
     })
 }
 
-/// How deep a returned value may nest. JSON from a record never comes close; a table that
-/// contains itself would otherwise recurse until the worker's stack overflows.
-const MAX_DEPTH: usize = 64;
+/// How deep a returned value may nest: serde_json's own limit for a record, so every record
+/// the source decoded can come back unchanged, while a table that contains itself is refused
+/// instead of recursing until the worker's stack overflows.
+const MAX_DEPTH: usize = 128;
 
 /// The way back: Lua values read as JSON, with the bytes of every string counted against
 /// the output cap. One reader per returned record, so the cap is per record.
@@ -291,12 +292,15 @@ fn write(path: &FieldPath, record: &mut Record, value: Value, id: bool) -> Resul
 }
 
 /// The integer a Lua value stands for when it is not written as one: an integral float
-/// within the range a float holds exactly, or, for the record id, decimal digits.
+/// within `i64` (a float that large is an integer already, and the cast is exact), or, for
+/// the record id, decimal digits.
 fn as_meant(value: &Value, id: bool) -> Option<Value> {
+    // 2^63, the first float outside `i64`.
+    const I64_END: f64 = 9_223_372_036_854_775_808.0;
     match value {
         Value::Number(n) if n.is_f64() => {
             let f = n.as_f64()?;
-            (f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0).then(|| Value::from(f as i64))
+            (f.fract() == 0.0 && (-I64_END..I64_END).contains(&f)).then(|| Value::from(f as i64))
         }
         Value::String(text)
             if id && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) =>
