@@ -10,7 +10,7 @@
 //!
 //! One state key per distinct content, `dedupe:{hash}` under the handle's prefix, holding
 //! `"{record id} {ingestion time}"` with the window as its TTL. The window is measured in
-//! the ingestion time on the record's [`Meta`](fusion_core::meta::Meta), fixed at intake
+//! the ingestion time on the record's [`fusion_core::meta::Meta`], fixed at intake
 //! and unchanged by redelivery or by any stage rewriting the record's time fields, so the
 //! decision for a record is the same whenever it reaches the stage: a crash between a state
 //! write and the ack never turns a real record into a duplicate.

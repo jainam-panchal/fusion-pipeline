@@ -4,8 +4,9 @@
 //! Every metric becomes one instrument, created up front and named as the spec spells it: a
 //! counter for each [`CounterMetric`], an `f64` histogram in seconds with sub-second buckets
 //! for each [`HistogramMetric`]. The instruments sit in arrays indexed by the metric, built
-//! from the closed sets, so a recorded metric always has its instrument. Labels become attributes with the same names, so the collector's
-//! Prometheus exporter surfaces `records_dropped_total{tenant, stage, reason}` verbatim.
+//! from the closed sets, so a recorded metric always has its instrument. Labels become
+//! attributes with the same names, so the collector's Prometheus exporter surfaces
+//! `records_dropped_total{tenant, stage, reason}` verbatim.
 //!
 //! The process also reports its own CPU time, resident memory and thread count; see
 //! [`process`].
