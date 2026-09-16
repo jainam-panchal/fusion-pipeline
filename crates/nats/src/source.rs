@@ -170,7 +170,7 @@ fn decode(
         stamp_tenant(&mut record, tenant);
     }
     if let Some(published) = published {
-        stamp_ingestion_time(&mut record, published);
+        stamp_observed_time(&mut record, published);
     }
     Ok(record)
 }
@@ -179,7 +179,7 @@ fn decode(
 /// `observed_time_unix_nano` nor `time_unix_nano`. A record that says when it was observed
 /// or when it happened keeps its own word; only a record with no notion of time gets the
 /// server's.
-fn stamp_ingestion_time(record: &mut Record, published_unix_nanos: u64) {
+fn stamp_observed_time(record: &mut Record, published_unix_nanos: u64) {
     if record.observed_time_unix_nano.is_none() && record.time_unix_nano.is_none() {
         record.observed_time_unix_nano = Some(published_unix_nanos);
     }
