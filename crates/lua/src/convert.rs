@@ -62,10 +62,14 @@ pub(crate) fn to_table(lua: &mlua::Lua, record: &Record) -> mlua::Result<Table> 
 /// `meta[field]` as a script reads it: the record id as `id` is in the record table, the
 /// tenant as a string, the ingestion time and delivery count as integers.
 pub(crate) fn meta_value(lua: &mlua::Lua, meta: &Meta, field: MetaField) -> mlua::Result<LuaValue> {
-    Ok(match (field, meta.get(field)) {
-        (MetaField::Id, _) => id_value(lua, meta.record_id)?,
-        (_, MetaValue::Str(text)) => LuaValue::String(lua.create_string(text)?),
-        (_, MetaValue::U64(n)) => unsigned(n),
+    // The id crosses as `to_table` hands it over, text above 2^63; every other value as
+    // `Meta::get` gives it.
+    if field == MetaField::Id {
+        return id_value(lua, meta.record_id);
+    }
+    Ok(match meta.get(field) {
+        MetaValue::Str(text) => LuaValue::String(lua.create_string(text)?),
+        MetaValue::U64(n) => unsigned(n),
     })
 }
 
