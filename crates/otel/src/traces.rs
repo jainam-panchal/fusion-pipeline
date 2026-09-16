@@ -26,8 +26,7 @@ use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{BatchSpanProcessor, SpanData, SpanExporter, SpanProcessor};
 
-use crate::SERVICE_NAME;
-use crate::events::saturating_i64;
+use crate::{SERVICE_NAME, saturating_i64};
 
 /// A [`TraceSink`] over a batch span processor.
 #[derive(Debug, Clone)]

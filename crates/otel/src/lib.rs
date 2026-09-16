@@ -215,6 +215,11 @@ pub fn resource() -> Resource {
         .build()
 }
 
+/// `value` as an OTLP integer, capped at `i64::MAX`.
+fn saturating_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 /// Whether the environment names a collector for the signal whose own endpoint variable is
 /// `specific`.
 fn configured(specific: &str) -> bool {
@@ -248,9 +253,9 @@ pub fn sampling(arg: Option<&str>) -> Result<TraceSampling, OtelError> {
 /// # Errors
 ///
 /// [`OtelError::Exporter`] when an endpoint or another `OTEL_EXPORTER_OTLP_*` variable is
-/// unusable, [`OtelError::SamplerArg`] when the sampler argument is.
+/// unusable, [`OtelError::SamplerArg`] when traces are exported and the sampler argument is
+/// unusable.
 pub fn init() -> Result<Telemetry, OtelError> {
-    let sampling = sampling(std::env::var(OTEL_TRACES_SAMPLER_ARG).ok().as_deref())?;
     let resource = resource();
     let meters = if configured(OTEL_EXPORTER_OTLP_METRICS_ENDPOINT) {
         let exporter = MetricExporter::builder()
@@ -282,6 +287,7 @@ pub fn init() -> Result<Telemetry, OtelError> {
         None
     };
     let traces = if configured(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) {
+        let sampling = sampling(std::env::var(OTEL_TRACES_SAMPLER_ARG).ok().as_deref())?;
         let exporter = SpanExporter::builder()
             .with_http()
             .build()
@@ -289,7 +295,7 @@ pub fn init() -> Result<Telemetry, OtelError> {
                 signal: "traces",
                 source,
             })?;
-        Some(OtlpTraceSink::with_exporter(exporter, resource))
+        Some((OtlpTraceSink::with_exporter(exporter, resource), sampling))
     } else {
         None
     };
@@ -304,9 +310,10 @@ pub fn init() -> Result<Telemetry, OtelError> {
         Some(log) => signals.with_events(log.clone()),
         None => signals.with_events(StderrEventLog),
     };
-    if let Some(sink) = &traces {
-        signals = signals.with_traces(sink.clone(), sampling);
+    if let Some((sink, sampling)) = &traces {
+        signals = signals.with_traces(sink.clone(), *sampling);
     }
+    let traces = traces.map(|(sink, _)| sink);
     Ok(Telemetry {
         meters,
         logs,

@@ -17,7 +17,7 @@ use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::logs::{LogExporter, SdkLogger, SdkLoggerProvider};
 
-use crate::SERVICE_NAME;
+use crate::{SERVICE_NAME, saturating_i64};
 
 /// An [`EventLog`] over an OpenTelemetry logger. Clones share the logger.
 #[derive(Debug, Clone)]
@@ -100,9 +100,4 @@ impl EventLog for OtlpEventLog {
         }
         self.logger.emit(record);
     }
-}
-
-/// `value` as an OTLP integer, capped at `i64::MAX`.
-pub(crate) fn saturating_i64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
 }
