@@ -8,6 +8,8 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use crate::closed_set::closed_set;
+
 /// Producer-supplied snowflake id. Present on every record the engine walks, as it arrived
 /// (a record that arrives without one is negatively acknowledged); the pipeline decides with
 /// the copy on the record's `Meta`, and a stage may change or drop the field.
@@ -36,40 +38,26 @@ impl<'de> Deserialize<'de> for RecordId {
     }
 }
 
-/// Signal kind. Only `log` is processed by the POC engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum Kind {
-    /// A log record.
-    #[default]
-    Log,
-    /// A metric data point. Rejected by the engine.
-    Metric,
-    /// A span. Rejected by the engine.
-    Span,
+closed_set! {
+    serde;
+    /// Signal kind. Only `log` is processed, decided by the engine at intake. Its JSON form is
+    /// its name, [`Kind::as_str`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[non_exhaustive]
+    pub enum Kind {
+        /// A log record.
+        Log = "log",
+        /// A metric data point. Rejected by the engine at intake.
+        Metric = "metric",
+        /// A span. Rejected by the engine at intake.
+        Span = "span",
+    }
 }
 
-impl Kind {
-    /// The kind whose wire name is `name`, the inverse of [`Kind::as_str`].
-    #[must_use]
-    pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "log" => Some(Self::Log),
-            "metric" => Some(Self::Metric),
-            "span" => Some(Self::Span),
-            _ => None,
-        }
-    }
-
-    /// The wire name of this kind.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Log => "log",
-            Self::Metric => "metric",
-            Self::Span => "span",
-        }
+/// A record with no `kind` is a `log`.
+impl Default for Kind {
+    fn default() -> Self {
+        Self::Log
     }
 }
 
