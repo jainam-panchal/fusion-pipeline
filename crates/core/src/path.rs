@@ -14,6 +14,7 @@ use std::fmt;
 
 use serde_json::{Map, Value};
 
+use crate::closed_set::closed_set;
 use crate::record::{Kind, Record, RecordId};
 
 /// Errors from parsing a path or writing through one. Each message says what is wrong and
@@ -84,33 +85,38 @@ pub enum PathError {
     },
 }
 
-/// The record fields a path may start at, for error messages.
+/// The record fields a path may start at, for error messages, in reading order rather than
+/// declaration order. Hand-written: keep it in step with [`Field`] and [`MapField`].
 const FIELDS: &str = "id, kind, body, severity_text, severity_number, time_unix_nano, \
 observed_time_unix_nano, trace_id, span_id, attributes.<key>, resource.<key>, scope.<key>";
 
-/// A top-level field that is addressed as a whole.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Field {
-    Id,
-    Kind,
-    TimeUnixNano,
-    ObservedTimeUnixNano,
-    SeverityText,
-    SeverityNumber,
-    Body,
-    TraceId,
-    SpanId,
+closed_set! {
+    /// A top-level field that is addressed as a whole, by its path spelling.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Field {
+        Id = "id",
+        Kind = "kind",
+        TimeUnixNano = "time_unix_nano",
+        ObservedTimeUnixNano = "observed_time_unix_nano",
+        SeverityText = "severity_text",
+        SeverityNumber = "severity_number",
+        Body = "body",
+        TraceId = "trace_id",
+        SpanId = "span_id",
+    }
 }
 
-/// One of the three flat maps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MapField {
-    Attributes,
-    Resource,
-    Scope,
+closed_set! {
+    /// One of the three flat maps, by its path spelling.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum MapField {
+        Attributes = "attributes",
+        Resource = "resource",
+        Scope = "scope",
+    }
 }
 
-/// A top-level record field a path may start at.
+/// A top-level record field a path may start at: a field or a map, each a closed set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Root {
     Field(Field),
@@ -118,39 +124,18 @@ enum Root {
 }
 
 impl Root {
-    const ALL: [Self; 12] = [
-        Self::Field(Field::Id),
-        Self::Field(Field::Kind),
-        Self::Field(Field::TimeUnixNano),
-        Self::Field(Field::ObservedTimeUnixNano),
-        Self::Field(Field::SeverityText),
-        Self::Field(Field::SeverityNumber),
-        Self::Field(Field::Body),
-        Self::Field(Field::TraceId),
-        Self::Field(Field::SpanId),
-        Self::Map(MapField::Attributes),
-        Self::Map(MapField::Resource),
-        Self::Map(MapField::Scope),
-    ];
-
+    /// The root spelled `name`. Every variant of `Root` needs its arm here; `name` below is
+    /// exhaustive, this is not.
     fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|root| root.name() == name)
+        Field::parse(name)
+            .map(Self::Field)
+            .or_else(|| MapField::parse(name).map(Self::Map))
     }
 
     const fn name(self) -> &'static str {
         match self {
-            Self::Field(Field::Id) => "id",
-            Self::Field(Field::Kind) => "kind",
-            Self::Field(Field::TimeUnixNano) => "time_unix_nano",
-            Self::Field(Field::ObservedTimeUnixNano) => "observed_time_unix_nano",
-            Self::Field(Field::SeverityText) => "severity_text",
-            Self::Field(Field::SeverityNumber) => "severity_number",
-            Self::Field(Field::Body) => "body",
-            Self::Field(Field::TraceId) => "trace_id",
-            Self::Field(Field::SpanId) => "span_id",
-            Self::Map(MapField::Attributes) => "attributes",
-            Self::Map(MapField::Resource) => "resource",
-            Self::Map(MapField::Scope) => "scope",
+            Self::Field(field) => field.as_str(),
+            Self::Map(map) => map.as_str(),
         }
     }
 }
