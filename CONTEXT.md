@@ -130,7 +130,7 @@ One value from the closed set that labels `records_dropped_total`.
 A failure inside a stage that is not a drop. Counted separately and makes the record's message nak.
 
 **Failure**:
-Why a record's message was nakked: the node that failed first in walk order (`source` before any node ran), its failure kind, and the error text. Carried on the nak; the text is for people, never a label.
+Why a record's message was nakked: the node that failed first in walk order (`source` before any node ran), its failure kind, the error text, and the `Meta` record id when there is one (so a source can name the record when it logs the dead letter). Carried on the nak; the text is for people, never a label.
 _Avoid_: error (a stage error is one kind), cause
 
 **Failure kind**:

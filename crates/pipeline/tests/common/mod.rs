@@ -1,7 +1,8 @@
 //! The engine harness the trait-boundary tests share: a YAML config compiled with the
 //! default registry plus an in-memory sink, an in-memory source to push envelopes through,
-//! an in-memory state store, and the sinks, metrics, events and record traces to assert on. It also owns where `deploy/` is,
-//! so a test that drives a shipped config does not spell the path itself.
+//! an in-memory state store, and the sinks, metrics, events and record traces to assert on.
+//! It also owns where `deploy/` is, so a test that drives a shipped config does not spell
+//! the path itself.
 
 #![allow(dead_code)]
 
