@@ -121,11 +121,17 @@ fn json_to_lua(lua: &mlua::Lua, v: &Value) -> mlua::Result<LuaValue> {
     })
 }
 
+/// How deep a returned value may nest. JSON from a record never comes close; a table that
+/// contains itself would otherwise recurse until the worker's stack overflows.
+const MAX_DEPTH: usize = 64;
+
 /// The way back: Lua values read as JSON, with the bytes of every string counted against
 /// the output cap. One reader per returned record, so the cap is per record.
 struct Reader {
     used: usize,
     cap: usize,
+    /// How many tables the value being read is inside.
+    depth: usize,
 }
 
 impl Reader {
@@ -145,6 +151,7 @@ impl Reader {
     /// taken as the JSON it is: the flat-map rule is the source's contract, so a value that
     /// arrived composite must leave an untouched script the way it came in.
     fn entries(&mut self, table: &Table, field: &str) -> Result<Map<String, Value>, OutputError> {
+        self.enter(field)?;
         let mut map = Map::new();
         for pair in table.pairs::<LuaValue, LuaValue>() {
             let (key, value) =
@@ -160,7 +167,20 @@ impl Reader {
             let value = self.json(&value, &at)?.unwrap_or(Value::Null);
             map.insert(key, value);
         }
+        self.depth -= 1;
         Ok(map)
+    }
+
+    /// Step into a table, refusing past [`MAX_DEPTH`]. A refusal ends the whole returned
+    /// record, so only a successful read steps back out.
+    fn enter(&mut self, field: &str) -> Result<(), OutputError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return refuse(format!(
+                "`{field}` nests deeper than {MAX_DEPTH} tables, or contains itself"
+            ));
+        }
+        Ok(())
     }
 
     /// A Lua value as JSON: `nil` is absent, a table is an array when its keys are `1..n`
@@ -186,6 +206,7 @@ impl Reader {
                 if len == 0 {
                     Value::Object(self.entries(t, field)?)
                 } else {
+                    self.enter(field)?;
                     let mut items = Vec::with_capacity(len);
                     for (i, item) in t.sequence_values::<LuaValue>().enumerate() {
                         let item =
@@ -193,6 +214,7 @@ impl Reader {
                         let at = format!("{field}[{}]", i + 1);
                         items.push(self.json(&item, &at)?.unwrap_or(Value::Null));
                     }
+                    self.depth -= 1;
                     Value::Array(items)
                 }
             }
@@ -215,6 +237,7 @@ pub(crate) fn from_table(table: &Table, output_bytes: usize) -> Result<Record, O
     let mut reader = Reader {
         used: 0,
         cap: output_bytes,
+        depth: 0,
     };
     for pair in table.pairs::<LuaValue, LuaValue>() {
         let (key, value) =

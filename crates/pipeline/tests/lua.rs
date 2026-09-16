@@ -847,3 +847,23 @@ fn only_the_id_is_read_from_decimal_text_and_meta_is_not_a_record_field() {
         h.finish();
     }
 }
+
+#[test]
+fn a_returned_value_that_contains_itself_is_an_output_error_not_a_crash() {
+    let yaml = config(
+        "    on_error: drop\n",
+        r#"function process(record)
+  local loop = {}
+  loop.self = loop
+  record.body = loop
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+    assert!(out.is_empty());
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 1);
+    // The worker is still serving.
+    let probe = h.source.push(record(2, json!({"body": "x"})));
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    h.finish();
+}
