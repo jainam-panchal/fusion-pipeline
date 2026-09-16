@@ -323,3 +323,209 @@ fn every_record_a_split_emits_continues_under_its_parents_meta() {
     );
     h.finish();
 }
+
+/// Push `record` with `arrival` through `yaml` (no test stages), wait for the ack, return the
+/// harness.
+fn push_through(yaml: &str, record: Record, arrival: Arrival) -> common::Harness {
+    let sinks = MemorySinks::new();
+    let h = start_with(yaml, 1, sinks.clone(), registry(&sinks));
+    let probe = h.source.push_arrival(record, arrival);
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    h
+}
+
+fn acme_arrival() -> Arrival {
+    Arrival {
+        tenant: Some("acme".to_owned()),
+        ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
+        delivery_count: 2,
+    }
+}
+
+#[test]
+fn a_route_on_meta_tenant_follows_the_pipelines_tenant_not_the_payloads() {
+    let yaml = r#"
+name: ingest
+nodes:
+  - id: by_tenant
+    type: route
+    routes:
+      acme: meta.tenant == "acme"
+    default: other
+  - id: acme_out
+    type: sink.memory
+    from: by_tenant.acme
+  - id: other_out
+    type: sink.memory
+    from: by_tenant.other
+"#;
+    let h = push_through(
+        yaml,
+        record(&json!({"id": 7, "resource": {"tenant.id": "beta"}})),
+        acme_arrival(),
+    );
+    assert_eq!(h.sinks.records("acme_out").len(), 1);
+    assert!(h.sinks.records("other_out").is_empty());
+    h.finish();
+}
+
+#[test]
+fn edit_copy_from_meta_is_the_one_way_a_pipeline_value_enters_the_record() {
+    let yaml = r#"
+name: ingest
+nodes:
+  - id: stamp
+    type: edit
+    ops:
+      - copy: { from: meta.tenant, to: resource.tenant.id }
+      - copy: { from: meta.ingestion_time, to: observed_time_unix_nano }
+      - copy: { from: meta.delivery_count, to: attributes.delivery }
+      - copy: { from: meta.id, to: attributes.arrived_as }
+  - id: out
+    type: sink.memory
+"#;
+    let h = push_through(yaml, record(&json!({"id": 7, "body": "x"})), acme_arrival());
+    let out = h.sinks.records("out");
+    assert_eq!(out[0].resource.get("tenant.id"), Some(&json!("acme")));
+    assert_eq!(out[0].observed_time_unix_nano, Some(9_000_000_000));
+    assert_eq!(out[0].attributes.get("delivery"), Some(&json!(2)));
+    assert_eq!(out[0].attributes.get("arrived_as"), Some(&json!(7)));
+    h.finish();
+}
+
+#[test]
+fn a_dedupe_key_on_meta_tenant_reads_the_pipelines_tenant() {
+    let yaml = r#"
+name: ingest
+nodes:
+  - id: once_per_tenant
+    type: dedupe
+    key: [meta.tenant]
+    window: 10s
+  - id: out
+    type: sink.memory
+"#;
+    let sinks = MemorySinks::new();
+    let h = start_with(yaml, 1, sinks.clone(), registry(&sinks));
+    // Two different payload tenants, one pipeline tenant: the second is a repeat.
+    for (id, payload_tenant) in [(1, "beta"), (2, "gamma")] {
+        let probe = h.source.push_arrival(
+            record(&json!({"id": id, "resource": {"tenant.id": payload_tenant}})),
+            acme_arrival(),
+        );
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    }
+    assert_eq!(h.sinks.records("out").len(), 1);
+    h.finish();
+}
+
+#[test]
+fn a_script_reads_meta_as_its_second_argument() {
+    let yaml = r#"
+name: ingest
+nodes:
+  - id: script
+    type: lua
+    source: |
+      function process(record, meta)
+        local seen = {}
+        for k, v in pairs(meta) do seen[#seen + 1] = k end
+        table.sort(seen)
+        record.attributes["meta.keys"] = table.concat(seen, ",")
+        record.attributes["meta.id"] = meta.id
+        record.attributes["meta.tenant"] = meta.tenant
+        record.attributes["meta.ingestion_time"] = meta.ingestion_time
+        record.attributes["meta.delivery_count"] = meta.delivery_count
+        record.attributes["meta.other"] = meta.other == nil
+        return record
+      end
+  - id: out
+    type: sink.memory
+"#;
+    let h = push_through(
+        yaml,
+        record(&json!({"id": 7, "resource": {"tenant.id": "beta"}})),
+        acme_arrival(),
+    );
+    let out = h.sinks.records("out");
+    assert_eq!(
+        meta_of(&out[0], "keys"),
+        json!("delivery_count,id,ingestion_time,tenant")
+    );
+    assert_eq!(meta_of(&out[0], "id"), json!(7));
+    assert_eq!(meta_of(&out[0], "tenant"), json!("acme"));
+    assert_eq!(meta_of(&out[0], "ingestion_time"), json!(9_000_000_000_u64));
+    assert_eq!(meta_of(&out[0], "delivery_count"), json!(2));
+    assert_eq!(meta_of(&out[0], "other"), json!(true));
+    h.finish();
+}
+
+#[test]
+fn a_script_writing_to_meta_is_a_runtime_error_and_changes_nothing() {
+    let yaml = r#"
+name: ingest
+nodes:
+  - id: script
+    type: lua
+    on_error: pass
+    source: |
+      function process(record, meta)
+        meta.tenant = "beta"
+        return record
+      end
+  - id: out
+    type: sink.memory
+"#;
+    let h = push_through(yaml, record(&json!({"id": 7})), acme_arrival());
+    assert_eq!(
+        h.counter(
+            Metric::LuaErrors,
+            &[("tenant", "acme"), ("stage", "script"), ("kind", "runtime")]
+        ),
+        1
+    );
+    let written = h.sinks.written("out");
+    assert_eq!(&*written[0].meta.tenant, "acme");
+    h.finish();
+}
+
+#[test]
+fn a_script_cannot_unlock_meta_or_carry_a_raw_write_to_the_next_record() {
+    let yaml = r#"
+name: ingest
+nodes:
+  - id: script
+    type: lua
+    source: |
+      function process(record, meta)
+        record.attributes["locked"] = getmetatable(meta)
+        record.attributes["reset"] = not pcall(setmetatable, meta, nil)
+        record.attributes["tenant"] = meta.tenant
+        rawset(meta, "tenant", "beta")
+        return record
+      end
+  - id: out
+    type: sink.memory
+"#;
+    let sinks = MemorySinks::new();
+    let h = start_with(yaml, 1, sinks.clone(), registry(&sinks));
+    for id in [1, 2] {
+        let probe = h
+            .source
+            .push_arrival(record(&json!({"id": id})), acme_arrival());
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    }
+    for r in h.sinks.records("out") {
+        assert_eq!(
+            r.attributes.get("locked"),
+            Some(&json!("meta is read-only"))
+        );
+        assert_eq!(r.attributes.get("reset"), Some(&json!(true)));
+        assert_eq!(
+            r.attributes.get("tenant"),
+            Some(&json!("acme")),
+            "a raw write on one record's meta does not reach the next"
+        );
+    }
+    h.finish();
+}

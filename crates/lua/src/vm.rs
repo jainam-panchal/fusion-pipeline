@@ -1,18 +1,20 @@
 //! One worker's VM for one `lua` node: the sandbox, the API a script sees (`state`, `log`,
-//! `now_ns`), the guardrails, and one run of `process` over one record.
+//! `now_ns`, the read-only `meta` argument), the guardrails, and one run of `process` over
+//! one record.
 
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fusion_core::meta::unix_nanos_now;
+use fusion_core::meta::{Meta, unix_nanos_now};
 use fusion_core::metrics::LuaErrorKind;
-use fusion_core::record::{Record, RecordId};
+use fusion_core::record::Record;
 use fusion_core::stage::{Context, State};
 use fusion_core::state::StateError;
 use mlua::{
-    Function, HookTriggers, LuaOptions, LuaString, MultiValue, StdLib, Value as LuaValue, VmState,
+    Function, HookTriggers, LuaOptions, LuaString, MultiValue, StdLib, Table, Value as LuaValue,
+    VmState,
 };
 
 use crate::convert::{self, OutputError, type_name};
@@ -157,13 +159,16 @@ impl std::error::Error for BudgetExceeded {}
 /// What the API functions need about the record being processed: set before each run.
 struct Current {
     state: State,
-    record_id: RecordId,
+    meta: Meta,
 }
 
 /// One worker's VM for one node.
 pub(crate) struct Vm {
     lua: mlua::Lua,
     process: Function,
+    /// The metatable of every `meta` table `process` receives: reads come from the current
+    /// record's `Meta`, writes raise.
+    meta_metatable: Table,
     /// Instructions used by the current run, counted by the hook in steps of the trigger.
     used: Rc<Cell<u64>>,
     script: Arc<Script>,
@@ -184,6 +189,7 @@ impl Vm {
         }
         install_api(&lua, &script.node).map_err(runtime)?;
         install_pcall(&lua).map_err(runtime)?;
+        let meta_metatable = meta_metatable(&lua).map_err(runtime)?;
         lua.set_memory_limit(script.memory_bytes).map_err(runtime)?;
 
         let used = Rc::new(Cell::new(0));
@@ -224,21 +230,26 @@ impl Vm {
         Ok(Self {
             lua,
             process,
+            meta_metatable,
             used,
             script,
         })
     }
 
-    /// Run `process` over `record` with `ctx`'s state handle and record id.
+    /// Run `process(record, meta)` over `record` with `ctx`'s state handle and `Meta`.
     pub(crate) fn run(&self, record: &Record, ctx: &Context<'_>) -> Result<Returned, Stopped> {
-        let record_id = ctx.meta.record_id;
         self.lua.set_app_data(Current {
             state: ctx.state.clone(),
-            record_id,
+            meta: ctx.meta.clone(),
         });
         self.used.set(0);
         let table = convert::to_table(&self.lua, record).map_err(classify)?;
-        let returned: LuaValue = self.process.call(table).map_err(classify)?;
+        // A fresh table per run, so a `rawset` on one run's `meta` is gone by the next;
+        // nothing a script does to it reaches the pipeline either way.
+        let meta = self.lua.create_table().map_err(classify)?;
+        meta.set_metatable(Some(self.meta_metatable.clone()))
+            .map_err(classify)?;
+        let returned: LuaValue = self.process.call((table, meta)).map_err(classify)?;
         if self.used.get() > self.script.instructions {
             // Cannot happen while `pcall` re-raises the budget; kept so a run that somehow
             // swallowed the trip is still refused.
@@ -443,7 +454,7 @@ fn install_api(lua: &mlua::Lua, node: &str) -> mlua::Result<()> {
             level,
             lua.create_function(move |lua, message: String| {
                 let record = current(lua)
-                    .map(|c| c.record_id.to_string())
+                    .map(|c| c.meta.record_id.to_string())
                     .unwrap_or_default();
                 // Structured logging over OTLP lands with the logs ticket; stderr until then,
                 // as the engine does.
@@ -459,6 +470,47 @@ fn install_api(lua: &mlua::Lua, node: &str) -> mlua::Result<()> {
         lua.create_function(|_, ()| Ok(i64::try_from(unix_nanos_now()).unwrap_or(i64::MAX)))?,
     )?;
     Ok(())
+}
+
+/// The metatable behind `meta`: `__index` reads the current record's `Meta`, `__newindex`
+/// raises, `__pairs` walks the four keys, and `__metatable` hides it from `getmetatable` and
+/// refuses `setmetatable`.
+fn meta_metatable(lua: &mlua::Lua) -> mlua::Result<Table> {
+    let metatable = lua.create_table()?;
+    metatable.raw_set(
+        "__index",
+        lua.create_function(|lua, (_, key): (Table, LuaValue)| {
+            let LuaValue::String(key) = key else {
+                return Ok(LuaValue::Nil);
+            };
+            let current = current(lua)?;
+            convert::meta_value(lua, &current.meta, &key.to_str()?)
+        })?,
+    )?;
+    metatable.raw_set(
+        "__newindex",
+        lua.create_function(|_, (_, key): (Table, LuaValue)| -> mlua::Result<()> {
+            Err(mlua::Error::runtime(format!(
+                "`meta` is the pipeline's and read-only (writing `{}`); copy a value into the \
+                 record instead",
+                key.to_string().unwrap_or_default()
+            )))
+        })?,
+    )?;
+    metatable.raw_set(
+        "__pairs",
+        lua.create_function(|lua, _: Table| {
+            let current = current(lua)?;
+            let snapshot = lua.create_table()?;
+            for key in convert::META_KEYS {
+                snapshot.raw_set(key, convert::meta_value(lua, &current.meta, key)?)?;
+            }
+            let next: Function = lua.globals().raw_get("next")?;
+            Ok((next, snapshot, LuaValue::Nil))
+        })?,
+    )?;
+    metatable.raw_set("__metatable", "meta is read-only")?;
+    Ok(metatable)
 }
 
 fn current(lua: &mlua::Lua) -> mlua::Result<mlua::AppDataRef<'_, Current>> {

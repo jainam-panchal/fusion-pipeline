@@ -2,6 +2,7 @@
 //! checks the spec asks for: types right, strings under the size cap. Every field is
 //! payload (ADR 0005), so a script may change or drop any of them.
 
+use fusion_core::meta::Meta;
 use fusion_core::record::{Kind, Record, RecordId};
 use mlua::{Integer, Table, Value as LuaValue};
 use serde_json::{Map, Value};
@@ -54,6 +55,22 @@ pub(crate) fn to_table(lua: &mlua::Lua, record: &Record) -> mlua::Result<Table> 
         t.raw_set("span_id", s.as_str())?;
     }
     Ok(t)
+}
+
+/// The keys of the `meta` table a script receives, in the order `pairs` walks them.
+pub(crate) const META_KEYS: [&str; 4] = ["id", "tenant", "ingestion_time", "delivery_count"];
+
+/// `meta[key]` as a script reads it: the record id as `id` is in the record table, the
+/// tenant as a string, the ingestion time and delivery count as integers; `nil` for any
+/// other key.
+pub(crate) fn meta_value(lua: &mlua::Lua, meta: &Meta, key: &str) -> mlua::Result<LuaValue> {
+    Ok(match key {
+        "id" => id_value(lua, meta.record_id)?,
+        "tenant" => LuaValue::String(lua.create_string(&*meta.tenant)?),
+        "ingestion_time" => unsigned(meta.ingestion_time.unix_nanos()),
+        "delivery_count" => unsigned(meta.delivery_count),
+        _ => LuaValue::Nil,
+    })
 }
 
 fn id_value(lua: &mlua::Lua, id: RecordId) -> mlua::Result<LuaValue> {
