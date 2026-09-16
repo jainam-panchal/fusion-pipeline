@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{TENANT, WAIT, body_record, start, start_with};
+use common::{TENANT, WAIT, body_record, start, start_untraced, start_with};
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::events::EventKind;
 use fusion_core::io::FailureKind;
@@ -203,6 +203,34 @@ fn passing_and_dropped_records_log_nothing() {
 
     assert_eq!(h.events(), []);
     assert_eq!(h.ids("out"), [13]);
+    h.finish();
+}
+
+#[test]
+fn with_nothing_tracing_no_line_names_a_trace() {
+    let h = start_untraced(FAN_OUT, 1);
+    h.sinks.fail_writes_to("bad");
+
+    let failed = h.push(body_record(16, "x"));
+    assert_eq!(failed.wait(WAIT), Some(AckOutcome::Nak(None)));
+    let redelivered = h.push_delivery(body_record(17, "x"), 2);
+    assert_eq!(redelivered.wait(WAIT), Some(AckOutcome::Nak(None)));
+
+    let events = h.events();
+    let kinds: Vec<EventKind> = events.iter().map(|e| e.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            EventKind::StageError,
+            EventKind::Nak,
+            EventKind::Redelivery,
+            EventKind::StageError,
+            EventKind::Nak,
+        ],
+        "{events:?}"
+    );
+    assert!(events.iter().all(|e| e.trace.is_none()), "{events:?}");
+    assert_eq!(h.traces(), []);
     h.finish();
 }
 

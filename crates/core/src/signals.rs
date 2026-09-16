@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::events::{Event, EventLog, NoEvents};
 use crate::metrics::Metrics;
-use crate::trace::{RecordTrace, TraceSampling, TraceSink};
+use crate::trace::{RecordTrace, TraceKey, TraceSampling, TraceSink};
 
 /// Metrics, the event log, the trace sink and the share of passing records to trace.
 /// Cheap to clone. A `Metrics` converts into one that logs and traces nothing, so a caller
@@ -76,10 +76,12 @@ impl Signals {
         self.traces.is_some()
     }
 
-    /// The share of passing records traced.
+    /// Whether the trace of a delivery of the record whose key is `key` is kept (ADR 0006):
+    /// never when nothing traces; always when the walk `failed` or the delivery is a
+    /// redelivery; otherwise when the sampled share takes the key.
     #[must_use]
-    pub const fn sampling(&self) -> TraceSampling {
-        self.sampling
+    pub fn keeps(&self, key: TraceKey, failed: bool, delivery_count: u64) -> bool {
+        self.tracing() && (failed || delivery_count > 1 || self.sampling.keeps(key))
     }
 
     /// Log `event`.

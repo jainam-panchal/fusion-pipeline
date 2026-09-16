@@ -93,8 +93,8 @@ impl EventLog for OtlpEventLog {
         }
         if let Some(trace) = event.trace {
             record.set_trace_context(
-                TraceId::from(trace.trace_id.0),
-                SpanId::from(trace.span_id.0),
+                TraceId::from(trace.trace_id.get()),
+                SpanId::from(trace.span_id.get()),
                 None,
             );
         }

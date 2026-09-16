@@ -62,7 +62,24 @@ pub fn start(yaml: &str, workers: usize) -> Harness {
 pub fn start_with(yaml: &str, workers: usize, sinks: MemorySinks, registry: Registry) -> Harness {
     let state = MemoryStateStore::new();
     let factory: Arc<dyn StateStoreFactory> = Arc::new(state.clone());
-    launch(yaml, workers, sinks, registry, state, factory)
+    launch(yaml, workers, sinks, registry, state, factory, true)
+}
+
+/// As [`start`], with nothing tracing, as a binary with no trace endpoint runs:
+/// `Harness::trace_sink` never receives a trace.
+pub fn start_untraced(yaml: &str, workers: usize) -> Harness {
+    let sinks = MemorySinks::new();
+    let state = MemoryStateStore::new();
+    let factory: Arc<dyn StateStoreFactory> = Arc::new(state.clone());
+    launch(
+        yaml,
+        workers,
+        sinks.clone(),
+        registry(&sinks),
+        state,
+        factory,
+        false,
+    )
 }
 
 /// As [`start_with`], with the state store the caller supplies (a real Dragonfly in the
@@ -81,6 +98,7 @@ pub fn start_with_state(
         registry,
         MemoryStateStore::new(),
         factory,
+        true,
     )
 }
 
@@ -91,15 +109,17 @@ fn launch(
     registry: Registry,
     state: MemoryStateStore,
     factory: Arc<dyn StateStoreFactory>,
+    traced: bool,
 ) -> Harness {
     let pipeline = Pipeline::from_yaml(yaml, &registry).expect("pipeline loads");
     let (source, input) = MemorySource::new();
     let recorder = InMemoryRecorder::new();
     let event_log = InMemoryEventLog::new();
     let trace_sink = InMemoryTraceSink::new();
-    let signals = Signals::new(Metrics::new(recorder.clone()))
-        .with_events(event_log.clone())
-        .with_traces(trace_sink.clone(), TraceSampling::default());
+    let mut signals = Signals::new(Metrics::new(recorder.clone())).with_events(event_log.clone());
+    if traced {
+        signals = signals.with_traces(trace_sink.clone(), TraceSampling::default());
+    }
     let engine = Engine::start(pipeline, Box::new(source), workers, signals, factory)
         .expect("engine starts");
     Harness {

@@ -142,7 +142,7 @@ impl Engine {
                         signals: &signals,
                         environment: &environment,
                     };
-                    let mut spans = TraceBuffer::new();
+                    let mut spans = TraceBuffer::new(signals.tracing());
                     for envelope in rx {
                         walker.handle(envelope, &mut spans);
                     }
@@ -231,10 +231,12 @@ impl<'p> Walk<'p, '_> {
             delivery_count: delivery,
             stream_sequence: None,
             message: error.clone(),
-            trace: Some(span.map_or_else(
-                || self.key.delivery_context(delivery),
-                |span| TraceBuffer::context(self.key, delivery, span),
-            )),
+            trace: self.signals.tracing().then(|| {
+                span.map_or_else(
+                    || self.key.delivery_context(delivery),
+                    |span| TraceBuffer::context(self.key, delivery, span),
+                )
+            }),
         });
         self.failure.get_or_insert_with(|| Failure {
             node: node.to_owned(),
@@ -339,8 +341,10 @@ impl<'p> Walker<'p> {
                 delivery_count: delivery,
                 stream_sequence: None,
                 message: String::new(),
-                // A walked redelivery's trace is always kept, so the link resolves.
-                trace: meta.map(|meta| TraceKey::of(meta).delivery_context(delivery)),
+                // A walked redelivery's trace is kept whenever anything traces.
+                trace: meta
+                    .filter(|_| self.signals.tracing())
+                    .map(|meta| TraceKey::of(meta).delivery_context(delivery)),
             });
         }
         let meta = match resolved {
@@ -398,26 +402,23 @@ impl<'p> Walker<'p> {
         }
         let Walk { failure, spans, .. } = walk;
         // The trace of every failed or redelivered walk is kept, so a log line about it
-        // always finds it; of the rest, the sampled share. Nothing is built when nothing
-        // traces.
+        // finds it; of the rest, the sampled share. When nothing traces, no drafts were
+        // taken and no trace is built, and no log line names one.
         let settlement = if failure.is_some() {
             Settlement::Nak
         } else {
             Settlement::Ack
         };
-        if self.signals.tracing()
-            && (failure.is_some() || delivery > 1 || self.signals.sampling().keeps(key))
-        {
-            self.signals.export(spans.finish(&meta, settlement));
+        if self.signals.keeps(key, failure.is_some(), delivery) {
+            self.signals.export(spans.finish(key, &meta, settlement));
         }
         if let Some(failure) = failure {
             self.metrics.source_nak(&tenant);
-            self.log_nak(
-                &tenant,
-                delivery,
-                &failure,
-                Some(key.delivery_context(delivery)),
-            );
+            let trace = self
+                .signals
+                .tracing()
+                .then(|| key.delivery_context(delivery));
+            self.log_nak(&tenant, delivery, &failure, trace);
             ack.nak(None, failure);
         } else {
             // End to end is measured on the ack only: a nakked record comes back and is

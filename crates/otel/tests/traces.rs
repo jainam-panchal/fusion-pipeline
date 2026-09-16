@@ -80,7 +80,7 @@ fn a_kept_trace_exports_a_delivery_span_and_a_span_per_node() {
 
     let names: Vec<&str> = spans.iter().map(|s| s.name.as_ref()).collect();
     assert_eq!(names.len(), 3, "{names:?}");
-    let trace_id = TraceId::from(key.trace_id().0);
+    let trace_id = TraceId::from(key.trace_id().get());
     assert!(spans.iter().all(|s| s.span_context.trace_id() == trace_id));
     assert!(spans.iter().all(|s| s.span_context.is_sampled()));
 
@@ -93,7 +93,7 @@ fn a_kept_trace_exports_a_delivery_span_and_a_span_per_node() {
     let delivery = find("delivery");
     assert_eq!(
         delivery.span_context.span_id(),
-        SpanId::from(key.delivery_span_id(2).0)
+        SpanId::from(key.delivery_span_id(2).get())
     );
     assert_eq!(delivery.parent_span_id, SpanId::INVALID);
     assert_eq!((delivery.start_time, delivery.end_time), (at(0), at(100)));
@@ -106,7 +106,7 @@ fn a_kept_trace_exports_a_delivery_span_and_a_span_per_node() {
     let filter = find("keep_errors");
     assert_eq!(
         filter.span_context.span_id(),
-        SpanId::from(key.span_id(2, 1).0)
+        SpanId::from(key.span_id(2, 1).get())
     );
     assert_eq!(filter.parent_span_id, delivery.span_context.span_id());
     assert_eq!((filter.start_time, filter.end_time), (at(10), at(15)));

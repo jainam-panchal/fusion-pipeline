@@ -113,8 +113,8 @@ fn a_failing_record_is_traced_with_a_span_per_node_on_both_branches() {
         "{bad:?}"
     );
 
-    let ids: BTreeSet<u64> = std::iter::once(trace.span_id.0)
-        .chain(trace.spans.iter().map(|s| s.span_id.0))
+    let ids: BTreeSet<u64> = std::iter::once(trace.span_id.get())
+        .chain(trace.spans.iter().map(|s| s.span_id.get()))
         .collect();
     assert_eq!(ids.len(), 4, "span ids are distinct");
     assert!(!ids.contains(&0), "span ids are never zero");
@@ -139,7 +139,7 @@ fn about_one_percent_of_passing_records_are_traced_and_always_the_same_ones() {
         assert!(
             traces
                 .iter()
-                .all(|t| t.trace_id.0 != 0 && t.settlement == Settlement::Ack),
+                .all(|t| t.trace_id.get() != 0 && t.settlement == Settlement::Ack),
             "no zero trace id, only acks"
         );
         let ids: BTreeSet<u64> = traces.iter().map(|t| t.record_id.0).collect();
@@ -159,8 +159,8 @@ fn about_one_percent_of_passing_records_are_traced_and_always_the_same_ones() {
 
 #[test]
 fn record_id_zero_has_a_valid_trace_id() {
-    assert_ne!(key(0).trace_id().0, 0);
-    assert_ne!(key(0).delivery_span_id(1).0, 0);
+    assert_ne!(key(0).trace_id().get(), 0);
+    assert_ne!(key(0).delivery_span_id(1).get(), 0);
 }
 
 #[test]

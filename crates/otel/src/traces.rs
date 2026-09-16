@@ -125,7 +125,7 @@ fn node_attributes(trace: &RecordTrace, span: &NodeSpan) -> Vec<KeyValue> {
 
 impl TraceSink for OtlpTraceSink {
     fn export(&self, trace: RecordTrace) {
-        let trace_id = TraceId::from(trace.trace_id.0);
+        let trace_id = TraceId::from(trace.trace_id.get());
         for span in &trace.spans {
             let status = if span.outcome == SpanOutcome::Error {
                 Status::error(span.error.clone().unwrap_or_default())
@@ -135,8 +135,8 @@ impl TraceSink for OtlpTraceSink {
             self.processor.on_end(self.span(
                 trace_id,
                 Span {
-                    id: span.span_id.0,
-                    parent: SpanId::from(span.parent_span_id.0),
+                    id: span.span_id.get(),
+                    parent: SpanId::from(span.parent_span_id.get()),
                     name: Cow::Owned(span.node.clone()),
                     start: span.start,
                     end: span.end,
@@ -152,7 +152,7 @@ impl TraceSink for OtlpTraceSink {
         self.processor.on_end(self.span(
             trace_id,
             Span {
-                id: trace.span_id.0,
+                id: trace.span_id.get(),
                 parent: SpanId::INVALID,
                 name: Cow::Borrowed("delivery"),
                 start: trace.start,

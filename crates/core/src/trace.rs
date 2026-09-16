@@ -39,7 +39,15 @@ const SPAN_SALT: u64 = 0x7370_616e_5f69_6421;
 /// A 128-bit trace id, never zero. Displays as 32 lowercase hex digits, as Tempo and Loki
 /// write it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TraceId(pub u128);
+pub struct TraceId(u128);
+
+impl TraceId {
+    /// The id as a number.
+    #[must_use]
+    pub const fn get(self) -> u128 {
+        self.0
+    }
+}
 
 impl fmt::Display for TraceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -49,7 +57,15 @@ impl fmt::Display for TraceId {
 
 /// A 64-bit span id, never zero. Displays as 16 lowercase hex digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SpanId(pub u64);
+pub struct SpanId(u64);
+
+impl SpanId {
+    /// The id as a number.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 impl fmt::Display for SpanId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -248,14 +264,6 @@ pub trait TraceSink: Send + Sync {
     fn export(&self, trace: RecordTrace);
 }
 
-/// Discards every trace.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoTraces;
-
-impl TraceSink for NoTraces {
-    fn export(&self, _: RecordTrace) {}
-}
-
 /// A [`TraceSink`] that keeps every trace for a test to read back.
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryTraceSink {
@@ -304,26 +312,42 @@ struct Draft<'p> {
     detail: Detail,
 }
 
+/// The most drafts a buffer keeps room for between walks: a walk that split into more gives
+/// the memory back when it ends.
+const KEPT_CAPACITY: usize = 256;
+
 /// A worker's span drafts for the record it is walking, cleared and reused for the next.
+/// When nothing traces it records nothing and reads no clock; its handles are then only
+/// counters.
 #[derive(Debug)]
 pub(crate) struct TraceBuffer<'p> {
+    tracing: bool,
     started: Instant,
     started_at: SystemTime,
     drafts: Vec<Draft<'p>>,
+    /// Handles given out this walk, which is the draft count when tracing.
+    opened: usize,
 }
 
 impl<'p> TraceBuffer<'p> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(tracing: bool) -> Self {
         Self {
+            tracing,
             started: Instant::now(),
             started_at: SystemTime::now(),
             drafts: Vec::new(),
+            opened: 0,
         }
     }
 
     /// Start a new walk: forget the last one and anchor the clock.
     pub(crate) fn begin(&mut self) {
+        self.opened = 0;
+        if !self.tracing {
+            return;
+        }
         self.drafts.clear();
+        self.drafts.shrink_to(KEPT_CAPACITY);
         self.started = Instant::now();
         self.started_at = SystemTime::now();
     }
@@ -331,6 +355,11 @@ impl<'p> TraceBuffer<'p> {
     /// Open the span of `node`, reached from the span `parent` (`None` for the source).
     /// Returns its handle for [`TraceBuffer::close`] and for its consumers' parent.
     pub(crate) fn open(&mut self, node: &'p str, parent: Option<usize>, start: Instant) -> usize {
+        let handle = self.opened;
+        self.opened += 1;
+        if !self.tracing {
+            return handle;
+        }
         self.drafts.push(Draft {
             node,
             parent,
@@ -339,7 +368,7 @@ impl<'p> TraceBuffer<'p> {
             outcome: SpanOutcome::Pass,
             detail: Detail::None,
         });
-        self.drafts.len() - 1
+        handle
     }
 
     /// Close the span `handle` at `end` with what the node did.
@@ -381,9 +410,13 @@ impl<'p> TraceBuffer<'p> {
         }
     }
 
-    /// The kept trace of this walk.
-    pub(crate) fn finish(&mut self, meta: &Meta, settlement: Settlement) -> RecordTrace {
-        let key = TraceKey::of(meta);
+    /// The kept trace of this walk, of the record `meta` describes and whose key is `key`.
+    pub(crate) fn finish(
+        &mut self,
+        key: TraceKey,
+        meta: &Meta,
+        settlement: Settlement,
+    ) -> RecordTrace {
         let delivery = meta.delivery_count;
         let root = key.delivery_span_id(delivery);
         let now = Instant::now();
