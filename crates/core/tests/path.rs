@@ -298,17 +298,86 @@ fn write_of_wrong_type_is_refused_and_leaves_the_record_unchanged() {
 }
 
 #[test]
-fn write_of_array_or_object_under_a_map_key_is_refused() {
+fn a_map_key_takes_any_json_value_since_ingest_does_not_flatten() {
     let mut record = record();
-    let before = record.clone();
-    for value in [json!({"a": 1}), json!([1, 2])] {
-        let err = write(&mut record, "attributes.x", value.clone()).expect_err("maps are flat");
-        assert!(
-            matches!(err, PathError::WrongType { ref field, .. } if field == "attributes.x"),
-            "{value}: {err}"
+    for value in [json!({"a": 1}), json!([1, 2]), json!(null), json!("x")] {
+        write(&mut record, "attributes.x", value.clone()).expect("a map key takes any value");
+        assert_eq!(record.attributes.get("x"), Some(&value));
+    }
+}
+
+#[test]
+fn accepts_answers_exactly_what_write_would_without_a_record() {
+    let cases = [
+        ("id", json!(7)),
+        ("id", json!("7")),
+        ("id", json!(-1)),
+        ("kind", json!("span")),
+        ("kind", json!("LOG")),
+        ("kind", json!(null)),
+        ("severity_number", json!(4)),
+        ("severity_number", json!(4.5)),
+        ("severity_number", json!(i64::MAX)),
+        ("severity_text", json!(3)),
+        ("time_unix_nano", json!(5)),
+        ("time_unix_nano", json!(null)),
+        ("body", json!({"a": [1]})),
+        ("trace_id", json!(true)),
+        ("attributes.x", json!([1])),
+        ("meta.tenant", json!("beta")),
+    ];
+    for (path, value) in cases {
+        let parsed = FieldPath::parse(path).expect("parses");
+        let mut record = record();
+        let written = parsed.write(&mut record, value.clone());
+        assert_eq!(
+            parsed.accepts(&value),
+            written,
+            "{path} <- {value}: accepts and write agree"
         );
     }
-    assert_eq!(record, before);
+}
+
+#[test]
+fn writable_is_every_record_field_and_no_meta_path() {
+    for path in ["id", "kind", "body", "attributes.x", "resource.tenant.id"] {
+        FieldPath::parse(path)
+            .expect("parses")
+            .writable()
+            .unwrap_or_else(|e| panic!("{path}: {e}"));
+    }
+    for path in [
+        "meta.id",
+        "meta.tenant",
+        "meta.ingestion_time",
+        "meta.delivery_count",
+    ] {
+        assert_eq!(
+            FieldPath::parse(path).expect("parses").writable(),
+            Err(PathError::ReadOnly {
+                path: path.to_owned()
+            })
+        );
+    }
+}
+
+#[test]
+fn a_path_can_be_built_from_a_field_name_or_a_map_and_any_key() {
+    assert_eq!(
+        FieldPath::top_level("severity_text"),
+        Some(FieldPath::parse("severity_text").expect("parses"))
+    );
+    for name in ["attributes", "meta", "nope", ""] {
+        assert_eq!(FieldPath::top_level(name), None, "{name}");
+    }
+    assert_eq!(
+        FieldPath::under("attributes", "Event ID.code"),
+        Some(FieldPath::parse(r#"attributes."Event ID".code"#).expect("parses"))
+    );
+    assert_eq!(FieldPath::under("body", "x"), None);
+    assert!(FieldPath::is_map("scope"));
+    assert!(!FieldPath::is_map("meta"));
+    assert!(!FieldPath::is_map("body"));
 }
 
 #[test]

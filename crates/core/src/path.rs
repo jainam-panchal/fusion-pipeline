@@ -228,6 +228,39 @@ enum Target {
     Meta(MetaField),
 }
 
+/// A value the write rules accepted, in the type its field stores. Storing it cannot fail.
+enum Typed<'p> {
+    Key(MapField, &'p str, Value),
+    Id(Option<RecordId>),
+    Kind(Kind),
+    TimeUnixNano(Option<u64>),
+    ObservedTimeUnixNano(Option<u64>),
+    SeverityText(Option<String>),
+    SeverityNumber(Option<i32>),
+    Body(Value),
+    TraceId(Option<String>),
+    SpanId(Option<String>),
+}
+
+impl Typed<'_> {
+    fn store(self, record: &mut Record) {
+        match self {
+            Self::Key(map, key, value) => {
+                map.get_mut(record).insert(key.to_owned(), value);
+            }
+            Self::Id(id) => record.id = id,
+            Self::Kind(kind) => record.kind = kind,
+            Self::TimeUnixNano(n) => record.time_unix_nano = n,
+            Self::ObservedTimeUnixNano(n) => record.observed_time_unix_nano = n,
+            Self::SeverityText(s) => record.severity_text = s,
+            Self::SeverityNumber(n) => record.severity_number = n,
+            Self::Body(value) => record.body = Some(value),
+            Self::TraceId(s) => record.trace_id = s,
+            Self::SpanId(s) => record.span_id = s,
+        }
+    }
+}
+
 /// A number as read from a record. Two integers compare exactly; when either side is a
 /// float both are compared as `f64`, which is lossy above 2^53 and never equal for NaN.
 #[derive(Debug, Clone, Copy)]
@@ -627,6 +660,31 @@ impl FieldPath {
         }
     }
 
+    /// The path of the top-level record field spelled `name`, as `parse(name)` gives it;
+    /// `None` for a map, for `meta`, and for anything that is not a record field. For a
+    /// caller that holds a record as named values rather than as path text.
+    #[must_use]
+    pub fn top_level(name: &str) -> Option<Self> {
+        Field::parse(name).map(|field| Self {
+            target: Target::Field(field),
+        })
+    }
+
+    /// The path of `key` under the map spelled `map` (`attributes`, `resource` or `scope`),
+    /// whatever characters `key` holds; `None` when `map` is not one of the three.
+    #[must_use]
+    pub fn under(map: &str, key: &str) -> Option<Self> {
+        MapField::parse(map).map(|map| Self {
+            target: Target::Key(map, key.to_owned()),
+        })
+    }
+
+    /// Whether `name` is one of the three maps.
+    #[must_use]
+    pub fn is_map(name: &str) -> bool {
+        MapField::parse(name).is_some()
+    }
+
     /// The flat map key when the path names a key of `attributes`, `resource` or `scope`.
     #[must_use]
     pub fn map_key(&self) -> Option<&str> {
@@ -687,44 +745,68 @@ impl FieldPath {
         }
     }
 
+    /// Whether a write through this path can happen at all: every record field is payload
+    /// and writable within its type (ADR 0005); a meta path is the pipeline's.
+    ///
+    /// # Errors
+    ///
+    /// [`PathError::ReadOnly`] for a meta path.
+    pub fn writable(&self) -> Result<(), PathError> {
+        match self.target {
+            Target::Meta(_) => Err(self.read_only()),
+            Target::Field(_) | Target::Key(..) => Ok(()),
+        }
+    }
+
+    /// Core's write rules for `value` through this path, without a record: `Ok` exactly when
+    /// [`FieldPath::write`] would store it, and otherwise the error `write` would give. A
+    /// stage that needs to know a type at load asks this instead of writing onto an empty
+    /// record.
+    ///
+    /// # Errors
+    ///
+    /// As [`FieldPath::write`].
+    pub fn accepts(&self, value: &Value) -> Result<(), PathError> {
+        self.typed(value.clone()).map(drop)
+    }
+
     /// Write `value` to the field, creating or replacing it.
     ///
-    /// `null` clears an optional top-level field and is stored as-is under a map key. Every
-    /// field is payload (ADR 0005), `id` and `kind` included; they only have types.
+    /// `null` clears an optional top-level field and is stored as-is under a map key. A map
+    /// key takes any JSON value: the flat-map rule is the source's contract, unenforced at
+    /// ingest, and a record must be able to leave the way it came. Every record field is
+    /// payload (ADR 0005), `id` and `kind` included; they only have types.
     ///
     /// # Errors
     ///
     /// [`PathError::WrongType`] when a typed field is offered the wrong JSON type (`id` and
     /// the time fields take an integer in `u64`, `kind` one of `log`, `metric` or `span`,
     /// `severity_number` an integer in `i32`, `severity_text`, `trace_id` and `span_id` a
-    /// string) or a map key is offered an array or object; [`PathError::ReadOnly`] for a meta
-    /// path. The record is unchanged on error.
+    /// string); [`PathError::ReadOnly`] for a meta path. The record is unchanged on error.
     pub fn write(&self, record: &mut Record, value: Value) -> Result<(), PathError> {
+        self.typed(value)?.store(record);
+        Ok(())
+    }
+
+    /// `value` as the field stores it, or why the field refuses it. The one place a field's
+    /// type is spelled.
+    fn typed(&self, value: Value) -> Result<Typed<'_>, PathError> {
         let field = match &self.target {
-            Target::Key(map, key) => {
-                if matches!(value, Value::Array(_) | Value::Object(_)) {
-                    return Err(self.wrong_type("a scalar", &value));
-                }
-                map.get_mut(record).insert(key.clone(), value);
-                return Ok(());
-            }
+            Target::Key(map, key) => return Ok(Typed::Key(*map, key, value)),
             Target::Meta(_) => return Err(self.read_only()),
             Target::Field(field) => *field,
         };
-        match field {
-            Field::Id => record.id = self.expect_u64(value)?.map(RecordId),
-            Field::Kind => record.kind = self.expect_kind(&value)?,
-            Field::TimeUnixNano => record.time_unix_nano = self.expect_u64(value)?,
-            Field::ObservedTimeUnixNano => {
-                record.observed_time_unix_nano = self.expect_u64(value)?;
-            }
-            Field::SeverityText => record.severity_text = self.expect_string(value)?,
-            Field::SeverityNumber => record.severity_number = self.expect_i32(value)?,
-            Field::Body => record.body = Some(value),
-            Field::TraceId => record.trace_id = self.expect_string(value)?,
-            Field::SpanId => record.span_id = self.expect_string(value)?,
-        }
-        Ok(())
+        Ok(match field {
+            Field::Id => Typed::Id(self.expect_u64(value)?.map(RecordId)),
+            Field::Kind => Typed::Kind(self.expect_kind(&value)?),
+            Field::TimeUnixNano => Typed::TimeUnixNano(self.expect_u64(value)?),
+            Field::ObservedTimeUnixNano => Typed::ObservedTimeUnixNano(self.expect_u64(value)?),
+            Field::SeverityText => Typed::SeverityText(self.expect_string(value)?),
+            Field::SeverityNumber => Typed::SeverityNumber(self.expect_i32(value)?),
+            Field::Body => Typed::Body(value),
+            Field::TraceId => Typed::TraceId(self.expect_string(value)?),
+            Field::SpanId => Typed::SpanId(self.expect_string(value)?),
+        })
     }
 
     /// Remove the field, returning the old value, or `None` when it was absent. Every record

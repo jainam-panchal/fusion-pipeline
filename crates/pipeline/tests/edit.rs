@@ -283,7 +283,7 @@ fn an_absent_source_leaves_the_record_and_counts_absent_for_that_op_and_field() 
 fn a_target_that_refuses_the_value_leaves_the_record_and_counts_type() {
     let yaml = config(
         "",
-        "      - copy: { from: body, to: severity_number }\n      - rename: { from: body, to: attributes.raw }\n      - hash: { field: attributes.list }\n",
+        "      - copy: { from: body, to: severity_number }\n      - hash: { field: attributes.list }\n",
     );
     let before = json!({"body": {"nested": true}, "attributes": {"list": [1, 2]}});
     let (out, h) = run(&yaml, 1, vec![record(1, before.clone())]);
@@ -294,11 +294,6 @@ fn a_target_that_refuses_the_value_leaves_the_record_and_counts_type() {
         "a composite cannot go into severity_number"
     );
     assert_eq!(
-        h.counter(Metric::EditUnapplied, &unapplied("rename", "body", "type")),
-        1,
-        "a composite cannot go under a map key, and body is still there"
-    );
-    assert_eq!(
         h.counter(
             Metric::EditUnapplied,
             &unapplied("hash", "attributes.list", "type")
@@ -306,6 +301,19 @@ fn a_target_that_refuses_the_value_leaves_the_record_and_counts_type() {
         1
     );
     assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
+    h.finish();
+}
+
+#[test]
+fn a_composite_body_renames_under_a_map_key_since_core_takes_any_value_there() {
+    let yaml = config("", "      - rename: { from: body, to: attributes.raw }\n");
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": {"nested": true}}))]);
+    assert_eq!(out[0].body, None);
+    assert_eq!(out[0].attributes.get("raw"), Some(&json!({"nested": true})));
+    assert_eq!(
+        h.counter(Metric::EditUnapplied, &unapplied("rename", "body", "type")),
+        0
+    );
     h.finish();
 }
 
