@@ -7,7 +7,7 @@ mod common;
 use common::{WAIT, registry, start_with};
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::memory::{AckOutcome, MemorySinks};
-use fusion_core::meta::{Arrival, unix_nanos_now};
+use fusion_core::meta::{Arrival, IngestionTime, unix_nanos_now};
 use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, Stage, StageOutput};
@@ -43,6 +43,13 @@ name: ingest
 nodes:
   - id: reveal
     type: reveal
+  - id: out
+    type: sink.memory
+"#;
+
+const PASS_THROUGH: &str = r#"
+name: ingest
+nodes:
   - id: out
     type: sink.memory
 "#;
@@ -90,24 +97,34 @@ fn meta_of(record: &Record, key: &str) -> Value {
 }
 
 #[test]
-fn the_records_own_tenant_and_time_come_before_what_the_transport_says() {
+fn the_transports_tenant_and_time_come_before_the_records() {
     let (out, h) = reveal(
         REVEAL,
         record(&json!({
             "id": 7,
             "observed_time_unix_nano": 5_000_000_000_u64,
-            "resource": {"tenant.id": "acme"}
+            "resource": {"tenant.id": "beta"}
         })),
         Arrival {
-            tenant: Some("from-subject".to_owned()),
-            ingestion_time: Some(9_000_000_000),
+            tenant: Some("acme".to_owned()),
+            ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
             delivery_count: 3,
         },
     );
     assert_eq!(meta_of(&out[0], "record_id"), json!(7));
     assert_eq!(meta_of(&out[0], "tenant"), json!("acme"));
-    assert_eq!(meta_of(&out[0], "ingestion_time"), json!(5_000_000_000_u64));
+    assert_eq!(meta_of(&out[0], "ingestion_time"), json!(9_000_000_000_u64));
     assert_eq!(meta_of(&out[0], "delivery_count"), json!(3));
+    assert_eq!(
+        out[0].resource.get("tenant.id"),
+        Some(&json!("beta")),
+        "the producer's tenant stays in the payload"
+    );
+    assert_eq!(
+        out[0].observed_time_unix_nano,
+        Some(5_000_000_000),
+        "and so does its time"
+    );
     assert_eq!(
         h.counter(
             Metric::RecordsOut,
@@ -115,32 +132,85 @@ fn the_records_own_tenant_and_time_come_before_what_the_transport_says() {
         ),
         1
     );
+    assert_eq!(
+        h.counter(
+            Metric::RecordsOut,
+            &[("tenant", "beta"), ("stage", "reveal")]
+        ),
+        0
+    );
     h.finish();
 }
 
 #[test]
-fn a_record_without_a_tenant_or_a_time_takes_the_transports() {
+fn a_record_without_a_tenant_or_a_time_leaves_without_them() {
     let (out, h) = reveal(
         REVEAL,
         record(&json!({"id": 7})),
         Arrival {
-            tenant: Some("from-subject".to_owned()),
-            ingestion_time: Some(9_000_000_000),
+            tenant: Some("acme".to_owned()),
+            ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
             delivery_count: 1,
         },
     );
-    assert_eq!(meta_of(&out[0], "tenant"), json!("from-subject"));
+    assert_eq!(meta_of(&out[0], "tenant"), json!("acme"));
     assert_eq!(meta_of(&out[0], "ingestion_time"), json!(9_000_000_000_u64));
-    assert_eq!(
-        out[0].observed_time_unix_nano, None,
-        "the payload is untouched"
+    assert_eq!(out[0].observed_time_unix_nano, None, "nothing is stamped");
+    assert_eq!(out[0].resource.get("tenant.id"), None, "nothing is stamped");
+    h.finish();
+}
+
+#[test]
+fn the_sink_receives_the_meta_beside_the_record_it_never_entered() {
+    let sinks = MemorySinks::new();
+    let h = start_with(PASS_THROUGH, 1, sinks.clone(), registry(&sinks));
+    let sent = record(&json!({"id": 7, "body": "disk full"}));
+    let probe = h.source.push_arrival(
+        sent.clone(),
+        Arrival {
+            tenant: Some("acme".to_owned()),
+            ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
+            delivery_count: 2,
+        },
     );
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    let written = h.sinks.written("out");
+    assert_eq!(written.len(), 1);
     assert_eq!(
-        h.counter(
-            Metric::RecordsOut,
-            &[("tenant", "from-subject"), ("stage", "reveal")]
-        ),
-        1
+        written[0].record, sent,
+        "the record leaves exactly as it came"
+    );
+    assert_eq!(&*written[0].meta.tenant, "acme");
+    assert_eq!(
+        written[0].meta.ingestion_time,
+        IngestionTime::Reported(9_000_000_000)
+    );
+    assert_eq!(written[0].meta.delivery_count, 2);
+    assert_eq!(written[0].meta.record_id.0, 7);
+    h.finish();
+}
+
+#[test]
+fn a_clock_time_an_upstream_pipeline_passed_on_stays_a_clock_time() {
+    let sinks = MemorySinks::new();
+    let h = start_with(PASS_THROUGH, 1, sinks.clone(), registry(&sinks));
+    let probe = h.source.push_arrival(
+        record(&json!({"id": 7, "observed_time_unix_nano": 5_000_000_000_u64})),
+        Arrival {
+            ingestion_time: Some(IngestionTime::Clock(9_000_000_000)),
+            ..Arrival::default()
+        },
+    );
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(
+        h.sinks.written("out")[0].meta.ingestion_time,
+        IngestionTime::Clock(9_000_000_000),
+        "not replaced by the record's time, and not marked reported"
+    );
+    assert!(
+        h.samples(Metric::EndToEnd, &[("tenant", "unknown")])
+            .is_empty(),
+        "end to end is not measured from a clock reading"
     );
     h.finish();
 }
@@ -171,11 +241,11 @@ fn a_redelivery_is_counted_under_the_tenant_every_other_metric_of_the_record_car
         },
     );
     assert_eq!(
-        h.counter(Metric::SourceRedeliveries, &[("tenant", "beta")]),
+        h.counter(Metric::SourceRedeliveries, &[("tenant", "acme")]),
         1
     );
     assert_eq!(
-        h.counter(Metric::SourceRedeliveries, &[("tenant", "acme")]),
+        h.counter(Metric::SourceRedeliveries, &[("tenant", "beta")]),
         0
     );
     h.finish();

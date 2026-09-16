@@ -2,10 +2,13 @@
 //!
 //! A source says what its transport knows about a message in an [`Arrival`]; the engine
 //! resolves that and the record, once, at intake, into a [`Meta`] with [`Meta::resolve`]
-//! and hands it to every stage read-only. That is the one place the pipeline reads the
+//! and hands it to every stage read-only. The arrival comes first and the record second:
+//! the transport's tenant is authenticated and its time is the pipeline's, while the
+//! record's fields are the producer's word. That is the one place the pipeline reads the
 //! payload for itself. Every decision after it (metric labels, state keys, windows) reads
 //! `Meta`, so a stage rewriting any record field changes the data the sink writes and
-//! nothing else.
+//! nothing else. `Meta` is never written into the record: a sink carries it beside the
+//! record, as the NATS sink's pipeline headers do.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,11 +23,13 @@ pub const UNKNOWN_TENANT: &str = "unknown";
 /// engine to the record and then to its defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arrival {
-    /// The tenant the transport names (the NATS subject's).
+    /// The tenant the transport names (the NATS subject's, else an upstream pipeline's
+    /// `Fusion-Tenant` header).
     pub tenant: Option<String>,
-    /// When the message entered the transport (the JetStream publish time), in
-    /// nanoseconds since the Unix epoch.
-    pub ingestion_time: Option<u64>,
+    /// When the message entered the pipeline's transport: an upstream pipeline's
+    /// `Fusion-Ingestion-Time` with its kind, else the JetStream publish time as
+    /// [`IngestionTime::Reported`].
+    pub ingestion_time: Option<IngestionTime>,
     /// How many times the transport has delivered this message, this one included.
     pub delivery_count: u64,
 }
@@ -47,22 +52,22 @@ pub struct Meta {
     pub record_id: RecordId,
     /// The tenant every metric label and state key uses: see [`Meta::tenant_of`].
     pub tenant: Arc<str>,
-    /// When the record entered: the record's `observed_time_unix_nano`, else its
-    /// `time_unix_nano`, else the transport's, else the worker clock.
+    /// When the record entered: the arrival's, else the record's
+    /// `observed_time_unix_nano`, else its `time_unix_nano`, else the worker clock.
     pub ingestion_time: IngestionTime,
     /// How many times the message has been delivered, this one included.
     pub delivery_count: u64,
 }
 
-/// A record's ingestion time, and whether anyone reported it.
+/// A record's ingestion time, and whether anyone reported it. The two are never combined:
+/// a clock reading stays a clock reading, across stages and across pipelines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestionTime {
-    /// The record (its producer, or a source that wrote the field) or its transport
-    /// reported when it entered, in nanoseconds since the Unix epoch.
+    /// A transport or the record said when it entered, in nanoseconds since the Unix epoch.
     Reported(u64),
-    /// Neither did, and this is the worker clock at intake, in nanoseconds since the Unix
-    /// epoch. Only a source that fills nothing (the in-memory one tests use) gets here; end
-    /// to end is not measured against it.
+    /// Neither did, and this is a worker clock at intake, in nanoseconds since the Unix
+    /// epoch. Only a source that fills nothing (the in-memory one tests use) gets here, or a
+    /// pipeline downstream of one; end to end is not measured against it.
     Clock(u64),
 }
 
@@ -74,7 +79,30 @@ impl IngestionTime {
             Self::Reported(nanos) | Self::Clock(nanos) => nanos,
         }
     }
+
+    /// `reported` or `clock`, the spelling of the `Fusion-Ingestion-Time-Kind` header.
+    #[must_use]
+    pub const fn kind_name(self) -> &'static str {
+        match self {
+            Self::Reported(_) => REPORTED,
+            Self::Clock(_) => CLOCK,
+        }
+    }
+
+    /// The time `unix_nanos` with the kind spelled `kind`, the inverse of
+    /// [`IngestionTime::kind_name`]; `None` for any other spelling.
+    #[must_use]
+    pub fn from_kind_name(kind: &str, unix_nanos: u64) -> Option<Self> {
+        match kind {
+            REPORTED => Some(Self::Reported(unix_nanos)),
+            CLOCK => Some(Self::Clock(unix_nanos)),
+            _ => None,
+        }
+    }
 }
+
+const REPORTED: &str = "reported";
+const CLOCK: &str = "clock";
 
 /// A record the engine does not walk. `tenant` is the one [`Meta::tenant_of`] gives it, so
 /// the rejection is counted where the record's other metrics would have been.
@@ -97,7 +125,8 @@ pub enum Rejection {
 
 impl Meta {
     /// The pipeline's view of `record` as it arrived with `arrival`, or why it is not
-    /// walked: a record without an id, or of a kind other than `log`.
+    /// walked: a record without an id, or of a kind other than `log`. The arrival's tenant
+    /// and time come first; the record's are read only when the arrival names none.
     ///
     /// # Errors
     ///
@@ -114,14 +143,15 @@ impl Meta {
         if record.kind != Kind::Log {
             return Err(reject(Rejection::NotLog));
         }
-        let ingestion_time = record
-            .observed_time_unix_nano
-            .or(record.time_unix_nano)
-            .or(arrival.ingestion_time)
-            .map_or_else(
-                || IngestionTime::Clock(unix_nanos_now()),
-                IngestionTime::Reported,
-            );
+        let ingestion_time = arrival.ingestion_time.unwrap_or_else(|| {
+            record
+                .observed_time_unix_nano
+                .or(record.time_unix_nano)
+                .map_or_else(
+                    || IngestionTime::Clock(unix_nanos_now()),
+                    IngestionTime::Reported,
+                )
+        });
         Ok(Self {
             record_id,
             tenant,
@@ -130,13 +160,14 @@ impl Meta {
         })
     }
 
-    /// The tenant the pipeline gives `record`: its `resource.tenant.id` when that is a
-    /// string, else the one the transport names, else [`UNKNOWN_TENANT`].
+    /// The tenant the pipeline gives `record`: the one the transport names, else the
+    /// record's `resource.tenant.id` when that is a string, else [`UNKNOWN_TENANT`].
     #[must_use]
     pub fn tenant_of(record: &Record, arrival: &Arrival) -> Arc<str> {
-        record
-            .tenant()
-            .or(arrival.tenant.as_deref())
+        arrival
+            .tenant
+            .as_deref()
+            .or_else(|| record.tenant())
             .unwrap_or(UNKNOWN_TENANT)
             .into()
     }

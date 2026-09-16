@@ -123,10 +123,13 @@ impl Record {
         serde_json::to_string(self)
     }
 
+    /// The `resource` key that carries the producer's tenant.
+    pub const TENANT_KEY: &'static str = "tenant.id";
+
     /// The producer's tenant, `resource.tenant.id` when it is a string. The engine reads it
-    /// once, at intake, into the record's `Meta`.
+    /// at intake only for a record whose arrival names no tenant.
     #[must_use]
     pub fn tenant(&self) -> Option<&str> {
-        self.resource.get("tenant.id").and_then(Value::as_str)
+        self.resource.get(Self::TENANT_KEY).and_then(Value::as_str)
     }
 }

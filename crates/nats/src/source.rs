@@ -36,7 +36,7 @@ use std::time::Duration;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{AckKind, message::Acker};
 use fusion_core::io::{AckHandle, Envelope, Intake, Source, SourceError};
-use fusion_core::meta::{Arrival, UNKNOWN_TENANT};
+use fusion_core::meta::{Arrival, IngestionTime, UNKNOWN_TENANT};
 use fusion_core::metrics::Metrics;
 use fusion_core::record::Record;
 use futures::StreamExt;
@@ -139,7 +139,7 @@ impl NatsSource {
             };
             let arrival = Arrival {
                 tenant: subject_tenant.map(str::to_owned),
-                ingestion_time: published,
+                ingestion_time: published.map(IngestionTime::Reported),
                 delivery_count: delivered,
             };
             let ack = Box::new(NatsAck {

@@ -677,3 +677,34 @@ fn a_time_field_rewritten_upstream_does_not_move_the_window_of_the_records_inges
         h.finish();
     });
 }
+
+#[test]
+fn the_window_follows_the_transports_time_not_the_producers_clock() {
+    use fusion_core::meta::{Arrival, IngestionTime};
+
+    for_each_worker_count(|workers| {
+        let h = start(DEDUPE_BODY, workers);
+
+        // The producer's clock says all three happened at the same instant; the transport
+        // says they entered 20 s and then 5 s apart. The transport decides: the first two
+        // are past the 10 s window, the third is the second's repeat.
+        for (id, entered_s) in [(101, 1_000), (102, 1_020), (103, 1_025)] {
+            let pushed = h.source.push_arrival(
+                record_at(id, "disk full", 7),
+                Arrival {
+                    ingestion_time: Some(IngestionTime::Reported(entered_s * 1_000_000_000)),
+                    ..Arrival::default()
+                },
+            );
+            assert_eq!(
+                pushed.wait(WAIT),
+                Some(AckOutcome::Ack),
+                "workers={workers}"
+            );
+        }
+
+        assert_eq!(h.ids("out"), vec![101, 102], "workers={workers}");
+        assert_eq!(stored_holder(&h), holder(102, 1_020), "workers={workers}");
+        h.finish();
+    });
+}

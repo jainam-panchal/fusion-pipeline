@@ -2,7 +2,8 @@
 //!
 //! [`MemorySource`] forwards records pushed through a [`MemoryInput`]; every push returns an
 //! [`AckProbe`] that observes how the engine settled the record. [`MemorySinks`] is a
-//! [`SinkFactory`] whose sinks collect records per node id for later inspection.
+//! [`SinkFactory`] whose sinks collect outgoing records, each record with its `Meta`, per
+//! node id for later inspection.
 //! [`MemoryStateStore`] is the state store: one shared map behind every connection it
 //! opens, a clock the test advances by hand, and errors on demand.
 
@@ -11,8 +12,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::{ConfigError, NodeConfig};
-use crate::io::{AckHandle, Envelope, Intake, Sink, SinkError, Source, SourceError};
-use crate::meta::Arrival;
+use crate::io::{AckHandle, Envelope, Intake, Outgoing, Sink, SinkError, Source, SourceError};
+use crate::meta::{Arrival, Meta};
 use crate::record::Record;
 use crate::registry::SinkFactory;
 use crate::state::{StateError, StateStore, StateStoreFactory};
@@ -153,13 +154,22 @@ impl Source for MemorySource {
     }
 }
 
-/// Collects records per sink node id. Register it under a `sink.*` type name.
+/// A record a memory sink accepted, with the `Meta` it was written beside.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Written {
+    /// The pipeline's view of the record.
+    pub meta: Meta,
+    /// The record as the sink received it.
+    pub record: Record,
+}
+
+/// Collects outgoing records per sink node id. Register it under a `sink.*` type name.
 ///
 /// Any sink can be made to fail on demand with [`MemorySinks::fail_writes_to`], to exercise
 /// the engine's nak path.
 #[derive(Debug, Clone, Default)]
 pub struct MemorySinks {
-    records: Arc<Mutex<BTreeMap<String, Vec<Record>>>>,
+    written: Arc<Mutex<BTreeMap<String, Vec<Written>>>>,
     failing: Arc<Mutex<BTreeSet<String>>>,
 }
 
@@ -183,7 +193,16 @@ impl MemorySinks {
     /// Records written to the sink node `node_id`, in arrival order.
     #[must_use]
     pub fn records(&self, node_id: &str) -> Vec<Record> {
-        lock_unpoisoned(&self.records)
+        self.written(node_id)
+            .into_iter()
+            .map(|written| written.record)
+            .collect()
+    }
+
+    /// Records written to the sink node `node_id`, each with its `Meta`, in arrival order.
+    #[must_use]
+    pub fn written(&self, node_id: &str) -> Vec<Written> {
+        lock_unpoisoned(&self.written)
             .get(node_id)
             .cloned()
             .unwrap_or_default()
@@ -194,7 +213,7 @@ impl SinkFactory for MemorySinks {
     fn build(&self, node: &NodeConfig) -> Result<Box<dyn Sink>, ConfigError> {
         Ok(Box::new(MemorySink {
             node_id: node.id.clone(),
-            records: Arc::clone(&self.records),
+            written: Arc::clone(&self.written),
             failing: Arc::clone(&self.failing),
         }))
     }
@@ -202,19 +221,22 @@ impl SinkFactory for MemorySinks {
 
 struct MemorySink {
     node_id: String,
-    records: Arc<Mutex<BTreeMap<String, Vec<Record>>>>,
+    written: Arc<Mutex<BTreeMap<String, Vec<Written>>>>,
     failing: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl Sink for MemorySink {
-    fn write(&self, records: &[Record]) -> Result<(), SinkError> {
+    fn write(&self, batch: &[Outgoing<'_>]) -> Result<(), SinkError> {
         if lock_unpoisoned(&self.failing).contains(&self.node_id) {
             return Err(SinkError::new(InjectedSinkFailure(self.node_id.clone())));
         }
-        lock_unpoisoned(&self.records)
+        lock_unpoisoned(&self.written)
             .entry(self.node_id.clone())
             .or_default()
-            .extend_from_slice(records);
+            .extend(batch.iter().map(|outgoing| Written {
+                meta: outgoing.meta.clone(),
+                record: outgoing.record.clone(),
+            }));
         Ok(())
     }
 }

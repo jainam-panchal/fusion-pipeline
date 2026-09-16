@@ -13,10 +13,11 @@ use async_nats::jetstream::{self, stream};
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::engine::Engine;
 use fusion_core::memory::{MemorySinks, MemoryStateStore};
-use fusion_core::meta::unix_nanos_now;
+use fusion_core::io::Outgoing;
+use fusion_core::meta::{IngestionTime, Meta, unix_nanos_now};
 use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
 use fusion_core::pipeline::Pipeline;
-use fusion_core::record::Record;
+use fusion_core::record::{Record, RecordId};
 use fusion_core::registry::Registry;
 use fusion_core::stage::{Context, Stage, StageError, StageOutput};
 use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
@@ -230,7 +231,20 @@ fn sink_write_returns_once_the_record_is_in_the_stream() {
     let sink = nats.sink(&fixture.sink_params()).expect("sink builds");
     let record = Record::from_json(r#"{"id": 7, "body": "hello"}"#).expect("record parses");
 
-    fusion_core::io::Sink::write(&sink, std::slice::from_ref(&record)).expect("write acked");
+    let meta = Meta {
+        record_id: RecordId(7),
+        tenant: "acme".into(),
+        ingestion_time: IngestionTime::Reported(9_000_000_000),
+        delivery_count: 1,
+    };
+    fusion_core::io::Sink::write(
+        &sink,
+        &[Outgoing {
+            meta: &meta,
+            record: &record,
+        }],
+    )
+    .expect("write acked");
 
     let payload = fixture
         .client

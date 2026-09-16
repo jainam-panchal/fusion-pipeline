@@ -1,12 +1,14 @@
 //! Source, sink and acknowledgement contracts.
 //!
-//! A source yields envelopes (record plus ack handle) into the engine's intake. The engine
-//! acknowledges the handle once every branch has ended in a sink success or an intentional
-//! drop, and negatively acknowledges it on any failure so the source can redeliver.
+//! A source yields envelopes (record, arrival and ack handle) into the engine's intake. The
+//! engine acknowledges the handle once every branch has ended in a sink success or an
+//! intentional drop, and negatively acknowledges it on any failure so the source can
+//! redeliver. A sink receives outgoing records: each record beside its `Meta`, which the
+//! sink carries next to the record and never inside it (ADR 0005).
 
 use std::time::Duration;
 
-use crate::meta::Arrival;
+use crate::meta::{Arrival, Meta};
 use crate::record::Record;
 
 /// Settles the source message behind a record. Exactly one of `ack` or `nak` is called.
@@ -75,12 +77,12 @@ pub enum SourceError {
 
 /// Produces envelopes until it is exhausted or the engine closes.
 ///
-/// A source must give every envelope an [`Arrival`] with an ingestion time, from the
-/// transport's own timestamp when the record carries neither `observed_time_unix_nano` nor
-/// `time_unix_nano`, and the message's delivery count. Stateful stages measure windows in
-/// the ingestion time on the record's `Meta`, and a redelivered record must get the value
-/// it had the first time; the engine's fallback to the worker clock exists for records
-/// pushed in tests, not for sources.
+/// A source must give every envelope an [`Arrival`] with the tenant its transport names,
+/// an ingestion time from its transport, and the message's delivery count, and must not
+/// write any of them into the record. Stateful stages measure windows in the ingestion time
+/// on the record's `Meta`, and a redelivered record must get the value it had the first
+/// time; the engine's fallbacks to the record's time fields and to the worker clock exist
+/// for records pushed in tests, not for sources.
 pub trait Source: Send {
     /// Run to completion, delivering every envelope into `intake`.
     ///
@@ -103,12 +105,22 @@ impl SinkError {
     }
 }
 
-/// Accepts records. Returns `Ok` only once they are durably accepted downstream.
+/// One record a sink writes, beside the pipeline's view of it.
+#[derive(Debug, Clone, Copy)]
+pub struct Outgoing<'a> {
+    /// The pipeline's view of the record, to carry beside it (a header, a column) or not at
+    /// all; never to write into it.
+    pub meta: &'a Meta,
+    /// The record as the last stage left it.
+    pub record: &'a Record,
+}
+
+/// Accepts outgoing records. Returns `Ok` only once they are durably accepted downstream.
 pub trait Sink: Send + Sync {
-    /// Write a batch of records.
+    /// Write a batch of outgoing records.
     ///
     /// # Errors
     ///
     /// Returns a [`SinkError`] when durable acceptance could not be confirmed.
-    fn write(&self, records: &[Record]) -> Result<(), SinkError>;
+    fn write(&self, batch: &[Outgoing<'_>]) -> Result<(), SinkError>;
 }

@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::SOURCE_ID;
 use crate::dag::NodeIndex;
-use crate::io::{Envelope, Intake, Source, SourceError};
+use crate::io::{Envelope, Intake, Outgoing, Source, SourceError};
 use crate::meta::{IngestionTime, Meta, Rejection, unix_nanos_now};
 use crate::metrics::{Labels, Metrics};
 use crate::pipeline::{CompiledNode, Pipeline};
@@ -362,7 +362,10 @@ impl<'p> Walker<'p> {
         match node {
             CompiledNode::Sink(sink) => {
                 let started = Instant::now();
-                let written = sink.write(std::slice::from_ref(&*record));
+                let written = sink.write(&[Outgoing {
+                    meta,
+                    record: &record,
+                }]);
                 metrics.sink_publish_duration(&labels, started.elapsed());
                 match written {
                     Ok(()) => metrics.records_out(&labels, 1),
