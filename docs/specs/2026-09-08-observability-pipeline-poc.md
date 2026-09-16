@@ -391,9 +391,9 @@ Amended 2026-09-16 (issue #12, ADR 0006): the events and record traces are two m
 - the closed sets of event kinds, severities, span outcomes and settlements;
 - the OTLP event log and trace sink, on the SDK's in-memory exporters, and on one test exporter that blocks until released, which shows their bounded queues drop rather than wait;
 - the `OTEL_TRACES_SAMPLER_ARG` parser, whose refusal is a startup error;
-- `TraceKey`'s id derivation, whose "never zero" guard no record reaches.
+- `TraceKey`'s id derivation for record id 0, whose trace and span ids the salt keeps non-zero. The `0 → 1` guard behind the salt is unreachable from any input and is not tested.
 
-The NATS source's dead-letter events are asserted in the ignored JetStream tests. An ignored harness test measures throughput (performance is observed, not asserted), and the deploy configs (Loki, Tempo, collector, datasources, tenant dashboard) are checked by a test that reads them, with `deploy/metrics-check.sh` as the live round trip.
+The NATS source's dead-letter events are asserted in the ignored JetStream tests. An ignored harness test measures throughput (performance is observed, not asserted), and the deploy configs (Loki, Tempo, collector, datasources, tenant dashboard) are checked by a test that reads them, the dashboard's queries through a small PromQL scanner of its own with unit tests, with `deploy/metrics-check.sh` as the live round trip.
 
 There is no prior art in this repository; it is empty apart from the feature catalogue.
 
