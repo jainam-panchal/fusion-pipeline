@@ -18,6 +18,15 @@ use crate::record::{Kind, Record, RecordId};
 /// The tenant of a record that names none and arrived on a transport that names none.
 pub const UNKNOWN_TENANT: &str = "unknown";
 
+/// Whether `tenant` can be a tenant: not empty, and no control characters. A tenant is a
+/// metric label, a state-key segment and a message header, and a header value cannot hold a
+/// line break. A source leaves a tenant that fails this out of the arrival, and a record's
+/// `resource.tenant.id` that fails it is no tenant.
+#[must_use]
+pub fn is_valid_tenant(tenant: &str) -> bool {
+    !tenant.is_empty() && !tenant.chars().any(char::is_control)
+}
+
 /// What a source's transport says about a message, apart from the record it carries.
 /// Everything but the delivery count is optional: a source that fills nothing leaves the
 /// engine to the record and then to its defaults.
@@ -161,13 +170,15 @@ impl Meta {
     }
 
     /// The tenant the pipeline gives `record`: the one the transport names, else the
-    /// record's `resource.tenant.id` when that is a string, else [`UNKNOWN_TENANT`].
+    /// record's `resource.tenant.id` when that is a string, else [`UNKNOWN_TENANT`]; a
+    /// candidate that fails [`is_valid_tenant`] is skipped.
     #[must_use]
     pub fn tenant_of(record: &Record, arrival: &Arrival) -> Arc<str> {
         arrival
             .tenant
             .as_deref()
-            .or_else(|| record.tenant())
+            .filter(|tenant| is_valid_tenant(tenant))
+            .or_else(|| record.tenant().filter(|tenant| is_valid_tenant(tenant)))
             .unwrap_or(UNKNOWN_TENANT)
             .into()
     }

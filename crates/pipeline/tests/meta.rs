@@ -532,3 +532,30 @@ nodes:
     }
     h.finish();
 }
+
+#[test]
+fn a_tenant_that_is_empty_or_holds_a_control_character_is_no_tenant() {
+    for bad in ["", "a\nb", "a\tb"] {
+        let (out, h) = reveal(
+            REVEAL,
+            record(&json!({"id": 7, "resource": {"tenant.id": bad}})),
+            Arrival::default(),
+        );
+        assert_eq!(meta_of(&out[0], "tenant"), json!("unknown"), "{bad:?}");
+        h.finish();
+    }
+    let (out, h) = reveal(
+        REVEAL,
+        record(&json!({"id": 7, "resource": {"tenant.id": "acme"}})),
+        Arrival {
+            tenant: Some("a\nb".to_owned()),
+            ..Arrival::default()
+        },
+    );
+    assert_eq!(
+        meta_of(&out[0], "tenant"),
+        json!("acme"),
+        "an invalid transport tenant is skipped for the record's"
+    );
+    h.finish();
+}
