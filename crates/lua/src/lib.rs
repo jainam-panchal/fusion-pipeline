@@ -35,11 +35,12 @@
 //!
 //! The sandbox has `string`, `table`, `math` and `utf8`, plus `state.get/set_nx/incr/del`
 //! on the node's state handle, `log.info/warn`, `now_ns()`, a read-only `json` with `null`
-//! and `list`, and `record:copy()`. `os`, `io`, `package`, `require`, `load` and `debug`
-//! are not there, and a script that names one of them is refused at load, as is one that
-//! does not parse (the message carries the line) or does not define `process`. One VM per
-//! worker per node, the script loaded once, so a counter in its upvalues persists across
-//! the records that worker sees.
+//! and `list` (the global rebuilt before every run, like `meta`, so a `rawset` on it does
+//! not reach the next record), and `record:copy()`. `os`, `io`, `package`, `require`,
+//! `load` and `debug` are not there, and a script that names one of them is refused at
+//! load, as is one that does not parse (the message carries the line) or does not define
+//! `process`. One VM per worker per node, the script loaded once, so a counter in its
+//! upvalues persists across the records that worker sees.
 
 mod convert;
 mod scan;

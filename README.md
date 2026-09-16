@@ -277,6 +277,7 @@ function process(record, meta)   -- meta: id, tenant, ingestion_time, delivery_c
     r.body = line
     out[#out + 1] = r
   end
+  if #out == 0 then return record end    -- only newlines: nothing to split
   return out
 end
 ```

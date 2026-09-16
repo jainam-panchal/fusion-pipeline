@@ -639,6 +639,7 @@ function process(record)
     copy.body = line
     out[#out + 1] = copy
   end
+  if #out == 0 then return record end   -- only newlines: nothing to split
   return out
 end"#;
 
@@ -663,6 +664,7 @@ fn the_demo_script_splits_lines_and_derives_the_status_class() {
                     4,
                     json!({"body": "null status", "attributes": {"http.status": null}}),
                 ),
+                record(5, json!({"body": "\n\n"})),
             ],
         );
         let lines: Vec<_> = out
@@ -699,7 +701,12 @@ fn the_demo_script_splits_lines_and_derives_the_status_class() {
             .expect("record 4");
         assert_eq!(null.attributes.get("http.status_class"), None);
         assert_eq!(null.attributes.get("http.status"), Some(&Value::Null));
-        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 6);
+        let blank = out
+            .iter()
+            .find(|r| r.id == Some(fusion_core::record::RecordId(5)))
+            .expect("record 5, only newlines, passes unchanged");
+        assert_eq!(blank.body, Some(json!("\n\n")));
+        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 7);
         for kind in ["output", "runtime"] {
             assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error(kind)), 0);
         }
