@@ -482,3 +482,135 @@ fn the_demo_script_splits_lines_and_derives_the_status_class() {
         h.finish();
     });
 }
+
+#[test]
+fn pcall_cannot_swallow_the_instruction_budget() {
+    let yaml = config(
+        "    limits: { instructions: 10000 }\n    on_error: drop\n",
+        "function process(record)\n  while true do pcall(function() while true do end end) end\nend",
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({}))]);
+    assert!(out.is_empty());
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
+    h.finish();
+}
+
+#[test]
+fn pcall_cannot_swallow_the_memory_cap() {
+    let yaml = config(
+        "    limits: { instructions: 100000000, memory_kib: 256 }\n    on_error: drop\n",
+        "function process(record)\n  local t = {}\n  while true do\n    local ok = pcall(function() t[#t + 1] = string.rep(\"x\", 4096) end)\n    if not ok then t = {} end\n  end\nend",
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({}))]);
+    assert!(out.is_empty());
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("memory")), 1);
+    h.finish();
+}
+
+#[test]
+fn pcall_cannot_swallow_a_state_error_so_on_state_error_still_applies() {
+    let yaml = config(
+        "    on_error: pass\n",
+        "function process(record)\n  local ok = pcall(state.incr, \"count\", 1, 1000)\n  record.attributes[\"ok\"] = ok\n  return record\nend",
+    );
+    let h = start(&yaml, 1);
+    h.state.fail_all(true);
+    let probe = h.source.push(record(1, json!({})));
+    assert_eq!(
+        probe.wait(WAIT),
+        Some(AckOutcome::Nak(None)),
+        "default on_state_error is nak"
+    );
+    assert!(h.sinks.records("out").is_empty());
+    h.finish();
+}
+
+#[test]
+fn pcall_and_xpcall_still_catch_the_scripts_own_errors() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  local ok, err = pcall(error, "boom")
+  record.attributes["pcall"] = tostring(ok) .. ":" .. err
+  local ok2, handled = xpcall(function() return nil + 1 end, function(m) return "handled" end)
+  record.attributes["xpcall"] = tostring(ok2) .. ":" .. handled
+  local ok3, a, b = pcall(function() return 1, 2 end)
+  record.attributes["values"] = tostring(ok3) .. ":" .. a .. b
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({}))]);
+    assert_eq!(out.len(), 1);
+    let caught = out[0].attributes["pcall"].as_str().expect("a string");
+    assert!(caught.starts_with("false:"), "{caught}");
+    assert!(caught.contains("boom"), "{caught}");
+    assert_eq!(
+        out[0].attributes.get("xpcall"),
+        Some(&json!("false:handled"))
+    );
+    assert_eq!(out[0].attributes.get("values"), Some(&json!("true:12")));
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("runtime")), 0);
+    h.finish();
+}
+
+#[test]
+fn a_memory_fault_rebuilds_the_worker_vm_so_a_leaky_upvalue_does_not_poison_every_record() {
+    // `string.rep` builds its result in a buffer and then copies it into the string, so one
+    // call peaks at twice the chunk: 1600 KiB of a 2048 KiB cap passes on a fresh VM, and
+    // with 800 KiB already kept in the upvalue the next call cannot fit.
+    let yaml = config(
+        "    limits: { instructions: 100000000, memory_kib: 2048 }\n    on_error: drop\n",
+        "local kept = {}\nfunction process(record)\n  kept[#kept + 1] = string.rep(\"x\", 800 * 1024)\n  record.attributes[\"kept\"] = #kept\n  return record\nend",
+    );
+    let (out, h) = run(&yaml, 1, (1..=5).map(|id| record(id, json!({}))).collect());
+    let ids: Vec<_> = out.iter().map(|r| r.id.map(|i| i.0)).collect();
+    assert_eq!(
+        ids,
+        vec![Some(1), Some(3), Some(5)],
+        "every second record trips the cap and the next runs on a fresh VM"
+    );
+    for r in &out {
+        assert_eq!(
+            r.attributes.get("kept"),
+            Some(&json!(1)),
+            "upvalues start over after a rebuild"
+        );
+    }
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("memory")), 2);
+    h.finish();
+}
+
+#[test]
+fn kind_is_filled_in_and_integral_floats_are_accepted_in_typed_fields() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  return { id = record.id, body = record.body, severity_number = 18 / 2, time_unix_nano = 10 / 5, resource = record.resource }
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].kind, fusion_core::record::Kind::Log);
+    assert_eq!(out[0].severity_number, Some(9));
+    assert_eq!(out[0].time_unix_nano, Some(2));
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    h.finish();
+}
+
+#[test]
+fn a_map_value_that_arrived_composite_round_trips_through_an_untouched_script() {
+    let yaml = config("", "function process(record) return record end");
+    let (out, h) = run(
+        &yaml,
+        1,
+        vec![record(
+            1,
+            json!({"attributes": {"tags": ["a", "b"], "meta": {"k": 1}}}),
+        )],
+    );
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].attributes.get("tags"), Some(&json!(["a", "b"])));
+    assert_eq!(out[0].attributes.get("meta"), Some(&json!({"k": 1})));
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    h.finish();
+}

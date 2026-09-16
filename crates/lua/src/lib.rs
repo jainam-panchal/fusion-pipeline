@@ -99,7 +99,7 @@ pub struct Lua {
     /// Distinguishes this node's VMs from another node's in the worker's cache; a new
     /// compiled pipeline gets new ids, so its VMs are rebuilt.
     key: u64,
-    script: Arc<ScriptSpec>,
+    script: Arc<Script>,
     on_error: OnError,
     on_state_error: StateErrorPolicy,
     uses_state: bool,
@@ -111,30 +111,6 @@ impl std::fmt::Debug for Lua {
             .field("script", &self.script.chunk_name)
             .field("on_error", &self.on_error)
             .finish_non_exhaustive()
-    }
-}
-
-/// The script as shared across workers: [`Script`] is what one worker builds a VM from.
-#[derive(Debug)]
-struct ScriptSpec {
-    chunk_name: String,
-    source: String,
-    node: String,
-    instructions: u64,
-    memory_bytes: usize,
-    output_bytes: usize,
-}
-
-impl ScriptSpec {
-    fn for_worker(&self) -> Rc<Script> {
-        Rc::new(Script {
-            chunk_name: self.chunk_name.clone(),
-            source: self.source.clone(),
-            node: self.node.clone(),
-            instructions: self.instructions,
-            memory_bytes: self.memory_bytes,
-            output_bytes: self.output_bytes,
-        })
     }
 }
 
@@ -188,15 +164,21 @@ impl Lua {
         let mut uses_state = false;
         for (name, line) in scan::free_names(&source) {
             if vm::FORBIDDEN.contains(&name) {
+                let instead = vm::instead_of(name).map_or(String::new(), |i| format!("; use {i}"));
                 return Err(node.invalid_params(format!(
-                    "{display}:{line}: `{name}` is not available in the sandbox"
+                    "{display}:{line}: `{name}` is not available in the sandbox{instead}"
                 )));
             }
             if name == "state" {
                 uses_state = true;
             }
         }
-        let script = Arc::new(ScriptSpec {
+        if params.on_state_error.is_some() && !uses_state {
+            return Err(
+                node.invalid_params("`on_state_error` is given but the script never uses `state`")
+            );
+        }
+        let script = Arc::new(Script {
             chunk_name,
             source,
             node: node.id.clone(),
@@ -204,7 +186,9 @@ impl Lua {
             memory_bytes: params.limits.memory_kib * 1024,
             output_bytes: params.limits.output_kib * 1024,
         });
-        vm::check(script.for_worker()).map_err(|fault| node.invalid_params(fault.describe()))?;
+        // Compiled and run once in a throwaway sandbox, so a syntax error, a missing
+        // `process` or a top level that misbehaves fails the config, not the first record.
+        Vm::new(Arc::clone(&script)).map_err(|fault| node.invalid_params(fault.describe()))?;
         Ok(Self {
             key: NEXT_KEY.fetch_add(1, Ordering::Relaxed),
             script,
@@ -229,7 +213,7 @@ impl Lua {
             if let Some(vm) = vms.borrow().get(&self.key) {
                 return Ok(Rc::clone(vm));
             }
-            let vm = Rc::new(Vm::new(self.script.for_worker())?);
+            let vm = Rc::new(Vm::new(Arc::clone(&self.script))?);
             vms.borrow_mut().insert(self.key, Rc::clone(&vm));
             Ok(vm)
         })
@@ -246,6 +230,11 @@ impl Stage for Lua {
             Err(Fault::State(error)) => return StageOutput::StateError { record, error },
             Err(fault) => fault,
         };
+        if matches!(fault, Fault::Memory) {
+            // A VM at its cap stays there when the growth is in the script's upvalues, so
+            // the next record starts a fresh one; the persistent state is what was leaking.
+            VMS.with(|vms| vms.borrow_mut().remove(&self.key));
+        }
         if let Some(kind) = fault.kind() {
             ctx.metrics.lua_error(kind);
         }

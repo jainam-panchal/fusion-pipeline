@@ -107,7 +107,8 @@ fn json_to_lua(lua: &mlua::Lua, v: &Value) -> mlua::Result<LuaValue> {
 /// key), plus the size cap on the strings it returns.
 pub(crate) struct Expected<'a> {
     pub(crate) id: RecordId,
-    pub(crate) tenant: Option<&'a str>,
+    /// The `resource.tenant.id` value as it came in, whatever its type.
+    pub(crate) tenant: Option<&'a Value>,
     pub(crate) output_bytes: usize,
 }
 
@@ -131,8 +132,9 @@ impl Budget {
 }
 
 /// The table the script returned as a record, checked against `expected`. The table must
-/// carry `id` (unchanged) and `kind` (`log`), every other field is optional, and a key that
-/// is not a record field is refused, so a typo cannot silently drop data.
+/// carry `id` (unchanged); `kind` is `log` when present and filled in when not; every other
+/// field is optional, and a key that is not a record field is refused, so a typo cannot
+/// silently drop data.
 pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Record, OutputError> {
     let mut record = Record::default();
     let mut budget = Budget {
@@ -140,7 +142,6 @@ pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Recor
         cap: expected.output_bytes,
     };
     let mut saw_id = false;
-    let mut saw_kind = false;
     for pair in table.pairs::<LuaValue, LuaValue>() {
         let (key, value) =
             pair.map_err(|e| OutputError(format!("cannot read the returned table: {e}")))?;
@@ -160,9 +161,8 @@ pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Recor
             }
             "kind" => {
                 if string(&value, "kind", &mut budget)?.as_deref() != Some(Kind::Log.as_str()) {
-                    return refuse("`kind` must be returned as `log`");
+                    return refuse("`kind` must be `log` when returned");
                 }
-                saw_kind = true;
                 record.kind = Kind::Log;
             }
             "time_unix_nano" => record.time_unix_nano = time(&value, "time_unix_nano")?,
@@ -171,18 +171,13 @@ pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Recor
             }
             "severity_text" => record.severity_text = string(&value, "severity_text", &mut budget)?,
             "severity_number" => {
-                record.severity_number = match value {
-                    LuaValue::Nil => None,
-                    LuaValue::Integer(i) => Some(i32::try_from(i).map_err(|_| {
-                        OutputError("`severity_number` must be an integer in i32".into())
-                    })?),
-                    other => {
-                        return refuse(format!(
-                            "`severity_number` must be an integer, not {}",
-                            type_name(&other)
-                        ));
-                    }
-                };
+                record.severity_number = integer(&value, "severity_number")?
+                    .map(|i| {
+                        i32::try_from(i).map_err(|_| {
+                            OutputError("`severity_number` must be an integer in i32".into())
+                        })
+                    })
+                    .transpose()?;
             }
             "body" => record.body = lua_to_json(&value, "body", &mut budget)?,
             "attributes" => record.attributes = map_from(&value, "attributes", &mut budget)?,
@@ -196,10 +191,7 @@ pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Recor
     if !saw_id {
         return refuse("`id` is missing from the returned record");
     }
-    if !saw_kind {
-        return refuse("`kind` is missing from the returned record");
-    }
-    if record.tenant() != expected.tenant {
+    if record.resource.get("tenant.id") != expected.tenant {
         return refuse("`resource.tenant.id` must be returned unchanged");
     }
     Ok(record)
@@ -213,17 +205,28 @@ fn id_matches(value: &LuaValue, id: RecordId) -> bool {
     }
 }
 
-fn time(value: &LuaValue, field: &str) -> Result<Option<u64>, OutputError> {
+/// An integer field: a Lua integer, or a float with no fraction, since `/` always yields a
+/// float in Lua 5.4 and `18 / 2` is the integer 9 to any author.
+fn integer(value: &LuaValue, field: &str) -> Result<Option<i64>, OutputError> {
     match value {
         LuaValue::Nil => Ok(None),
-        LuaValue::Integer(i) => u64::try_from(*i)
-            .map(Some)
-            .map_err(|_| OutputError(format!("`{field}` must not be negative"))),
+        LuaValue::Integer(i) => Ok(Some(*i)),
+        LuaValue::Number(f) if f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0 => {
+            Ok(Some(*f as i64))
+        }
         other => refuse(format!(
             "`{field}` must be an integer, not {}",
             type_name(other)
         )),
     }
+}
+
+fn time(value: &LuaValue, field: &str) -> Result<Option<u64>, OutputError> {
+    integer(value, field)?
+        .map(|i| {
+            u64::try_from(i).map_err(|_| OutputError(format!("`{field}` must not be negative")))
+        })
+        .transpose()
 }
 
 fn string(
@@ -271,14 +274,12 @@ fn map_from(
             .to_str()
             .map_err(|_| OutputError(format!("a `{field}` key is not valid UTF-8")))?
             .to_owned();
+        // A table here is accepted as the JSON it is: the flat-map rule is the source's
+        // contract, and a value that arrived composite must leave an untouched script the
+        // way it came in.
         let at = format!("{field}.{key}");
-        let scalar = match value {
-            LuaValue::Table(_) => {
-                return refuse(format!("`{at}` must be a scalar; the maps are flat"));
-            }
-            other => lua_to_json(&other, &at, budget)?,
-        };
-        map.insert(key, scalar.unwrap_or(Value::Null));
+        let json = lua_to_json(&value, &at, budget)?;
+        map.insert(key, json.unwrap_or(Value::Null));
     }
     Ok(map)
 }
@@ -347,7 +348,8 @@ fn lua_to_json(
     }))
 }
 
-fn type_name(value: &LuaValue) -> &'static str {
+/// A Lua value's type as an error message names it.
+pub(crate) fn type_name(value: &LuaValue) -> &'static str {
     match value {
         LuaValue::Nil => "nil",
         LuaValue::Boolean(_) => "a boolean",

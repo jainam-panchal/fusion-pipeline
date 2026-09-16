@@ -3,20 +3,24 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fusion_core::metrics::LuaErrorKind;
 use fusion_core::record::{Record, RecordId};
 use fusion_core::stage::State;
 use fusion_core::state::StateError;
-use mlua::{Function, HookTriggers, LuaOptions, LuaString, StdLib, Value as LuaValue, VmState};
+use mlua::{
+    Function, HookTriggers, LuaOptions, LuaString, MultiValue, StdLib, Value as LuaValue, VmState,
+};
 
-use crate::convert::{self, Expected, OutputError};
+use crate::convert::{self, Expected, OutputError, type_name};
 
 /// The globals a script may not name, and the names the sandbox leaves undefined. `load`
 /// and its siblings come with the base library and are removed; `os`, `io`, `package`
-/// (and so `require`) and `debug` are never loaded.
-pub(crate) const FORBIDDEN: [&str; 9] = [
+/// (and so `require`) and `debug` are never loaded; `print` is stdout, a side channel the
+/// `log` table replaces.
+pub(crate) const FORBIDDEN: [&str; 10] = [
     "os",
     "io",
     "package",
@@ -26,10 +30,20 @@ pub(crate) const FORBIDDEN: [&str; 9] = [
     "dofile",
     "loadstring",
     "debug",
+    "print",
 ];
 
-/// The base library's loaders, removed from the globals after the VM is built.
-const REMOVED_GLOBALS: [&str; 4] = ["load", "loadfile", "dofile", "collectgarbage"];
+/// What to write instead of a forbidden name, where there is something.
+pub(crate) fn instead_of(name: &str) -> Option<&'static str> {
+    match name {
+        "print" => Some("log.info"),
+        _ => None,
+    }
+}
+
+/// The base library's loaders and `print`, removed from the globals after the VM is built.
+/// `pcall` and `xpcall` are replaced, not removed: see [`install_pcall`].
+const REMOVED_GLOBALS: [&str; 5] = ["load", "loadfile", "dofile", "collectgarbage", "print"];
 
 /// The instruction budget is checked at this granularity, or at the budget itself when
 /// that is smaller, so a small budget still trips exactly.
@@ -120,13 +134,13 @@ pub(crate) struct Vm {
     process: Function,
     /// Instructions used by the current run, counted by the hook in steps of the trigger.
     used: Rc<Cell<u64>>,
-    script: Rc<Script>,
+    script: Arc<Script>,
 }
 
 impl Vm {
     /// Build the sandbox, install the API and the guardrails, run the script's top level
     /// and take its `process`.
-    pub(crate) fn new(script: Rc<Script>) -> Result<Self, Fault> {
+    pub(crate) fn new(script: Arc<Script>) -> Result<Self, Fault> {
         let lua = mlua::Lua::new_with(
             StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::UTF8,
             LuaOptions::default(),
@@ -139,6 +153,7 @@ impl Vm {
                 .map_err(|e| Fault::Runtime(e.to_string()))?;
         }
         install_api(&lua, &script.node).map_err(|e| Fault::Runtime(e.to_string()))?;
+        install_pcall(&lua).map_err(|e| Fault::Runtime(e.to_string()))?;
         lua.set_memory_limit(script.memory_bytes)
             .map_err(|e| Fault::Runtime(e.to_string()))?;
 
@@ -197,9 +212,14 @@ impl Vm {
         self.used.set(0);
         let table = convert::to_table(&self.lua, record).map_err(classify)?;
         let returned: LuaValue = self.process.call(table).map_err(classify)?;
+        if self.used.get() > self.script.instructions {
+            // Cannot happen while `pcall` re-raises the budget; kept so a run that somehow
+            // swallowed the trip is still refused.
+            return Err(Fault::Instructions);
+        }
         let expected = Expected {
             id: record_id,
-            tenant: record.tenant(),
+            tenant: record.resource.get("tenant.id"),
             output_bytes: self.script.output_bytes,
         };
         match returned {
@@ -225,7 +245,7 @@ impl Vm {
             }
             other => Err(Fault::Output(OutputError(format!(
                 "`process` must return a record table, a list of them, or nil; got {}",
-                lua_type(&other)
+                type_name(&other)
             )))),
         }
     }
@@ -234,33 +254,93 @@ impl Vm {
 /// The `kind` of an `mlua` error: the budget marker, a memory error, a state error carried
 /// out of an API call, or anything else the script did.
 fn classify(error: mlua::Error) -> Fault {
+    match guardrail(&error) {
+        Some(fault) => fault,
+        None => Fault::Runtime(error.to_string()),
+    }
+}
+
+/// The fault when `error` is one a script must not catch: the budget marker, a memory
+/// error anywhere in the chain, or a state error carried out of an API call. `None` for the
+/// script's own errors.
+fn guardrail(error: &mlua::Error) -> Option<Fault> {
     if error.downcast_ref::<BudgetExceeded>().is_some() {
-        return Fault::Instructions;
+        return Some(Fault::Instructions);
     }
     if let Some(state) = error.downcast_ref::<StateError>() {
-        return Fault::State(state.clone());
+        return Some(Fault::State(state.clone()));
     }
-    let mut current = &error;
+    let mut current = error;
     loop {
         match current {
-            mlua::Error::MemoryError(_) => return Fault::Memory,
+            mlua::Error::MemoryError(_) => return Some(Fault::Memory),
             mlua::Error::CallbackError { cause, .. } | mlua::Error::WithContext { cause, .. } => {
                 current = cause;
             }
-            _ => break,
+            _ => return None,
         }
     }
-    Fault::Runtime(error.to_string())
 }
 
-fn lua_type(value: &LuaValue) -> &'static str {
-    match value {
-        LuaValue::Boolean(_) => "a boolean",
-        LuaValue::Integer(_) | LuaValue::Number(_) => "a number",
-        LuaValue::String(_) => "a string",
-        LuaValue::Function(_) => "a function",
-        _ => "an unsupported value",
+/// The message a caught error reaches the script as: the script's own text for a
+/// runtime error, the display form otherwise. A non-string error value is flattened to its
+/// text, one difference from Lua's `pcall`.
+fn caught_message(error: &mlua::Error) -> String {
+    match error {
+        mlua::Error::RuntimeError(message) => message.clone(),
+        mlua::Error::CallbackError { cause, .. } | mlua::Error::WithContext { cause, .. } => {
+            caught_message(cause)
+        }
+        other => other.to_string(),
     }
+}
+
+/// `pcall` and `xpcall` that re-raise what a script must not catch. The base library's
+/// own catch everything, so `while true do pcall(function() while true do end end) end`
+/// would outlive the budget by a thousand instructions per iteration, a loop over a
+/// caught memory error would outlive the cap, and `pcall(state.get, k)` would take the
+/// `on_state_error` decision away from the engine. The replacements let the script's own
+/// errors through as `false, message` and propagate a guardrail as if there were no
+/// `pcall` at all.
+fn install_pcall(lua: &mlua::Lua) -> mlua::Result<()> {
+    let globals = lua.globals();
+    globals.raw_set(
+        "pcall",
+        lua.create_function(|lua, (f, args): (Function, MultiValue)| {
+            match f.call::<MultiValue>(args) {
+                Ok(mut values) => {
+                    values.push_front(LuaValue::Boolean(true));
+                    Ok(values)
+                }
+                Err(error) if guardrail(&error).is_some() => Err(error),
+                Err(error) => Ok(MultiValue::from_vec(vec![
+                    LuaValue::Boolean(false),
+                    LuaValue::String(lua.create_string(caught_message(&error))?),
+                ])),
+            }
+        })?,
+    )?;
+    globals.raw_set(
+        "xpcall",
+        lua.create_function(
+            |lua, (f, handler, args): (Function, Function, MultiValue)| match f
+                .call::<MultiValue>(args)
+            {
+                Ok(mut values) => {
+                    values.push_front(LuaValue::Boolean(true));
+                    Ok(values)
+                }
+                Err(error) if guardrail(&error).is_some() => Err(error),
+                Err(error) => {
+                    let message = lua.create_string(caught_message(&error))?;
+                    let mut handled: MultiValue = handler.call(message)?;
+                    handled.push_front(LuaValue::Boolean(false));
+                    Ok(handled)
+                }
+            },
+        )?,
+    )?;
+    Ok(())
 }
 
 /// `state`, `log` and `now_ns` as globals.
@@ -345,10 +425,4 @@ fn install_api(lua: &mlua::Lua, node: &str) -> mlua::Result<()> {
 fn current(lua: &mlua::Lua) -> mlua::Result<mlua::AppDataRef<'_, Current>> {
     lua.app_data_ref::<Current>()
         .ok_or_else(|| mlua::Error::runtime("the pipeline API is only available inside `process`"))
-}
-
-/// `source` compiled and run once in a throwaway sandbox at load, so a syntax error, a
-/// missing `process` or a top level that misbehaves fails the config, not the first record.
-pub(crate) fn check(script: Rc<Script>) -> Result<(), Fault> {
-    Vm::new(script).map(|_| ())
 }

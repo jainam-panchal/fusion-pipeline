@@ -127,8 +127,33 @@ fn limits_and_policies_outside_their_values_are_rejected() {
     );
     rejects(&format!("    on_error: retry\n{ok}"), &["retry"]);
     rejects(&format!("    on_state_error: drop\n{ok}"), &["drop"]);
+    let stateful = inline("function process(r)\n  state.get(\"k\")\n  return r\nend");
     build(&format!(
-        "    on_error: nak\n    on_state_error: pass\n{ok}"
+        "    on_error: nak\n    on_state_error: pass\n{stateful}"
     ))
     .expect("builds");
+}
+
+#[test]
+fn print_and_xpcall_are_not_in_the_sandbox_and_say_what_to_use() {
+    let err = rejects(
+        &inline("function process(r)\n  print(r.body)\n  return r\nend"),
+        &["`print`", "log.info"],
+    );
+    assert!(err.contains("script:2:"), "{err}");
+    rejects(
+        &inline("function process(r)\n  loadstring(\"x\")\n  return r\nend"),
+        &["`loadstring`"],
+    );
+}
+
+#[test]
+fn on_state_error_on_a_script_that_never_uses_state_is_rejected() {
+    rejects(
+        &format!(
+            "    on_state_error: pass\n{}",
+            inline("function process(r) return r end")
+        ),
+        &["`on_state_error`", "`state`"],
+    );
 }
