@@ -12,7 +12,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::{ConfigError, NodeConfig};
-use crate::io::{AckHandle, Envelope, Intake, Outgoing, Sink, SinkError, Source, SourceError};
+use crate::io::{
+    AckHandle, Envelope, Failure, Intake, Outgoing, Sink, SinkError, Source, SourceError,
+};
 use crate::meta::{Arrival, Meta};
 use crate::record::Record;
 use crate::registry::SinkFactory;
@@ -29,7 +31,7 @@ pub enum AckOutcome {
 
 #[derive(Default)]
 struct AckState {
-    outcome: Mutex<Option<AckOutcome>>,
+    outcome: Mutex<Option<(AckOutcome, Option<Failure>)>>,
     settled: Condvar,
 }
 
@@ -59,13 +61,24 @@ impl AckProbe {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             outcome = guard;
         }
-        *outcome
+        outcome.as_ref().map(|(outcome, _)| *outcome)
     }
 
     /// The outcome if already settled, without waiting.
     #[must_use]
     pub fn outcome(&self) -> Option<AckOutcome> {
-        *lock_unpoisoned(&self.state.outcome)
+        lock_unpoisoned(&self.state.outcome)
+            .as_ref()
+            .map(|(outcome, _)| *outcome)
+    }
+
+    /// The failure the record was nakked for, without waiting; `None` if it was acked or is
+    /// not settled yet.
+    #[must_use]
+    pub fn failure(&self) -> Option<Failure> {
+        lock_unpoisoned(&self.state.outcome)
+            .as_ref()
+            .and_then(|(_, failure)| failure.clone())
     }
 }
 
@@ -74,19 +87,19 @@ struct MemoryAck {
 }
 
 impl MemoryAck {
-    fn settle(&self, outcome: AckOutcome) {
-        *lock_unpoisoned(&self.state.outcome) = Some(outcome);
+    fn settle(&self, outcome: AckOutcome, failure: Option<Failure>) {
+        *lock_unpoisoned(&self.state.outcome) = Some((outcome, failure));
         self.state.settled.notify_all();
     }
 }
 
 impl AckHandle for MemoryAck {
     fn ack(self: Box<Self>) {
-        self.settle(AckOutcome::Ack);
+        self.settle(AckOutcome::Ack, None);
     }
 
-    fn nak(self: Box<Self>, delay: Option<Duration>) {
-        self.settle(AckOutcome::Nak(delay));
+    fn nak(self: Box<Self>, delay: Option<Duration>, failure: Failure) {
+        self.settle(AckOutcome::Nak(delay), Some(failure));
     }
 }
 

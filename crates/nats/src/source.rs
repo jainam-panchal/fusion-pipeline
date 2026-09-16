@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{AckKind, message::Acker};
-use fusion_core::io::{AckHandle, Envelope, Intake, Source, SourceError};
+use fusion_core::io::{AckHandle, Envelope, Failure, Intake, Source, SourceError};
 use fusion_core::meta::Meta;
 use fusion_core::metrics::Metrics;
 use fusion_core::record::Record;
@@ -215,7 +215,7 @@ impl AckHandle for NatsAck {
         self.settle(AckKind::Ack);
     }
 
-    fn nak(self: Box<Self>, delay: Option<Duration>) {
+    fn nak(self: Box<Self>, delay: Option<Duration>, _failure: Failure) {
         self.settle(AckKind::Nak(Some(
             delay.unwrap_or_else(|| nak_delay(self.delivered)),
         )));

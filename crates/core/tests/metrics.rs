@@ -1,11 +1,17 @@
 //! The closed sets the spec fixes: the metric names, the drop reasons that label
-//! `records_dropped_total`, and the `edit`, `lua` and `engine` label values. Each set's `ALL` is
+//! `records_dropped_total`, the failure kinds that label `dlq_total`, and the `edit`, `lua`
+//! and `engine` label values. Each set's `ALL` is
 //! complete by construction (`closed_set!`), so these pin its names to the spec. Nothing else
 //! is observable below the trait boundary; what the engine emits is tested through it in the
-//! pipeline crate.
+//! pipeline crate. The dead-letter metrics are emitted by the NATS source, which the harness
+//! does not run, so their label sets are asserted here on the recorder.
 
+use std::time::Duration;
+
+use fusion_core::io::FailureKind;
 use fusion_core::metrics::{
-    CounterMetric, EditCause, EditOp, EngineLabel, HistogramMetric, LuaErrorKind, Metric,
+    CounterMetric, EditCause, EditOp, EngineLabel, HistogramMetric, InMemoryRecorder, LuaErrorKind,
+    Metric, Metrics,
 };
 use fusion_core::stage::DropReason;
 
@@ -25,7 +31,7 @@ const SPEC_DROP_REASONS: [&str; 11] = [
 ];
 
 /// Spec, Telemetry: every metric the pipeline exports, in this spelling.
-const SPEC_METRICS: [&str; 18] = [
+const SPEC_METRICS: [&str; 20] = [
     "records_in_total",
     "records_out_total",
     "records_dropped_total",
@@ -41,6 +47,8 @@ const SPEC_METRICS: [&str; 18] = [
     "source_redeliveries_total",
     "source_invalid_headers_total",
     "dlq_total",
+    "dlq_publish_errors_total",
+    "dlq_publish_duration_seconds",
     "sink_publish_duration_seconds",
     "sink_publish_errors_total",
     "pipeline_end_to_end_seconds",
@@ -117,4 +125,59 @@ fn the_typed_subsets_partition_the_metrics_by_instrument() {
     for histogram in HistogramMetric::ALL {
         assert_eq!(histogram.as_str(), histogram.metric().as_str());
     }
+}
+
+/// Spec, Source, sink, ack: the `reason` label of `dlq_total` is the failure kind.
+#[test]
+fn failure_kinds_are_exactly_the_spec_set() {
+    let kinds: Vec<&str> = FailureKind::ALL.iter().map(|k| k.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "stage_error",
+            "state_error",
+            "sink_error",
+            "panic",
+            "missing_id",
+            "undecodable"
+        ]
+    );
+}
+
+#[test]
+fn a_dead_letter_counts_under_tenant_stage_and_reason() {
+    let recorder = InMemoryRecorder::new();
+    let metrics = Metrics::new(recorder.clone());
+
+    metrics.dead_lettered("acme", "out", FailureKind::SinkError);
+
+    assert_eq!(
+        recorder.counter(
+            CounterMetric::Dlq,
+            &[
+                ("tenant", "acme"),
+                ("stage", "out"),
+                ("reason", "sink_error")
+            ]
+        ),
+        1
+    );
+}
+
+#[test]
+fn a_failed_dead_letter_counts_once_per_tenant_and_is_timed_once() {
+    let recorder = InMemoryRecorder::new();
+    let metrics = Metrics::new(recorder.clone());
+
+    metrics.dlq_publish_error("acme");
+    metrics.dlq_publish_duration("acme", Duration::from_millis(1750));
+
+    assert_eq!(
+        recorder.counter(CounterMetric::DlqPublishErrors, &[("tenant", "acme")]),
+        1
+    );
+    assert_eq!(
+        recorder.samples(HistogramMetric::DlqPublishDuration, &[("tenant", "acme")]),
+        vec![1.75]
+    );
 }

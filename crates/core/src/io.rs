@@ -8,6 +8,8 @@
 
 use std::time::Duration;
 
+use crate::closed_set::closed_set;
+use crate::config::SOURCE_ID;
 use crate::meta::{Arrival, Meta};
 use crate::record::Record;
 
@@ -15,8 +17,53 @@ use crate::record::Record;
 pub trait AckHandle: Send {
     /// The record was durably handled downstream (or intentionally dropped).
     fn ack(self: Box<Self>);
-    /// Handling failed; the source should redeliver, after `delay` if given.
-    fn nak(self: Box<Self>, delay: Option<Duration>);
+    /// Handling failed because of `failure`; the source should redeliver, after `delay` if
+    /// given. A source that gives up on the message (the NATS source on its final delivery)
+    /// says why with `failure`.
+    fn nak(self: Box<Self>, delay: Option<Duration>, failure: Failure);
+}
+
+closed_set! {
+    /// What kind of failure made a record's message nak: the `reason` label of `dlq_total`.
+    /// Closed set; adding a value is a spec amendment.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum FailureKind {
+        /// A stage returned an error.
+        StageError = "stage_error",
+        /// A stage could not reach the state store and its node's `on_state_error` is `nak`.
+        StateError = "state_error",
+        /// A sink could not confirm durable acceptance.
+        SinkError = "sink_error",
+        /// A stage or sink panicked. Only a dev build gets here: a release build aborts.
+        Panic = "panic",
+        /// The record arrived without an `id`.
+        MissingId = "missing_id",
+        /// The payload is not a record. Set by a source, never by the engine.
+        Undecodable = "undecodable",
+    }
+}
+
+/// Why a record's message was nakked: the first failure of its walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    /// The node that failed, or `source` for a failure before any node ran.
+    pub node: String,
+    /// What kind of failure it was.
+    pub kind: FailureKind,
+    /// What the node said, for people; never a metric label.
+    pub error: String,
+}
+
+impl Failure {
+    /// A failure before any node ran, charged to the reserved `source` node.
+    #[must_use]
+    pub fn at_source(kind: FailureKind, error: impl Into<String>) -> Self {
+        Self {
+            node: SOURCE_ID.to_owned(),
+            kind,
+            error: error.into(),
+        }
+    }
 }
 
 /// A record together with what the source knows about its message and the handle that
