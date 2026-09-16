@@ -119,9 +119,10 @@ fn json_to_lua(lua: &mlua::Lua, v: &Value) -> mlua::Result<LuaValue> {
     })
 }
 
-/// How deep a returned value may nest: serde_json's own limit for a record, so every record
-/// the source decoded can come back unchanged, while a table that contains itself is refused
-/// instead of recursing until the worker's stack overflows.
+/// How many tables below the record a returned value may nest: serde_json's recursion limit,
+/// which stops a decoded record short of it, so every record the source decoded can come
+/// back unchanged, while a table that contains itself is refused instead of recursing until
+/// the worker's stack overflows.
 const MAX_DEPTH: usize = 128;
 
 /// The way back: Lua values read as JSON, with the bytes of every string counted against

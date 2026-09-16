@@ -175,7 +175,7 @@ impl NatsSource {
         }
     }
 
-    /// Log and count every pipeline header the arrival left out, under `tenant`.
+    /// Log and count every pipeline header the source ignored, under `tenant`.
     fn report_invalid_headers(&self, subject: &str, invalid: &[InvalidHeader], tenant: &str) {
         for problem in invalid {
             eprintln!("nats source: ignored a pipeline header on `{subject}`: {problem}");

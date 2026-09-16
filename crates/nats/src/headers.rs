@@ -13,8 +13,8 @@
 //! consuming another's output keeps the first pipeline's tenant and ingestion time. The
 //! subject's tenant wins over the header, because NATS permissions back the subject and any
 //! producer can set a header; the header's time wins over the JetStream publish time, so the
-//! first pipeline's time survives every hop. A header that does not parse is left out of the
-//! arrival and reported, never a reason to nak: the record is still valid.
+//! first pipeline's time survives every hop. A header that does not parse is ignored,
+//! reported and counted once, never a reason to nak: the record is still valid.
 
 use async_nats::{HeaderMap, HeaderValue};
 use fusion_core::meta::{Arrival, IngestionTime, Meta, TimeKind, is_valid_tenant};

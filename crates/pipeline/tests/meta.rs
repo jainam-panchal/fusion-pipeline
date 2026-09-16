@@ -515,10 +515,7 @@ nodes:
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     }
     for r in h.sinks.records("out") {
-        assert_eq!(
-            r.attributes.get("locked"),
-            Some(&json!("meta is read-only"))
-        );
+        assert_eq!(r.attributes.get("locked"), Some(&json!("meta")));
         assert_eq!(r.attributes.get("reset"), Some(&json!(true)));
         assert_eq!(
             r.attributes.get("tenant"),

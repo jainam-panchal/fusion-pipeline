@@ -520,7 +520,8 @@ fn record_metatable(lua: &mlua::Lua) -> mlua::Result<Table> {
 
 /// The metatable behind `meta`: `__index` reads the current record's `Meta`, `__newindex`
 /// raises, `__pairs` walks the four keys, and `__metatable` hides it from `getmetatable` and
-/// refuses `setmetatable`.
+/// refuses `setmetatable`: `getmetatable` answers `"meta"`, as the record table's answers
+/// `"record"`.
 fn meta_metatable(lua: &mlua::Lua) -> mlua::Result<Table> {
     let metatable = lua.create_table()?;
     metatable.raw_set(
@@ -561,7 +562,7 @@ fn meta_metatable(lua: &mlua::Lua) -> mlua::Result<Table> {
             Ok((next, snapshot, LuaValue::Nil))
         })?,
     )?;
-    metatable.raw_set("__metatable", "meta is read-only")?;
+    metatable.raw_set("__metatable", "meta")?;
     Ok(metatable)
 }
 
