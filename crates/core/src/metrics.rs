@@ -258,7 +258,15 @@ pub struct Labels<'a> {
     engine: Option<EngineLabel>,
     reason: Option<DropReason>,
     kind: Option<&'a str>,
-    edit: Option<(EditOp, &'a str, EditCause)>,
+    edit: Option<EditLabels<'a>>,
+}
+
+/// The three labels of `edit_unapplied_total`, set together through [`Labels::with_edit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EditLabels<'a> {
+    op: EditOp,
+    field: &'a str,
+    cause: EditCause,
 }
 
 impl<'a> Labels<'a> {
@@ -320,7 +328,7 @@ impl<'a> Labels<'a> {
     /// in canonical form.
     #[must_use]
     pub const fn with_edit(mut self, op: EditOp, field: &'a str, cause: EditCause) -> Self {
-        self.edit = Some((op, field, cause));
+        self.edit = Some(EditLabels { op, field, cause });
         self
     }
 
@@ -332,9 +340,9 @@ impl<'a> Labels<'a> {
             self.engine.map(|e| ("engine", e.as_str())),
             self.reason.map(|r| ("reason", r.as_str())),
             self.kind.map(|k| ("kind", k)),
-            self.edit.map(|(op, _, _)| ("op", op.as_str())),
-            self.edit.map(|(_, field, _)| ("field", field)),
-            self.edit.map(|(_, _, cause)| ("cause", cause.as_str())),
+            self.edit.map(|e| ("op", e.op.as_str())),
+            self.edit.map(|e| ("field", e.field)),
+            self.edit.map(|e| ("cause", e.cause.as_str())),
         ]
         .into_iter()
         .flatten()

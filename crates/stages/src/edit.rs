@@ -26,10 +26,11 @@
 //! text `sample consistent` hashes). It is a stable join key, not anonymisation: an
 //! unsalted digest of a low-entropy field is dictionary-reversible.
 //!
-//! What load can check, it refuses: every path parses, no op names `id`, `kind` or
-//! `resource.tenant.id` (the engine fixes the tenant once per record for metrics and state
-//! keys), a `set` literal is a scalar the field takes, a `hash` target takes a string,
-//! `from` and `to` differ. Every refusal names the node and the op's position.
+//! What load can check, it refuses: every path parses, no op writes or removes `id`, `kind`
+//! or `resource.tenant.id` (the engine fixes the tenant once per record for metrics and
+//! state keys; `copy` may read them), a `set` literal is a scalar the field takes, a `hash`
+//! target takes a string, `from` and `to` differ. Every refusal names the node and the op's
+//! position.
 
 use std::collections::BTreeMap;
 
@@ -96,13 +97,16 @@ pub struct Edit {
     on_unapplied: OnUnapplied,
 }
 
-/// One op as parsed. `source` is the op's source path in canonical form, the `field`
-/// label of `edit_unapplied_total`, fixed at load so no record pays for the display.
+/// One op as parsed. `source` is the path the op reads, in canonical form: the `field`
+/// label of `edit_unapplied_total`, fixed at load so no record pays for the display. For
+/// `set` that is the field it writes, the only path it has. `delete` carries none: it is
+/// never unapplied.
 #[derive(Debug)]
 enum Op {
     Set {
         field: FieldPath,
         value: Value,
+        source: String,
     },
     Rename {
         from: FieldPath,
@@ -131,12 +135,24 @@ const OP_NAMES: &str = "set, rename, copy, hash or delete";
 /// disagreeing.
 const TENANT: &str = "resource.tenant.id";
 
+/// An op that could not apply to a record: the `field` and `cause` labels of
+/// `edit_unapplied_total`, built where the op failed so the label is always the op's path.
+struct Unapplied<'a> {
+    field: &'a str,
+    cause: EditCause,
+}
+
+const fn unapplied(field: &str, cause: EditCause) -> Unapplied<'_> {
+    Unapplied { field, cause }
+}
+
 /// Where in the config an error is: the node, the op's position, and the op's kind once
-/// that is known.
+/// that is known. `tenant` is [`TENANT`] parsed once, at load.
 struct At<'a> {
     node: &'a NodeConfig,
     index: usize,
     kind: Option<EditOp>,
+    tenant: &'a FieldPath,
 }
 
 impl At<'_> {
@@ -158,7 +174,7 @@ impl At<'_> {
         if !path.is_writable() {
             return Err(self.error(format!("`{key}`: `{path}` is read-only")));
         }
-        if FieldPath::parse(TENANT).ok().as_ref() == Some(&path) {
+        if path == *self.tenant {
             return Err(self.error(format!(
                 "`{key}`: `{path}` is the tenant and cannot be edited"
             )));
@@ -191,11 +207,15 @@ impl Edit {
         if params.ops.is_empty() {
             return Err(node.invalid_params("`ops` needs at least one op"));
         }
+        // Fails closed: a tenant path that did not parse would be a bug in core, and is
+        // reported as a config error rather than silently dropping the guard.
+        let tenant = FieldPath::parse(TENANT)
+            .map_err(|e| node.invalid_params(format!("tenant path `{TENANT}`: {e}")))?;
         let ops = params
             .ops
             .into_iter()
             .enumerate()
-            .map(|(index, entry)| parse_op(node, index, entry))
+            .map(|(index, entry)| parse_op(node, index, entry, &tenant))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             ops,
@@ -217,11 +237,13 @@ fn parse_op(
     node: &NodeConfig,
     index: usize,
     mut entry: BTreeMap<String, Value>,
+    tenant: &FieldPath,
 ) -> Result<Op, ConfigError> {
     let mut at = At {
         node,
         index,
         kind: None,
+        tenant,
     };
     let Some((name, body)) = entry.pop_first().filter(|_| entry.is_empty()) else {
         return Err(at.error(format!("one op per entry, one of {OP_NAMES}")));
@@ -248,6 +270,7 @@ fn parse_op(
                 .write(&mut Record::default(), p.value.clone())
                 .map_err(|e| at.error(format!("value {}: {e}", p.value)))?;
             Op::Set {
+                source: field.to_string(),
                 field,
                 value: p.value,
             }
@@ -308,48 +331,51 @@ impl Op {
         }
     }
 
-    /// The `field` label: the source path of an op that can be unapplied. `set` and
-    /// `delete` never are, so they carry none.
-    fn source(&self) -> &str {
-        match self {
-            Self::Rename { source, .. } | Self::Copy { source, .. } | Self::Hash { source, .. } => {
-                source
-            }
-            Self::Set { .. } | Self::Delete { .. } => "",
-        }
-    }
-
     /// Apply to `record`, or say why it could not; the record is unchanged on `Err`.
-    fn apply(&self, record: &mut Record) -> Result<(), EditCause> {
+    fn apply(&self, record: &mut Record) -> Result<(), Unapplied<'_>> {
         match self {
-            // The literal was written to an empty record at load, so this cannot refuse.
-            Self::Set { field, value } => field
+            // The literal was written to an empty record at load and `write` never reads
+            // the record, so this cannot refuse; the arm is here so the type says so.
+            Self::Set {
+                field,
+                value,
+                source,
+            } => field
                 .write(record, value.clone())
-                .map_err(|_| EditCause::Type),
-            Self::Rename { from, to, .. } => {
-                let value = owned(from.read(record)).ok_or(EditCause::Absent)?;
-                to.write(record, value).map_err(|_| EditCause::Type)?;
+                .map_err(|_| unapplied(source, EditCause::Type)),
+            Self::Rename { from, to, source } => {
+                let value =
+                    owned(from.read(record)).ok_or_else(|| unapplied(source, EditCause::Absent))?;
+                to.write(record, value)
+                    .map_err(|_| unapplied(source, EditCause::Type))?;
                 // `from` held a value a moment ago and is not `to`, so this cannot refuse.
-                from.remove(record).map(|_| ()).map_err(|_| EditCause::Type)
+                from.remove(record)
+                    .map(|_| ())
+                    .map_err(|_| unapplied(source, EditCause::Type))
             }
-            Self::Copy { from, to, .. } => {
-                let value = owned(from.read(record)).ok_or(EditCause::Absent)?;
-                to.write(record, value).map_err(|_| EditCause::Type)
+            Self::Copy { from, to, source } => {
+                let value =
+                    owned(from.read(record)).ok_or_else(|| unapplied(source, EditCause::Absent))?;
+                to.write(record, value)
+                    .map_err(|_| unapplied(source, EditCause::Type))
             }
-            Self::Hash { field, .. } => {
+            Self::Hash { field, source } => {
                 let digest = match field.read(record) {
-                    FieldValue::Null => return Err(EditCause::Absent),
+                    FieldValue::Null => return Err(unapplied(source, EditCause::Absent)),
                     FieldValue::Str(s) => sha256_hex(s.as_bytes()),
                     value @ (FieldValue::Bool(_) | FieldValue::Num(_)) => {
                         let mut text = String::new();
                         write_canonical(&mut text, value);
                         sha256_hex(text.as_bytes())
                     }
-                    _ => return Err(EditCause::Type),
+                    FieldValue::Json(_) => return Err(unapplied(source, EditCause::Type)),
+                    // `FieldValue` is `#[non_exhaustive]`: a variant core adds later is a
+                    // value this op does not know how to hash.
+                    _ => return Err(unapplied(source, EditCause::Type)),
                 };
                 field
                     .write(record, Value::String(digest))
-                    .map_err(|_| EditCause::Type)
+                    .map_err(|_| unapplied(source, EditCause::Type))
             }
             Self::Delete { fields } => {
                 // Every field was checked writable at load, so `remove` cannot refuse; an
@@ -363,7 +389,9 @@ impl Op {
     }
 }
 
-/// A read value as an owned JSON value, `None` when it read as null.
+/// A read value as an owned JSON value, `None` when it read as null or cannot be a JSON
+/// value at all (an integer outside `i64` and `u64`, a non-finite float: neither can come
+/// from a JSON record, so neither is written as `null` in its place).
 fn owned(value: FieldValue<'_>) -> Option<Value> {
     match value {
         FieldValue::Null => None,
@@ -373,10 +401,10 @@ fn owned(value: FieldValue<'_>) -> Option<Value> {
             .map(Value::from)
             .or_else(|_| u64::try_from(i).map(Value::from))
             .ok(),
-        FieldValue::Num(Num::Float(f)) => {
-            Some(serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number))
-        }
+        FieldValue::Num(Num::Float(f)) => serde_json::Number::from_f64(f).map(Value::Number),
         FieldValue::Json(v) => Some(v.clone()),
+        // `FieldValue` is `#[non_exhaustive]`: a variant core adds later reads as null here
+        // until this op learns it.
         _ => None,
     }
 }
@@ -388,8 +416,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 impl Stage for Edit {
     fn process(&self, mut record: Record, ctx: &Context<'_>) -> StageOutput {
         for op in &self.ops {
-            if let Err(cause) = op.apply(&mut record) {
-                ctx.metrics.edit_unapplied(op.kind(), op.source(), cause);
+            if let Err(Unapplied { field, cause }) = op.apply(&mut record) {
+                ctx.metrics.edit_unapplied(op.kind(), field, cause);
                 if self.on_unapplied == OnUnapplied::Drop {
                     return StageOutput::Drop(DropReason::EditUnapplied);
                 }
