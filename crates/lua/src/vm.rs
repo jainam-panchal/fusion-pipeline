@@ -245,7 +245,6 @@ impl Vm {
         }
         let expected = Expected {
             id: record_id,
-            tenant: record.resource.get("tenant.id"),
             output_bytes: self.script.output_bytes,
         };
         match returned {

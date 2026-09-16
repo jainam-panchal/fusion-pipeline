@@ -1,6 +1,6 @@
 //! The record as a plain Lua table with OTLP field names, and the way back with the
-//! checks the spec asks for: required fields present, types right, `id` and the tenant
-//! unchanged, strings under the size cap.
+//! checks the spec asks for: required fields present, types right, `id` unchanged, strings
+//! under the size cap.
 
 use fusion_core::record::{Kind, Record, RecordId};
 use mlua::{Integer, Table, Value as LuaValue};
@@ -103,12 +103,9 @@ fn json_to_lua(lua: &mlua::Lua, v: &Value) -> mlua::Result<LuaValue> {
 }
 
 /// What the script must leave alone: the id (every returned record keeps it; a script
-/// cannot mint ids) and the tenant (the engine fixed it once for every label and state
-/// key), plus the size cap on the strings it returns.
-pub(crate) struct Expected<'a> {
+/// cannot mint ids), plus the size cap on the strings it returns.
+pub(crate) struct Expected {
     pub(crate) id: RecordId,
-    /// The `resource.tenant.id` value as it came in, whatever its type.
-    pub(crate) tenant: Option<&'a Value>,
     pub(crate) output_bytes: usize,
 }
 
@@ -231,7 +228,7 @@ impl Reader {
 /// carry `id` (unchanged); `kind` is `log` when present and filled in when not; every other
 /// field is optional, and a key that is not a record field is refused, so a typo cannot
 /// silently drop data.
-pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Record, OutputError> {
+pub(crate) fn from_table(table: &Table, expected: &Expected) -> Result<Record, OutputError> {
     let mut record = Record::default();
     let mut reader = Reader {
         used: 0,
@@ -286,9 +283,6 @@ pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Recor
     }
     if !saw_id {
         return refuse("`id` is missing from the returned record");
-    }
-    if record.resource.get("tenant.id") != expected.tenant {
-        return refuse("`resource.tenant.id` must be returned unchanged");
     }
     Ok(record)
 }

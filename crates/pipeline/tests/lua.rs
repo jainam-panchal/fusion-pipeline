@@ -275,7 +275,7 @@ fn a_script_that_raises_counts_as_a_runtime_error() {
 
 #[test]
 fn a_returned_record_the_stage_refuses_counts_as_an_output_error() {
-    let cases: [(&str, &str); 6] = [
+    let cases: [(&str, &str); 5] = [
         ("missing id", "record.id = nil\n  return record"),
         ("changed id", "record.id = record.id + 1\n  return record"),
         (
@@ -285,10 +285,6 @@ fn a_returned_record_the_stage_refuses_counts_as_an_output_error() {
         (
             "oversized body",
             "record.body = string.rep(\"x\", 2048)\n  return record",
-        ),
-        (
-            "changed tenant",
-            "record.resource[\"tenant.id\"] = \"other\"\n  return record",
         ),
         ("not a record", "return 42"),
     ];
@@ -471,6 +467,23 @@ end"#,
         h.counter(Metric::LuaErrors, &lua_error("runtime")),
         0,
         "log.* do not raise"
+    );
+    h.finish();
+}
+
+#[test]
+fn a_script_may_rewrite_the_tenant_and_labels_keep_the_arrival_tenant() {
+    let yaml = config(
+        "",
+        "function process(record)\n  record.resource[\"tenant.id\"] = \"other\"\n  return record\nend",
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].resource.get("tenant.id"), Some(&json!("other")));
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    assert_eq!(
+        h.counter(Metric::RecordsOut, &[("tenant", "acme"), ("stage", "out")]),
+        1
     );
     h.finish();
 }

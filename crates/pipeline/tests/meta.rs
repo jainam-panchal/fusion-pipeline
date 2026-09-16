@@ -56,6 +56,7 @@ nodes:
         local copy = {}
         for k, v in pairs(record) do copy[k] = v end
         copy.body = "second"
+        copy.resource = { ["tenant.id"] = "minted" }
         copy.observed_time_unix_nano = 1
         return { record, copy }
       end
@@ -183,6 +184,7 @@ fn every_record_a_split_emits_continues_under_its_parents_meta() {
         assert_eq!(meta_of(r, "ingestion_time"), json!(5_000_000_000_u64));
         assert_eq!(meta_of(r, "delivery_count"), json!(2));
     }
+    assert_eq!(out[1].resource.get("tenant.id"), Some(&json!("minted")));
     assert_eq!(
         h.counter(Metric::RecordsOut, &[("tenant", "acme"), ("stage", "out")]),
         2

@@ -13,9 +13,10 @@
 //! The script defines `process(record)`. It gets the record as a plain table with OTLP
 //! field names (`record.attributes["http.path"]`) and returns it to pass, `nil` to drop
 //! (reason `lua_drop`), or a list of records to split. Every returned record keeps the
-//! original `id` and `resource.tenant.id`, `kind` stays `log`, typed fields keep their
-//! types, the maps stay flat, and the strings together stay under `output_kib`; anything
-//! else is refused and counts as an error of kind `output`.
+//! original `id`, `kind` stays `log`, typed fields keep their types, the maps stay flat,
+//! and the strings together stay under `output_kib`; anything else is refused and counts as
+//! an error of kind `output`. The tenant and time fields are payload: a script may rewrite
+//! them, and the pipeline keeps deciding with the record's `Meta` (ADR 0005).
 //!
 //! A script that loops is stopped by the instruction budget (`instructions`), one that
 //! allocates without bound by the memory cap (`memory_kib`), each per record; a runtime
