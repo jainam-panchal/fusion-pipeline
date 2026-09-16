@@ -112,7 +112,7 @@ impl Stage for Dedupe {
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
         let incoming = Holder {
             id: ctx.meta.record_id,
-            ingestion_time: ctx.meta.ingestion_time,
+            ingestion_time: ctx.meta.ingestion_time.unix_nanos(),
         };
         let key = self.state_key(&record);
         let existing = match ctx.state.set_nx(&key, &incoming.to_bytes(), self.window) {

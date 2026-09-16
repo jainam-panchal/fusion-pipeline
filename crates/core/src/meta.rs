@@ -47,16 +47,33 @@ pub struct Meta {
     pub record_id: RecordId,
     /// The tenant every metric label and state key uses: see [`Meta::tenant_of`].
     pub tenant: Arc<str>,
-    /// Ingestion time in nanoseconds since the Unix epoch: the record's
-    /// `observed_time_unix_nano`, else its `time_unix_nano`, else the transport's, else the
-    /// worker clock.
-    pub ingestion_time: u64,
-    /// Whether `ingestion_time` is the worker clock's, because neither the record nor the
-    /// transport said when it entered. Only a source that fills nothing (the in-memory one
-    /// tests use) gets here; end to end is not measured against such a time.
-    pub ingestion_time_from_clock: bool,
+    /// When the record entered: the record's `observed_time_unix_nano`, else its
+    /// `time_unix_nano`, else the transport's, else the worker clock.
+    pub ingestion_time: IngestionTime,
     /// How many times the message has been delivered, this one included.
     pub delivery_count: u64,
+}
+
+/// A record's ingestion time, and whether anyone reported it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestionTime {
+    /// The record (its producer, or a source that wrote the field) or its transport
+    /// reported when it entered, in nanoseconds since the Unix epoch.
+    Reported(u64),
+    /// Neither did, and this is the worker clock at intake, in nanoseconds since the Unix
+    /// epoch. Only a source that fills nothing (the in-memory one tests use) gets here; end
+    /// to end is not measured against it.
+    Clock(u64),
+}
+
+impl IngestionTime {
+    /// The time in nanoseconds since the Unix epoch, whoever said it.
+    #[must_use]
+    pub const fn unix_nanos(self) -> u64 {
+        match self {
+            Self::Reported(nanos) | Self::Clock(nanos) => nanos,
+        }
+    }
 }
 
 /// A record the engine does not walk. `tenant` is the one [`Meta::tenant_of`] gives it, so
@@ -97,15 +114,18 @@ impl Meta {
         if record.kind != Kind::Log {
             return Err(reject(Rejection::NotLog));
         }
-        let stamped = record
+        let ingestion_time = record
             .observed_time_unix_nano
             .or(record.time_unix_nano)
-            .or(arrival.ingestion_time);
+            .or(arrival.ingestion_time)
+            .map_or_else(
+                || IngestionTime::Clock(unix_nanos_now()),
+                IngestionTime::Reported,
+            );
         Ok(Self {
             record_id,
             tenant,
-            ingestion_time: stamped.unwrap_or_else(unix_nanos_now),
-            ingestion_time_from_clock: stamped.is_none(),
+            ingestion_time,
             delivery_count: arrival.delivery_count,
         })
     }

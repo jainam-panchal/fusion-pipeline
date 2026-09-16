@@ -6,7 +6,7 @@ mod common;
 
 use common::{WAIT, for_each_worker_count, start};
 use fusion_core::memory::AckOutcome;
-use fusion_core::meta::Arrival;
+use fusion_core::meta::{Arrival, unix_nanos_now};
 use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
 use serde_json::{Value, json};
@@ -438,10 +438,7 @@ fn each_worker_counts_in_its_own_vm() {
 
 #[test]
 fn now_ns_reads_the_clock_and_log_info_and_warn_are_callable() {
-    let before = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("after the epoch")
-        .as_nanos() as u64;
+    let before = unix_nanos_now();
     let yaml = config(
         "",
         r#"function process(record)
@@ -452,10 +449,7 @@ fn now_ns_reads_the_clock_and_log_info_and_warn_are_callable() {
 end"#,
     );
     let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
-    let after = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("after the epoch")
-        .as_nanos() as u64;
+    let after = unix_nanos_now();
     let stamped = out[0].attributes["stamped_at"]
         .as_u64()
         .expect("now_ns() was written");
@@ -537,10 +531,7 @@ nodes:
 fn a_script_stamping_the_clock_into_a_time_field_does_not_move_a_downstream_window() {
     for_each_worker_count(|workers| {
         let h = start(STAMP_THEN_DEDUPE, workers);
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("after the epoch")
-            .as_nanos() as u64;
+        let before = unix_nanos_now();
 
         // Ingested 20 s apart, past the 10 s window, then stamped a few microseconds apart
         // by the script. The window is the ingestion time's, so both pass; the third was

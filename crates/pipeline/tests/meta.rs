@@ -22,7 +22,10 @@ impl Stage for Reveal {
         for (key, value) in [
             ("meta.record_id", json!(meta.record_id.0)),
             ("meta.tenant", json!(&*meta.tenant)),
-            ("meta.ingestion_time", json!(meta.ingestion_time)),
+            (
+                "meta.ingestion_time",
+                json!(meta.ingestion_time.unix_nanos()),
+            ),
             ("meta.delivery_count", json!(meta.delivery_count)),
         ] {
             record.attributes.insert(key.to_owned(), value);

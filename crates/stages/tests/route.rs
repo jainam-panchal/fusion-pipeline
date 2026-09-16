@@ -5,7 +5,7 @@ use std::sync::{Arc, LazyLock};
 
 use fusion_core::config::{Config, DEFAULT_NAME};
 use fusion_core::memory::MemoryStateStore;
-use fusion_core::meta::{Meta, UNKNOWN_TENANT};
+use fusion_core::meta::{IngestionTime, Meta, UNKNOWN_TENANT};
 use fusion_core::metrics::{Labels, Metrics};
 use fusion_core::record::{Record, RecordId};
 use fusion_core::stage::{Context, DropReason, Stage, StageMetrics, StageOutput, State};
@@ -31,8 +31,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::noop);
 static META: LazyLock<Meta> = LazyLock::new(|| Meta {
     record_id: RecordId(1),
     tenant: UNKNOWN_TENANT.into(),
-    ingestion_time_from_clock: false,
-    ingestion_time: 0,
+    ingestion_time: IngestionTime::Reported(0),
     delivery_count: 1,
 });
 

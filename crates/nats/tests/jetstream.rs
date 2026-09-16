@@ -13,6 +13,7 @@ use async_nats::jetstream::{self, stream};
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::engine::Engine;
 use fusion_core::memory::{MemorySinks, MemoryStateStore};
+use fusion_core::meta::unix_nanos_now;
 use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
@@ -388,12 +389,9 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
     let observed = records[0]
         .observed_time_unix_nano
         .expect("observed_time_unix_nano stamped from the JetStream publish time");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
+    let now = unix_nanos_now();
     assert!(
-        u128::from(observed) <= now && now - u128::from(observed) < 60_000_000_000,
+        observed <= now && now - observed < 60_000_000_000,
         "publish time {observed} is recent"
     );
     assert_eq!(
@@ -427,14 +425,15 @@ impl Stage for RevealOnRedelivery {
     fn process(&self, mut record: Record, ctx: &Context<'_>) -> StageOutput {
         let meta = ctx.meta;
         if meta.delivery_count == 1 {
-            self.first.store(meta.ingestion_time, Ordering::SeqCst);
+            self.first
+                .store(meta.ingestion_time.unix_nanos(), Ordering::SeqCst);
             return StageOutput::Error(StageError::new("first delivery"));
         }
         for (key, value) in [
             ("meta.tenant", serde_json::json!(&*meta.tenant)),
             (
                 "meta.ingestion_time",
-                serde_json::json!(meta.ingestion_time),
+                serde_json::json!(meta.ingestion_time.unix_nanos()),
             ),
             (
                 "meta.delivery_count",
