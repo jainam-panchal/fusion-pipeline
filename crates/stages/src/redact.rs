@@ -66,13 +66,12 @@ impl Redact {
                 let path = FieldPath::parse(field)
                     .map_err(|e| node.invalid_params(format!("field `{field}`: {e}")))?;
                 // A redaction writes a string of the operator's making, so the field must
-                // take any string: core's own write rules, run on an empty record.
-                path.write(&mut Record::default(), Value::String(String::new()))
-                    .map_err(|e| {
-                        node.invalid_params(format!(
-                            "field `{field}` cannot be redacted: {e}; a redaction writes a string"
-                        ))
-                    })?;
+                // take any string: core's write rules decide.
+                path.accepts(&Value::String(String::new())).map_err(|e| {
+                    node.invalid_params(format!(
+                        "field `{field}` cannot be redacted: {e}; a redaction writes a string"
+                    ))
+                })?;
                 Ok(path)
             })
             .collect::<Result<Vec<_>, ConfigError>>()?;

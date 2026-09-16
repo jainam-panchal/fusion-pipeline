@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::meta::Meta;
 use fusion_core::metrics::{EditCause, EditOp};
-use fusion_core::path::{FieldPath, FieldValue, Num, PathError};
+use fusion_core::path::{FieldPath, FieldValue, Num};
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use serde::Deserialize;
@@ -192,16 +192,12 @@ impl At<'_> {
         FieldPath::parse(text).map_err(|e| self.error(format!("`{key}`: {e}")))
     }
 
-    /// `text` parsed as a path an op writes or removes: any record field, within its type,
-    /// and no `meta.*` path.
+    /// `text` parsed as a path an op writes or removes: core says whether it can be
+    /// written at all (any record field; no `meta.*` path).
     fn target(&self, key: &str, text: &str) -> Result<FieldPath, ConfigError> {
         let path = self.path(key, text)?;
-        if path.is_meta() {
-            let refused = PathError::ReadOnly {
-                path: path.to_string(),
-            };
-            return Err(self.error(format!("`{key}`: {refused}")));
-        }
+        path.writable()
+            .map_err(|e| self.error(format!("`{key}`: {e}")))?;
         Ok(path)
     }
 
@@ -271,10 +267,10 @@ fn parse_op(
                 return Err(at.error("`value` must be a string, number, bool or null"));
             }
             let field = at.target("field", &p.field)?;
-            // Core's own write rules, on an empty record: the field's type, refused here
-            // rather than on every record.
+            // Core's write rules: the field's type, refused here rather than on every
+            // record.
             field
-                .write(&mut Record::default(), p.value.clone())
+                .accepts(&p.value)
                 .map_err(|e| at.error(format!("value {}: {e}", p.value)))?;
             Op::Set {
                 field: LabelledPath::new(field),
@@ -303,7 +299,7 @@ fn parse_op(
             let p: HashParams = at.params(body)?;
             let field = at.target("field", &p.field)?;
             field
-                .write(&mut Record::default(), Value::String(String::new()))
+                .accepts(&Value::String(String::new()))
                 .map_err(|e| at.error(format!("{e}; hash writes a string")))?;
             Op::Hash {
                 field: LabelledPath::new(field),
@@ -340,8 +336,8 @@ impl Op {
     /// unchanged on `Err`.
     fn apply(&self, record: &mut Record, meta: &Meta) -> Result<(), Unapplied<'_>> {
         match self {
-            // The literal was written to an empty record at load and `write` never reads
-            // the record, so this cannot refuse. The arm still needs an answer, and the
+            // Core accepted the literal for this field at load and `write` never reads the
+            // record, so this cannot refuse. The arm still needs an answer, and the
             // three without a label are worse: a panic path, a swallowed error that goes
             // silent exactly when core changes `write` to read the record, or a made-up
             // label in a metric. So `set` carries a label it never emits today, one
