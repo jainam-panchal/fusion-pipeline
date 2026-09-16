@@ -8,7 +8,7 @@ use common::{WAIT, for_each_worker_count, start};
 use fusion_core::memory::AckOutcome;
 use fusion_core::meta::{Arrival, IngestionTime, unix_nanos_now};
 use fusion_core::metrics::CounterMetric;
-use fusion_core::record::Record;
+use fusion_core::record::{Record, RecordId};
 use serde_json::{Value, json};
 
 const STAGE: [(&str, &str); 2] = [("tenant", "acme"), ("stage", "script")];
@@ -966,16 +966,52 @@ end"#,
 }
 
 #[test]
-fn a_body_nested_as_deep_as_a_record_can_decode_comes_back_unchanged() {
+fn the_deepest_body_a_record_can_decode_comes_back_unchanged() {
     let yaml = config("", "function process(record) return record end");
-    let mut body = json!("leaf");
-    for _ in 0..100 {
-        body = json!({ "n": body });
-    }
+    let nested = |depth| {
+        let mut body = json!("leaf");
+        for _ in 0..depth {
+            body = json!({ "n": body });
+        }
+        body
+    };
+    // Found rather than hard-coded, so the test follows the decoder's limit.
+    let parses =
+        |depth| Record::from_json(&json!({ "id": 1, "body": nested(depth) }).to_string()).is_ok();
+    let deepest = (1..)
+        .find(|&depth| !parses(depth))
+        .expect("the decoder has a depth limit")
+        - 1;
+    let body = nested(deepest);
     let (out, h) = run(&yaml, 1, vec![record(1, json!({ "body": body.clone() }))]);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].body, Some(body));
     assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
+    h.finish();
+}
+
+#[test]
+fn a_returned_value_may_nest_128_tables_below_the_record_and_no_deeper() {
+    let yaml = config(
+        "    on_error: drop\n",
+        r#"function process(record)
+  local body = "leaf"
+  for _ = 1, record.attributes.depth do body = { n = body } end
+  record.body = body
+  return record
+end"#,
+    );
+    let (out, h) = run(
+        &yaml,
+        1,
+        vec![
+            record(1, json!({ "attributes": { "depth": 128 } })),
+            record(2, json!({ "attributes": { "depth": 129 } })),
+        ],
+    );
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].id, Some(RecordId(1)));
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 1);
     h.finish();
 }
 

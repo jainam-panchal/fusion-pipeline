@@ -2,7 +2,7 @@
 //! `scope` the rest of the path, joined with dots, is the flat map key.
 
 use fusion_core::meta::{IngestionTime, Meta};
-use fusion_core::path::{FieldPath, FieldValue, Num, PathError};
+use fusion_core::path::{FieldPath, FieldValue, Num, PathError, TopLevel};
 use fusion_core::record::{Kind, Record, RecordId};
 use serde_json::{Value, json};
 
@@ -371,19 +371,34 @@ fn writable_is_every_record_field_and_no_meta_path() {
 fn a_path_can_be_built_from_a_field_name_or_a_map_and_any_key() {
     assert_eq!(
         FieldPath::top_level("severity_text"),
-        Some(FieldPath::parse("severity_text").expect("parses"))
+        Some(TopLevel::Field(
+            FieldPath::parse("severity_text").expect("parses")
+        ))
     );
-    for name in ["attributes", "meta", "nope", ""] {
+    for name in ["meta", "nope", "", "attributes.x"] {
         assert_eq!(FieldPath::top_level(name), None, "{name}");
     }
+    let Some(TopLevel::Map(attributes)) = FieldPath::top_level("attributes") else {
+        panic!("attributes is a map");
+    };
     assert_eq!(
-        FieldPath::under("attributes", "Event ID.code"),
-        Some(FieldPath::parse(r#"attributes."Event ID".code"#).expect("parses"))
+        attributes.key("Event ID.code"),
+        FieldPath::parse(r#"attributes."Event ID".code"#).expect("parses")
     );
-    assert_eq!(FieldPath::under("body", "x"), None);
-    assert!(FieldPath::is_map("scope"));
-    assert!(!FieldPath::is_map("meta"));
-    assert!(!FieldPath::is_map("body"));
+    for name in ["resource", "scope"] {
+        assert!(
+            matches!(FieldPath::top_level(name), Some(TopLevel::Map(_))),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn only_the_id_path_is_the_id() {
+    assert!(FieldPath::parse("id").expect("parses").is_id());
+    for path in ["kind", "body", "attributes.id", "meta.id"] {
+        assert!(!FieldPath::parse(path).expect("parses").is_id(), "{path}");
+    }
 }
 
 #[test]

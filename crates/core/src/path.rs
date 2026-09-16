@@ -326,6 +326,29 @@ impl<'a> FieldValue<'a> {
     }
 }
 
+/// A top-level record field by name, as [`FieldPath::top_level`] answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopLevel {
+    /// A field that holds one value.
+    Field(FieldPath),
+    /// One of the three flat maps.
+    Map(RecordMap),
+}
+
+/// One of the three flat maps, `attributes`, `resource` or `scope`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordMap(MapField);
+
+impl RecordMap {
+    /// The path of `key` under this map, whatever characters `key` holds.
+    #[must_use]
+    pub fn key(self, key: &str) -> FieldPath {
+        FieldPath {
+            target: Target::Key(self.0, key.to_owned()),
+        }
+    }
+}
+
 /// A parsed dotted path into a record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldPath {
@@ -649,29 +672,26 @@ impl FieldPath {
         }
     }
 
-    /// The path of the top-level record field spelled `name`, as `parse(name)` gives it;
-    /// `None` for a map, for `meta`, and for anything that is not a record field. For a
-    /// caller that holds a record as named values rather than as path text.
+    /// The top-level record field spelled `name`: a field with its path, as `parse(name)`
+    /// gives it, or one of the three maps; `None` for `meta` and for anything that is not a
+    /// record field. For a caller that holds a record as named values rather than as path
+    /// text.
     #[must_use]
-    pub fn top_level(name: &str) -> Option<Self> {
-        Field::parse(name).map(|field| Self {
-            target: Target::Field(field),
+    pub fn top_level(name: &str) -> Option<TopLevel> {
+        if let Some(map) = MapField::parse(name) {
+            return Some(TopLevel::Map(RecordMap(map)));
+        }
+        Field::parse(name).map(|field| {
+            TopLevel::Field(Self {
+                target: Target::Field(field),
+            })
         })
     }
 
-    /// The path of `key` under the map spelled `map` (`attributes`, `resource` or `scope`),
-    /// whatever characters `key` holds; `None` when `map` is not one of the three.
+    /// Whether the path names the record's `id` field.
     #[must_use]
-    pub fn under(map: &str, key: &str) -> Option<Self> {
-        MapField::parse(map).map(|map| Self {
-            target: Target::Key(map, key.to_owned()),
-        })
-    }
-
-    /// Whether `name` is one of the three maps.
-    #[must_use]
-    pub fn is_map(name: &str) -> bool {
-        MapField::parse(name).is_some()
+    pub fn is_id(&self) -> bool {
+        self.target == Target::Field(Field::Id)
     }
 
     /// The flat map key when the path names a key of `attributes`, `resource` or `scope`.

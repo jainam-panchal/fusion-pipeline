@@ -4,7 +4,7 @@
 //! (ADR 0005), so a script may change or drop any of them.
 
 use fusion_core::meta::{Meta, MetaField, MetaValue};
-use fusion_core::path::FieldPath;
+use fusion_core::path::{FieldPath, TopLevel};
 use fusion_core::record::{Record, RecordId};
 use mlua::{Integer, Table, Value as LuaValue};
 use serde_json::{Map, Value};
@@ -249,28 +249,29 @@ pub(crate) fn from_table(table: &Table, output_bytes: usize) -> Result<Record, O
             .to_str()
             .map_err(|_| OutputError("a key is not valid UTF-8".into()))?
             .to_owned();
-        if FieldPath::is_map(&key) {
-            let entries = match &value {
-                LuaValue::Nil => continue,
-                LuaValue::Table(t) => reader.entries(t, &key)?,
-                other => {
-                    return refuse(format!("`{key}` must be a table, not {}", type_name(other)));
+        match FieldPath::top_level(&key) {
+            None => return refuse(format!("`{key}` is not a record field")),
+            Some(TopLevel::Map(map)) => {
+                let entries = match &value {
+                    LuaValue::Nil => continue,
+                    LuaValue::Table(t) => reader.entries(t, &key)?,
+                    other => {
+                        return refuse(format!(
+                            "`{key}` must be a table, not {}",
+                            type_name(other)
+                        ));
+                    }
+                };
+                for (name, value) in entries {
+                    write(&map.key(&name), &mut record, value)?;
                 }
-            };
-            for (name, value) in entries {
-                let path = FieldPath::under(&key, &name)
-                    .ok_or_else(|| OutputError(format!("`{key}` is not a record map")))?;
-                write(&path, &mut record, value, false)?;
             }
-            continue;
+            Some(TopLevel::Field(path)) => {
+                if let Some(value) = reader.json(&value, &key)? {
+                    write(&path, &mut record, value)?;
+                }
+            }
         }
-        let Some(path) = FieldPath::top_level(&key) else {
-            return refuse(format!("`{key}` is not a record field"));
-        };
-        let Some(value) = reader.json(&value, &key)? else {
-            continue;
-        };
-        write(&path, &mut record, value, key == "id")?;
     }
     Ok(record)
 }
@@ -279,8 +280,8 @@ pub(crate) fn from_table(table: &Table, output_bytes: usize) -> Result<Record, O
 /// is tried once more in the form a Lua author means: an integral float as the integer
 /// (`18 / 2` is a float in Lua 5.4), and for the record id, decimal text as the integer (the
 /// form [`to_table`] hands over an id above 2^63 in). The refusal reported is core's.
-fn write(path: &FieldPath, record: &mut Record, value: Value, id: bool) -> Result<(), OutputError> {
-    let meant = as_meant(&value, id);
+fn write(path: &FieldPath, record: &mut Record, value: Value) -> Result<(), OutputError> {
+    let meant = integral(&value).or_else(|| if path.is_id() { decimal(&value) } else { None });
     let Err(refused) = path.write(record, value) else {
         return Ok(());
     };
@@ -290,24 +291,21 @@ fn write(path: &FieldPath, record: &mut Record, value: Value, id: bool) -> Resul
     }
 }
 
-/// The integer a Lua value stands for when it is not written as one: an integral float
-/// within `i64` (a float that large is an integer already, and the cast is exact), or, for
-/// the record id, decimal digits.
-fn as_meant(value: &Value, id: bool) -> Option<Value> {
+/// The integer an integral float within `i64` stands for (a float that large is an integer
+/// already, and the cast is exact).
+fn integral(value: &Value) -> Option<Value> {
     // 2^63, the first float outside `i64`.
     const I64_END: f64 = 9_223_372_036_854_775_808.0;
-    match value {
-        Value::Number(n) if n.is_f64() => {
-            let f = n.as_f64()?;
-            (f.fract() == 0.0 && (-I64_END..I64_END).contains(&f)).then(|| Value::from(f as i64))
-        }
-        Value::String(text)
-            if id && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) =>
-        {
-            text.parse::<u64>().ok().map(Value::from)
-        }
-        _ => None,
-    }
+    let f = value.as_f64().filter(|_| value.is_f64())?;
+    (f.fract() == 0.0 && (-I64_END..I64_END).contains(&f)).then(|| Value::from(f as i64))
+}
+
+/// The `u64` that decimal digits spell, the form an id above 2^63 crosses in.
+fn decimal(value: &Value) -> Option<Value> {
+    let text = value
+        .as_str()
+        .filter(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))?;
+    text.parse::<u64>().ok().map(Value::from)
 }
 
 /// A Lua value's type as an error message names it.
