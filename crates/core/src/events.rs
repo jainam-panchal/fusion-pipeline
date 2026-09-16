@@ -164,7 +164,9 @@ impl EventLog for NoEvents {
     fn emit(&self, _: Event) {}
 }
 
-/// Writes every event as one line on stderr, prefixed `pipeline:`.
+/// Writes every event as one line on stderr, prefixed `pipeline:`. The fallback for a binary
+/// with no log endpoint, meant for development: it writes from the calling worker and waits
+/// on stderr, so it is outside the "must not block for long" contract the OTLP log keeps.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StderrEventLog;
 

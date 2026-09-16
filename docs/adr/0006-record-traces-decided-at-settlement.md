@@ -16,13 +16,13 @@ Issue #12 asks for structured logs of every stage error and nak, a trace per rec
 **A trace id is a function of the record.** `trace key = mix(record id ^ fnv1a(tenant) ^ salt)` and `trace id = key << 64 | record id`. Span ids are derived from the key, the delivery count and the visit index, and are never zero. The same key decides sampling, so a redelivered record gets the same answer. Because the id is derived:
 
 - every delivery of one record lands in one trace, and a redelivery's spans (new span ids) sit beside the failure that caused it;
-- a log line carries the trace id in its OTLP trace context, and so does the NATS source's dead-letter line, which knows only the record id, the tenant and the delivery count;
+- a log line carries the trace id in its OTLP trace context, and so does the NATS source's dead-letter line, which knows only the record id, the tenant and the delivery count. It does so only when a trace sink is configured, so a line never names a trace nobody keeps;
 - two tenants that reuse an id get different traces;
 - the salt keeps record id 0 from giving the invalid all-zero trace id.
 
 The OpenTelemetry SDK's tracer always generates its own ids and has no end time on its span builder. So the OTLP trace sink does not use a tracer: it builds `SpanData` itself and hands it to a `BatchSpanProcessor`.
 
-**Telemetry never holds up a record.** Logs and spans go through the SDK's batch processors, which `try_send` onto a bounded queue and drop when it is full. During a sink outage or a state-store pause, every delivery writes a `stage_error` line, a `nak` line and a trace. What does not fit is lost, not waited for.
+**Telemetry never holds up a record.** Logs and spans go through the SDK's batch processors, which `try_send` onto a bounded queue and drop when it is full. During a sink outage or a state-store pause, every delivery writes a `stage_error` line, a `nak` line and a trace. What does not fit is lost, not waited for. The stderr fallback a binary uses when no log endpoint is set is the exception: it writes from the worker, and is meant for development only.
 
 ## Consequences
 
