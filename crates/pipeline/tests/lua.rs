@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{WAIT, for_each_worker_count, start};
+use common::{WAIT, deploy_config, for_each_worker_count, start};
 use fusion_core::memory::AckOutcome;
 use fusion_core::meta::{Arrival, IngestionTime, unix_nanos_now};
 use fusion_core::metrics::CounterMetric;
@@ -509,9 +509,9 @@ end"#,
     let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
     assert_eq!(out.len(), 2);
     assert_eq!(out[0].id, None);
-    assert_eq!(out[0].kind, fusion_core::record::Kind::Metric);
+    assert_eq!(out[0].kind, Kind::Metric);
     assert_eq!(out[1].id.map(|id| id.0), Some(99));
-    assert_eq!(out[1].kind, fusion_core::record::Kind::Span);
+    assert_eq!(out[1].kind, Kind::Span);
     assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
     assert_eq!(
         h.counter(
@@ -625,7 +625,7 @@ fn a_script_read_from_a_file_runs_over_records() {
 /// `http.status_class` from `http.status`. Read from the shipped file, so the script an
 /// operator copies is the one this test drives.
 fn shipped_split_lines() -> String {
-    let config = fusion_core::config::Config::from_yaml(&common::deploy_config("pipeline.yaml"))
+    let config = fusion_core::config::Config::from_yaml(&deploy_config("pipeline.yaml"))
         .expect("the compose config parses");
     let node = config
         .nodes
@@ -826,7 +826,7 @@ end"#,
     );
     let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
     assert_eq!(out.len(), 1);
-    assert_eq!(out[0].kind, fusion_core::record::Kind::Log);
+    assert_eq!(out[0].kind, Kind::Log);
     assert_eq!(out[0].severity_number, Some(9));
     assert_eq!(out[0].time_unix_nano, Some(2));
     assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);

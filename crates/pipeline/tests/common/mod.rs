@@ -1,6 +1,7 @@
 //! The engine harness the trait-boundary tests share: a YAML config compiled with the
 //! default registry plus an in-memory sink, an in-memory source to push envelopes through,
-//! an in-memory state store, and the sinks to assert on.
+//! an in-memory state store, and the sinks to assert on. It also owns where `deploy/` is,
+//! so a test that drives a shipped config does not spell the path itself.
 
 #![allow(dead_code)]
 
@@ -22,7 +23,7 @@ pub fn deploy_config(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../deploy")
         .join(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{name} is readable: {err}"))
+    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("deploy/{name} is readable: {err}"))
 }
 
 /// How long a test waits for an ack handle to settle.
