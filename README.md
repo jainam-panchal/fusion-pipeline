@@ -95,22 +95,48 @@ tests. Leak-check it with AddressSanitizer on nightly instead:
 RUSTFLAGS=-Zsanitizer=address cargo +nightly test -p fusion-regex --target x86_64-unknown-linux-gnu
 ```
 
-## Metrics
+## Metrics, logs and traces
 
-The full stack, pipeline included, is one command; the internal dashboard is provisioned
-from `deploy/grafana` and the pipeline's metrics reach Prometheus through the collector:
+The full stack, pipeline included, is one command. The dashboards and the Prometheus, Loki and
+Tempo datasources are provisioned from `deploy/grafana`, and the pipeline's metrics, logs and
+record traces all reach them through the one collector:
 
 ```sh
 docker compose -f deploy/compose.yaml up -d --build
 open http://127.0.0.1:3000/d/fusion-internal     # Grafana, no login
+open http://127.0.0.1:3000/d/fusion-tenant       # one tenant's view
 nats pub logs.acme.syslog '{"id": {{Count}}, "body": "disk full"}' --count 1000
-deploy/metrics-check.sh                          # traffic in; every metric with a producer present, labels checked, exit non-zero otherwise
+deploy/metrics-check.sh                          # traffic in; every metric, the log lines and a trace checked, exit non-zero otherwise
 ```
 
-The pipeline exports over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` (or the metrics-specific
-variable) is set and records nothing otherwise, so `cargo run` against the compose NATS works
-as before; point it at the compose collector with `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`.
-`OTEL_METRIC_EXPORT_INTERVAL` (milliseconds) sets the cadence; compose uses 5000.
+Ports that clash with another stack move with `GRAFANA_PORT`, `DRAGONFLY_PORT`, `LOKI_PORT` and
+`TEMPO_PORT`; `metrics-check.sh` reads the same variables.
+
+The pipeline exports a signal over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` (or that signal's
+`OTEL_EXPORTER_OTLP_{METRICS,LOGS,TRACES}_ENDPOINT`) is set. A signal with no endpoint is off:
+no metrics are recorded, events go to stderr, no trace is exported. So `cargo run` against the
+compose NATS works as before; point it at the compose collector with
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`. `OTEL_METRIC_EXPORT_INTERVAL`
+(milliseconds) sets the metrics cadence (compose uses 5000). `OTEL_BLRP_*` and `OTEL_BSP_*` size
+the log and span queues; a full queue drops rather than holds up a worker.
+
+**Logs** are events from a closed set: `stage_error`, `nak`, `redelivery`, `dead_letter` and
+`dead_letter_failed`. Each one carries `record.id` (stored in Loki as `record_id`), `tenant`,
+`node`, `reason` (the failure kind) and `delivery_count`, and the error text is the line. Drops
+are not logged: `records_dropped_total` says where they went. In Grafana, *Explore* → Loki:
+
+```logql
+{service_name="fusion-pipeline"} | record_id="1000001"
+{service_name="fusion-pipeline"} | event="nak" | tenant="acme"
+```
+
+**Traces**: one trace per record, one `delivery` span per delivery and one span per node it
+visited, parented on the node the record came from. The pipeline decides whether to keep a
+trace when the record settles (ADR 0006): it keeps every trace whose walk failed or whose record
+was redelivered, and `OTEL_TRACES_SAMPLER_ARG` (default `0.01`) of the rest, chosen by record id
+and tenant. The trace id is derived from them too, so every delivery of a record lands in one
+trace. A log line's *Open trace* button opens the trace in Tempo, and a span's *Logs for this
+span* opens the record's lines in Loki.
 
 Every metric carries `tenant`, the record's `Meta` tenant (the subject's, else the
 `Fusion-Tenant` header, else `unknown`; never the record's `resource.tenant.id`); per-node metrics carry `stage` (the node id, `source` for the
@@ -123,7 +149,17 @@ resource, so `--scale pipeline=3` gives three series that the dashboard sums. NA
 Dragonfly its own metrics (ADR 0003 says why not cAdvisor). `deploy/nats-smoke.sh` runs its own `pipelined` on the host and
 stops the compose one first.
 
-The dashboard is timeseries only, no stat tiles: an Overview row (throughput, latency, backlog,
+**The tenant dashboard** (`fusion-tenant`) shows one tenant, chosen at the top:
+
+- records in and records written by each sink;
+- *Where did my logs go*: drops by stage and reason, from `records_dropped_total` alone;
+- dead letters by reason;
+- bytes in and written (`bytes_in_total`, `bytes_out_total`);
+- end-to-end p99.
+
+It shows no stage timings and nothing about the state store, NATS, Lua or the process.
+
+**The internal dashboard** is timeseries only, no stat tiles: an Overview row (throughput, latency, backlog,
 failures, CPU, memory) with Last/Max/Mean in every legend, a Source row (handed over,
 entered the graph, rejected by reason), then one row per
 stage that repeats for every node the pipeline has reported (records, p50/p95/p99, drops by

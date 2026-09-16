@@ -1,0 +1,31 @@
+# Tempo for the pipeline's record traces (issue #12): one process, local storage. The
+# collector sends OTLP over gRPC to :4317. Tempo 2.7 and later bind OTLP receivers to
+# localhost by default, so the endpoint is spelled out. Grafana queries it on :3200.
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 24h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+usage_report:
+  reporting_enabled: false

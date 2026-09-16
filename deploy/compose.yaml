@@ -22,14 +22,20 @@
 # consumer pending, redelivered and ack floor included) and `dragonfly` serves its own
 # metrics at :6379/metrics. Each process reports its own CPU and memory: the pipeline as
 # OTel `process.*` metrics, NATS through the exporter's `-varz`, Dragonfly on its own
-# endpoint. `grafana` provisions the Prometheus datasource and the internal dashboard from
-# `deploy/grafana`; open http://127.0.0.1:3000/d/fusion-internal.
+# endpoint.
+#
+# Logs and traces (issue #12): the pipeline's events go over OTLP to the collector and on to
+# `loki`, its kept record traces to `tempo`. `grafana` provisions the Prometheus, Loki and
+# Tempo datasources, linked by trace id and record id, and the two dashboards from
+# `deploy/grafana`: http://127.0.0.1:3000/d/fusion-internal for us and
+# http://127.0.0.1:3000/d/fusion-tenant for one tenant.
 #
 # `deploy/metrics-check.sh` drives traffic through the stack and checks every metric the spec
-# names is in Prometheus with its labels.
+# names is in Prometheus with its labels, and that a failure's log line and trace arrive.
 #
-# Host ports that commonly clash with other stacks can be moved: `GRAFANA_PORT` (3000) and
-# `DRAGONFLY_PORT` (6379), e.g. `GRAFANA_PORT=3001 docker compose -f deploy/compose.yaml up`.
+# Host ports that commonly clash with other stacks can be moved: `GRAFANA_PORT` (3000),
+# `DRAGONFLY_PORT` (6379), `LOKI_PORT` (3100) and `TEMPO_PORT` (3200), e.g.
+# `GRAFANA_PORT=3001 docker compose -f deploy/compose.yaml up`.
 # Dragonfly's size is `DRAGONFLY_THREADS` (2) and `DRAGONFLY_MAXMEMORY` (512mb).
 
 services:
@@ -95,6 +101,9 @@ services:
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
       - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      - loki
+      - tempo
     ports:
       - "4317:4317"   # OTLP gRPC
       - "4318:4318"   # OTLP HTTP
@@ -120,6 +129,26 @@ services:
     ports:
       - "9090:9090"
 
+  loki:
+    image: grafana/loki:3.1.1
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./loki.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    # The image runs as an unprivileged user that cannot write a fresh named volume.
+    user: "0"
+    volumes:
+      - ./tempo.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "${TEMPO_PORT:-3200}:3200"
+
   grafana:
     image: grafana/grafana:11.2.0
     environment:
@@ -132,6 +161,8 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+      - loki
+      - tempo
     ports:
       - "${GRAFANA_PORT:-3000}:3000"
 
@@ -152,6 +183,10 @@ services:
       DRAGONFLY_URL: redis://dragonfly:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      # One passing record in a hundred is traced; failed and redelivered ones always are.
+      OTEL_TRACES_SAMPLER_ARG: "0.01"
+      OTEL_BLRP_SCHEDULE_DELAY: "1000"
+      OTEL_BSP_SCHEDULE_DELAY: "1000"
     volumes:
       - ./pipeline.yaml:/etc/pipeline/pipeline.yaml:ro
     # First Ctrl-C drains, a second exits at once; give the drain time before the kill.
@@ -162,3 +197,5 @@ services:
 volumes:
   nats-data:
   prometheus-data:
+  loki-data:
+  tempo-data:

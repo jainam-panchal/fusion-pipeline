@@ -1,0 +1,45 @@
+# The datasources the dashboards and Explore read, provisioned, not clickable: the compose
+# Prometheus (metrics), Loki (the pipeline's events) and Tempo (its kept record traces).
+#
+# A log line opens its trace: Loki keeps the OTLP trace context as the structured metadata
+# `trace_id`, which the derived field matches by label. A span opens its record's log lines:
+# Loki keeps the `record.id` attribute as `record_id`, so the query filters on that and on the
+# tenant, both read from the span.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      derivedFields:
+        - name: Trace
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: tempo
+          url: "$${__value.raw}"
+          urlDisplayLabel: Open trace
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        customQuery: true
+        query: '{service_name="fusion-pipeline"} | record_id="$${__span.tags["record.id"]}" | tenant="$${__span.tags["tenant"]}"'
+      nodeGraph:
+        enabled: true

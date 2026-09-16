@@ -1,5 +1,7 @@
-# The one collector every signal goes through. Metrics in over OTLP, out to Prometheus,
-# which scrapes :8889. Names and labels pass through as the pipeline emits them: counters
+# The one collector every signal goes through. Everything in over OTLP. Metrics out to
+# Prometheus, which scrapes :8889; logs to Loki's native OTLP endpoint (the `loki` exporter is
+# deprecated), where the log attributes become structured metadata; traces to Tempo over
+# gRPC. Metrics: Names and labels pass through as the pipeline emits them: counters
 # already end in `_total` and histograms in `_seconds` with unit `s`, so the exporter's
 # suffixing changes nothing. The resource becomes the `job` (service name) and `instance`
 # (instance id) labels, so two pipeline instances behind one consumer are two series rather
@@ -16,6 +18,12 @@ processors:
   batch: {}
 
 exporters:
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
   prometheus:
     endpoint: 0.0.0.0:8889
     send_timestamps: true
@@ -32,3 +40,11 @@ service:
       receivers: [otlp]
       processors: [batch]
       exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/loki]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo]

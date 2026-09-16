@@ -462,6 +462,7 @@ dependencies = [
  "fusion-state",
  "mimalloc",
  "serde_json",
+ "serde_yaml_ng",
  "thiserror",
  "tokio",
 ]
