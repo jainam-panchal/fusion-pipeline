@@ -235,268 +235,379 @@ fn exprs(panel: &Json) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Every series name in a PromQL expression, each with its selector (empty when it has
-/// none): every identifier that is not a function (followed by `(`), an operator,
-/// aggregation or number literal (in any case), part of a number or duration, or a
-/// dashboard variable (after `$`), and is not inside a string, a `{...}` selector, a `[...]`
-/// range or the label list of a grouping keyword. A selector with no name in front names
-/// its series through an exact `__name__` matcher, or stands as the name itself.
-fn metric_names(expr: &str) -> Vec<(String, String)> {
-    const GROUPINGS: [&str; 6] = [
-        "by",
-        "without",
-        "on",
-        "ignoring",
-        "group_left",
-        "group_right",
-    ];
-    // Operators, aggregations, which may be followed by `by (...)` rather than `(`, and the
-    // number literals.
-    const KEYWORDS: [&str; 20] = [
-        "and",
-        "or",
-        "unless",
-        "bool",
-        "offset",
-        "atan2",
-        "sum",
-        "avg",
-        "min",
-        "max",
-        "count",
-        "group",
-        "stddev",
-        "stdvar",
-        "topk",
-        "bottomk",
-        "quantile",
-        "count_values",
-        "nan",
-        "inf",
-    ];
-    let chars: Vec<char> = expr.chars().collect();
-    let after_spaces = |mut j: usize| {
-        while chars.get(j).is_some_and(|c| c.is_whitespace()) {
-            j += 1;
+/// One label matcher of a selector: label, operator (`=`, `!=`, `=~`, `!~`) and unquoted
+/// value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Matcher {
+    label: String,
+    op: String,
+    value: String,
+}
+
+impl Matcher {
+    fn new(label: &str, op: &str, value: &str) -> Self {
+        Self {
+            label: label.to_owned(),
+            op: op.to_owned(),
+            value: value.to_owned(),
         }
-        j
-    };
-    let mut names = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '"' | '\'' | '`' => i = string_end(&chars, i),
+    }
+}
+
+/// One series a PromQL expression reads: its name and the matchers of its selector (none
+/// when it has no selector).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Series {
+    name: String,
+    matchers: Vec<Matcher>,
+}
+
+/// Grouping keywords, whose parenthesised list holds label names.
+const GROUPINGS: [&str; 6] = [
+    "by",
+    "without",
+    "on",
+    "ignoring",
+    "group_left",
+    "group_right",
+];
+
+/// Operators, aggregations (which may be followed by `by (...)` rather than `(`) and the
+/// number literals. Matched in any case.
+const KEYWORDS: [&str; 20] = [
+    "and",
+    "or",
+    "unless",
+    "bool",
+    "offset",
+    "atan2",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "count",
+    "group",
+    "stddev",
+    "stdvar",
+    "topk",
+    "bottomk",
+    "quantile",
+    "count_values",
+    "nan",
+    "inf",
+];
+
+/// A position in a PromQL expression, with the few moves both scanners need. Every move
+/// that expects a closing character fails rather than running off the end.
+struct Cursor {
+    chars: Vec<char>,
+    at: usize,
+}
+
+impl Cursor {
+    fn new(text: &str) -> Self {
+        Self {
+            chars: text.chars().collect(),
+            at: 0,
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.at).copied()
+    }
+
+    fn skip_spaces(&mut self) {
+        self.take_while(char::is_whitespace);
+    }
+
+    fn take_while(&mut self, keep: impl Fn(char) -> bool) -> String {
+        let start = self.at;
+        while self.peek().is_some_and(&keep) {
+            self.at += 1;
+        }
+        self.chars[start..self.at].iter().collect()
+    }
+
+    /// An identifier: an ASCII letter or `_`, then letters, digits, `_` and `:`.
+    fn identifier(&mut self) -> String {
+        self.take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':'))
+    }
+
+    /// The text of the string opening here (`"`, `'` or a raw backtick string), consumed.
+    fn quoted(&mut self) -> Result<String, String> {
+        let quote = self.peek().ok_or("expected a string")?;
+        let start = self.at;
+        self.at += 1;
+        let mut text = String::new();
+        loop {
+            match self.peek() {
+                None => return Err(format!("unclosed string at {start}")),
+                Some(c) if c == quote => break,
+                Some('\\') if quote != '`' => {
+                    self.at += 1;
+                    text.extend(self.peek());
+                }
+                Some(c) => text.push(c),
+            }
+            self.at += 1;
+        }
+        self.at += 1;
+        Ok(text)
+    }
+
+    /// The text up to the `close` matching the `open` here, consumed with both ends,
+    /// skipping strings.
+    fn delimited(&mut self, close: char) -> Result<String, String> {
+        let start = self.at;
+        self.at += 1;
+        loop {
+            match self.peek() {
+                None => return Err(format!("unclosed `{}` at {start}", self.chars[start])),
+                Some(c) if c == close => break,
+                Some('"' | '\'' | '`') => {
+                    self.quoted()?;
+                }
+                Some(_) => self.at += 1,
+            }
+        }
+        self.at += 1;
+        Ok(self.chars[start + 1..self.at - 1].iter().collect())
+    }
+}
+
+/// Every series a PromQL expression reads: every identifier that is not a function
+/// (followed by `(`), an operator, aggregation or number literal (in any case), part of a
+/// number or duration, or a dashboard variable (`$x`, `${x}`), and is not inside a string, a
+/// `[...]` range or the label list of a grouping keyword; and every selector with no name
+/// in front, named by its exact `__name__` matcher or its quoted name, else by its own text.
+///
+/// # Errors
+///
+/// An unclosed string, selector, range or list, or a character PromQL does not have (a name
+/// starting with a non-ASCII letter), so a malformed dashboard query fails the test instead
+/// of passing or panicking.
+fn metric_names(expr: &str) -> Result<Vec<Series>, String> {
+    let mut cursor = Cursor::new(expr);
+    let mut found = Vec::new();
+    while let Some(c) = cursor.peek() {
+        match c {
+            '"' | '\'' | '`' => {
+                cursor.quoted()?;
+            }
             '{' => {
-                let end = selector_end(&chars, i);
-                let selector: String = chars[i + 1..end - 1].iter().collect();
-                let name = matchers(&selector)
-                    .into_iter()
-                    .find(|(label, op, _)| label == "__name__" && op == "=")
-                    .map_or_else(|| chars[i..end].iter().collect(), |(_, _, value)| value);
-                names.push((name, selector));
-                i = end;
+                let text = cursor.delimited('}')?;
+                let matchers = matchers(&text)?;
+                let name = matchers
+                    .iter()
+                    .find(|m| m.label == "__name__" && m.op == "=")
+                    .map_or_else(|| format!("{{{text}}}"), |m| m.value.clone());
+                found.push(Series { name, matchers });
             }
             '[' => {
-                i = chars[i..]
-                    .iter()
-                    .position(|c| *c == ']')
-                    .map_or(chars.len(), |p| i + p + 1);
+                cursor.delimited(']')?;
             }
-            // A number or a duration (`5m`), letters and all.
-            c if c.is_ascii_digit() => {
-                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '.') {
-                    i += 1;
-                }
+            '(' => {
+                cursor.at += 1;
             }
             '$' => {
-                i += 1;
-                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                    i += 1;
+                cursor.at += 1;
+                if cursor.peek() == Some('{') {
+                    cursor.delimited('}')?;
+                } else {
+                    cursor.identifier();
                 }
+            }
+            // A number or a duration (`5m`, `1e-3`), letters and all.
+            c if c.is_ascii_digit() || c == '.' => {
+                cursor.take_while(|c| c.is_ascii_alphanumeric() || c == '.');
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
-                let start = i;
-                while i < chars.len()
-                    && (chars[i].is_ascii_alphanumeric() || matches!(chars[i], '_' | ':'))
-                {
-                    i += 1;
-                }
-                let name: String = chars[start..i].iter().collect();
+                let name = cursor.identifier();
                 let keyword = name.to_ascii_lowercase();
-                let next = after_spaces(i);
+                cursor.skip_spaces();
+                let next = cursor.peek();
                 if GROUPINGS.contains(&keyword.as_str()) {
-                    if chars.get(next) == Some(&'(') {
-                        i = chars[next..]
-                            .iter()
-                            .position(|c| *c == ')')
-                            .map_or(chars.len(), |p| next + p + 1);
+                    if next == Some('(') {
+                        cursor.delimited(')')?;
                     }
-                } else if chars.get(next) == Some(&'(') || KEYWORDS.contains(&keyword.as_str()) {
+                } else if next == Some('(') || KEYWORDS.contains(&keyword.as_str()) {
                     // A function call, an operator keyword or a number literal.
                 } else {
-                    let selector = if chars.get(next) == Some(&'{') {
-                        let end = selector_end(&chars, next);
-                        i = end;
-                        chars[next + 1..end - 1].iter().collect()
+                    let matchers = if next == Some('{') {
+                        matchers(&cursor.delimited('}')?)?
                     } else {
-                        String::new()
+                        Vec::new()
                     };
-                    names.push((name, selector));
+                    found.push(Series { name, matchers });
                 }
             }
-            _ => i += 1,
+            c if c.is_whitespace() || "+-*/%^=!<>,)@:".contains(c) => cursor.at += 1,
+            other => return Err(format!("unexpected `{other}` at {}", cursor.at)),
         }
     }
-    names
+    Ok(found)
 }
 
-/// The index just past the string that opens at `open`, with `"`, `'` or backtick quotes;
-/// a backtick string is raw.
-fn string_end(chars: &[char], open: usize) -> usize {
-    let quote = chars[open];
-    let mut i = open + 1;
-    while i < chars.len() && chars[i] != quote {
-        i += if chars[i] == '\\' && quote != '`' {
-            2
-        } else {
-            1
-        };
-    }
-    (i + 1).min(chars.len())
-}
-
-/// The index just past the `}` closing the selector that opens at `open`, skipping quoted
-/// label values.
-fn selector_end(chars: &[char], open: usize) -> usize {
-    let mut i = open + 1;
-    while i < chars.len() && chars[i] != '}' {
-        i = if matches!(chars[i], '"' | '\'' | '`') {
-            string_end(chars, i)
-        } else {
-            i + 1
-        };
-    }
-    (i + 1).min(chars.len())
-}
-
-/// The label matchers of a selector's inside, each as label, operator and unquoted value.
-fn matchers(selector: &str) -> Vec<(String, String, String)> {
-    let chars: Vec<char> = selector.chars().collect();
+/// The label matchers of a selector's inside. A quoted string standing alone is the series
+/// name (Prometheus 3), read as an exact `__name__` matcher; a label may also be quoted.
+///
+/// # Errors
+///
+/// Anything that is not a comma-separated list of matchers.
+fn matchers(selector: &str) -> Result<Vec<Matcher>, String> {
+    let mut cursor = Cursor::new(selector);
     let mut found = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if !(chars[i].is_ascii_alphabetic() || chars[i] == '_') {
-            i += 1;
-            continue;
+    loop {
+        cursor.skip_spaces();
+        let (label, quoted) = match cursor.peek() {
+            None => break,
+            Some('"' | '\'' | '`') => (cursor.quoted()?, true),
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => (cursor.identifier(), false),
+            Some(other) => return Err(format!("unexpected `{other}` in `{{{selector}}}`")),
+        };
+        cursor.skip_spaces();
+        let op = cursor.take_while(|c| matches!(c, '=' | '!' | '~'));
+        if op.is_empty() {
+            if !quoted {
+                return Err(format!("`{label}` has no operator in `{{{selector}}}`"));
+            }
+            found.push(Matcher::new("__name__", "=", &label));
+        } else {
+            if !["=", "!=", "=~", "!~"].contains(&op.as_str()) {
+                return Err(format!("operator `{op}` in `{{{selector}}}`"));
+            }
+            cursor.skip_spaces();
+            if !matches!(cursor.peek(), Some('"' | '\'' | '`')) {
+                return Err(format!("unquoted value in `{{{selector}}}`"));
+            }
+            let value = cursor.quoted()?;
+            found.push(Matcher::new(&label, &op, &value));
         }
-        let start = i;
-        while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-            i += 1;
+        cursor.skip_spaces();
+        match cursor.peek() {
+            None => break,
+            Some(',') => cursor.at += 1,
+            Some(other) => return Err(format!("unexpected `{other}` in `{{{selector}}}`")),
         }
-        let label: String = chars[start..i].iter().collect();
-        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
-            i += 1;
-        }
-        let op_start = i;
-        while chars.get(i).is_some_and(|c| matches!(c, '=' | '!' | '~')) {
-            i += 1;
-        }
-        let op: String = chars[op_start..i].iter().collect();
-        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
-            i += 1;
-        }
-        if !matches!(chars.get(i), Some('"' | '\'' | '`')) {
-            continue;
-        }
-        let end = string_end(&chars, i);
-        let value: String = chars[i + 1..end - 1].iter().collect();
-        found.push((label, op, value));
-        i = end;
     }
-    found
+    Ok(found)
 }
 
-/// Whether a selector keeps only the dashboard's chosen tenant.
-fn filters_on_the_tenant(selector: &str) -> bool {
-    matchers(selector)
-        .iter()
-        .any(|(label, op, value)| label == "tenant" && op == "=" && value == "$tenant")
+/// Whether a selector keeps only the dashboard's chosen tenant: it has `tenant="$tenant"`,
+/// and every other matcher on `tenant` is that one.
+fn filters_on_the_tenant(matchers: &[Matcher]) -> bool {
+    let chosen = Matcher::new("tenant", "=", "$tenant");
+    let on_tenant: Vec<&Matcher> = matchers.iter().filter(|m| m.label == "tenant").collect();
+    !on_tenant.is_empty() && on_tenant.iter().all(|m| **m == chosen)
+}
+
+/// `metric_names` for a dashboard query, failing the test on a malformed one.
+fn series_of(expr: &str) -> Vec<Series> {
+    metric_names(expr).unwrap_or_else(|err| panic!("`{expr}` does not scan: {err}"))
+}
+
+fn names(expr: &str) -> Vec<String> {
+    series_of(expr).into_iter().map(|s| s.name).collect()
 }
 
 #[test]
-fn metric_names_finds_bare_metrics_and_skips_labels_and_strings() {
+fn metric_names_finds_every_series_and_skips_labels_strings_and_variables() {
     assert_eq!(
-        metric_names(
+        names(
             r#"sum by (stage) (rate(records_out_total{tenant="$tenant"}[1m]) and on (tenant, stage) bytes_out_total)"#
         ),
-        [
-            (
-                "records_out_total".to_owned(),
-                r#"tenant="$tenant""#.to_owned()
-            ),
-            ("bytes_out_total".to_owned(), String::new()),
-        ]
+        ["records_out_total", "bytes_out_total"]
     );
     assert_eq!(
-        metric_names(r#"rate(sink_total{stage="a}b_total"}[1m])"#),
-        [("sink_total".to_owned(), r#"stage="a}b_total""#.to_owned())]
+        series_of(r#"rate(sink_total{stage="a}b_total"}[1m])"#),
+        [Series {
+            name: "sink_total".to_owned(),
+            matchers: vec![Matcher::new("stage", "=", "a}b_total")],
+        }]
     );
     assert_eq!(
-        metric_names(r#"sum by (reason_count) (dlq_total{tenant="$tenant", stage="x_total"})"#),
-        [(
-            "dlq_total".to_owned(),
-            r#"tenant="$tenant", stage="x_total""#.to_owned()
-        )]
+        names(r#"sum by (reason_count) (dlq_total{tenant="$tenant", stage="x_total"})"#),
+        ["dlq_total"]
     );
-    // Any series counts, not only the pipeline's: functions, keywords, strings, ranges and
+    // Any series counts, not only the pipeline's; functions, keywords, strings, ranges and
     // dashboard variables do not.
     assert_eq!(
-        metric_names(r#"label_replace(up, "x", 'y_total', "", "") > bool 0"#),
-        [("up".to_owned(), String::new())]
+        names(r#"label_replace(up, "x", 'y_total', "", "") > bool 0"#),
+        ["up"]
     );
     assert_eq!(
-        metric_names(r#"sum(increase(gnatsd_varz_mem[$__range] offset 5m)) or vector(0)"#),
-        [("gnatsd_varz_mem".to_owned(), String::new())]
+        names(r#"sum(increase(gnatsd_varz_mem[$__range] offset -5m)) or vector(0) @ start()"#),
+        ["gnatsd_varz_mem"]
     );
-    // A selector with no name in front names its series through `__name__`.
     assert_eq!(
-        metric_names(r#"sum({__name__="state_ops_total", tenant="$tenant"})"#),
-        [(
-            "state_ops_total".to_owned(),
-            r#"__name__="state_ops_total", tenant="$tenant""#.to_owned()
-        )]
+        names(r#"sum without(x) (a_total[5m:1m]) * on() group_left b_total / ${__range}"#),
+        ["a_total", "b_total"]
     );
-    // Without an exact `__name__`, the selector itself stands as the name, which no
-    // allow-list holds.
     assert_eq!(
-        metric_names(r#"{__name__=~"state_.*"}"#),
-        [(
-            r#"{__name__=~"state_.*"}"#.to_owned(),
-            r#"__name__=~"state_.*""#.to_owned()
-        )]
+        names(r"SUM BY (stage) (dlq_total{stage='a}b'}) > NaN OR Inf + 1e-3"),
+        ["dlq_total"]
     );
-    // Keywords in any case, number literals and single-quoted label values.
     assert_eq!(
-        metric_names(r"SUM BY (stage) (dlq_total{stage='a}b'}) > NaN OR Inf"),
-        [("dlq_total".to_owned(), "stage='a}b'".to_owned())]
+        series_of(r#"x_total{stage="a\"}b"}"#)[0].matchers,
+        [Matcher::new("stage", "=", r#"a"}b"#)]
     );
 }
 
 #[test]
-fn matchers_read_each_label_matcher_of_a_selector() {
+fn a_selector_with_no_name_in_front_is_named_by_its_name_matcher() {
     assert_eq!(
-        matchers(r#"xtenant="$tenant", tenant != "$tenant", stage=~'a,b', le="0.5""#),
-        [
-            ("xtenant", "=", "$tenant"),
-            ("tenant", "!=", "$tenant"),
-            ("stage", "=~", "a,b"),
-            ("le", "=", "0.5"),
-        ]
-        .map(|(l, o, v)| (l.to_owned(), o.to_owned(), v.to_owned()))
+        names(r#"sum({__name__="state_ops_total", tenant="$tenant"})"#),
+        ["state_ops_total"]
     );
-    assert!(!filters_on_the_tenant(r#"xtenant="$tenant""#));
-    assert!(!filters_on_the_tenant(r#"tenant!="$tenant""#));
-    assert!(filters_on_the_tenant(r#"stage="x", tenant="$tenant""#));
+    // A quoted name (Prometheus 3) is the series name; a quoted label is a label.
+    assert_eq!(
+        series_of(r#"{"a.b", "tenant"="$tenant"}"#),
+        [Series {
+            name: "a.b".to_owned(),
+            matchers: vec![
+                Matcher::new("__name__", "=", "a.b"),
+                Matcher::new("tenant", "=", "$tenant"),
+            ],
+        }]
+    );
+    // Without an exact name the selector itself stands as the name, which no allow-list
+    // holds.
+    assert_eq!(
+        names(r#"{__name__=~"state_.*"}"#),
+        [r#"{__name__=~"state_.*"}"#]
+    );
+}
+
+#[test]
+fn a_malformed_query_is_an_error_not_a_panic() {
+    for bad in [
+        "x{",
+        "{",
+        r#"x{a="b"} or {"#,
+        r#"x{a="b}"#,
+        r#"x{"a.b", tenant="$tenant}"#,
+        "rate(x[5m)",
+        "sum by (stage x",
+        "ümlaut_total",
+        r#"x{a}b="c"}"#,
+        "x{a=b}",
+        "x{a}",
+        r#"x{a=="b"}"#,
+    ] {
+        assert!(metric_names(bad).is_err(), "`{bad}` scanned");
+    }
+    assert!(matchers(r#"a=""#).is_err());
+}
+
+#[test]
+fn only_an_exact_tenant_matcher_filters_on_the_tenant() {
+    let filters = |selector: &str| filters_on_the_tenant(&matchers(selector).expect("parses"));
+    assert!(filters(r#"stage="x", tenant="$tenant""#));
+    assert!(!filters(r#"xtenant="$tenant""#));
+    assert!(!filters(r#"tenant!="$tenant""#));
+    assert!(!filters(r#"tenant=~"$tenant""#));
+    assert!(!filters(r#"tenant="$tenant", tenant!="$tenant""#));
+    assert!(!filters(""));
 }
 
 #[test]
@@ -514,12 +625,12 @@ fn the_tenant_dashboard_reads_only_tenant_facing_metrics_for_the_chosen_tenant()
     let mut seen = BTreeSet::new();
     for panel in &panels {
         for expr in exprs(panel) {
-            let names = metric_names(&expr);
-            assert!(!names.is_empty(), "`{expr}` selects no metric");
-            for (name, selector) in names {
+            let series = series_of(&expr);
+            assert!(!series.is_empty(), "`{expr}` selects no metric");
+            for Series { name, matchers } in series {
                 assert!(ALLOWED.contains(&name.as_str()), "`{name}` in `{expr}`");
                 assert!(
-                    filters_on_the_tenant(&selector),
+                    filters_on_the_tenant(&matchers),
                     "`{name}` is not filtered on the tenant in `{expr}`"
                 );
                 seen.insert(name);
@@ -541,11 +652,9 @@ fn the_tenant_dashboard_answers_where_did_my_logs_go_from_drops_alone() {
         .filter(|p| {
             let exprs = exprs(p);
             !exprs.is_empty()
-                && exprs.iter().all(|e| {
-                    metric_names(e)
-                        .iter()
-                        .all(|(name, _)| name == "records_dropped_total")
-                })
+                && exprs
+                    .iter()
+                    .all(|e| names(e).iter().all(|name| name == "records_dropped_total"))
         })
         .collect();
     assert!(
