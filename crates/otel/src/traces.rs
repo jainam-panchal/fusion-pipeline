@@ -48,9 +48,9 @@ impl OtlpTraceSink {
     /// As [`OtlpTraceSink::with_exporter`], with a queue of `max_queue` spans, which is also
     /// the most spans one export carries. A full queue drops the span.
     ///
-    /// For tests that need a queue of a known size; a deployment sizes it through the
-    /// environment.
-    #[doc(hidden)]
+    /// For tests that need a queue of a known size (feature `test-util`); a deployment sizes
+    /// it through the environment.
+    #[cfg(feature = "test-util")]
     #[must_use]
     pub fn with_queue(
         exporter: impl SpanExporter + 'static,

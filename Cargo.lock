@@ -443,6 +443,7 @@ name = "fusion-otel"
 version = "0.1.0"
 dependencies = [
  "fusion-core",
+ "fusion-otel",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
