@@ -94,6 +94,7 @@ SPEC_METRICS=(
     'records_dropped_total{tenant="acme",stage="source",reason="missing_id"}'
     'records_dropped_total{tenant="acme",stage="drop_trace",reason="filter"}'
     'records_dropped_total{tenant="acme",stage="dedupe_body",reason="dedupe"}'
+    'records_dropped_total{tenant="acme",stage="only_parsed",reason="edit_unapplied"}'
     'records_errored_total{tenant="acme",stage="out"}'
     'stage_duration_seconds_bucket{tenant="acme",stage="drop_trace"}'
     'records_in_total{tenant="acme",stage="parse_syslog",engine="linear"}'
