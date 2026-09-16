@@ -16,8 +16,8 @@
 //! first pipeline's time survives every hop. A header that does not parse is left out of the
 //! arrival and reported, never a reason to nak: the record is still valid.
 
-use async_nats::HeaderMap;
-use fusion_core::meta::{Arrival, IngestionTime, Meta};
+use async_nats::{HeaderMap, HeaderValue};
+use fusion_core::meta::{Arrival, IngestionTime, Meta, is_valid_tenant};
 
 use crate::subject::tenant_from_subject;
 
@@ -29,13 +29,24 @@ pub const INGESTION_TIME: &str = "Fusion-Ingestion-Time";
 /// (`clock`).
 pub const INGESTION_TIME_KIND: &str = "Fusion-Ingestion-Time-Kind";
 
-/// The pipeline headers for a record with `meta`.
+/// The pipeline headers for a record with `meta`. A `Meta` tenant always passes
+/// [`is_valid_tenant`], so it is always a valid header value; the check is kept so a value
+/// that could not be one is left out rather than panicking inside the client.
 #[must_use]
 pub fn for_meta(meta: &Meta) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    headers.insert(TENANT, &*meta.tenant);
-    headers.insert(INGESTION_TIME, meta.ingestion_time.unix_nanos().to_string());
-    headers.insert(INGESTION_TIME_KIND, meta.ingestion_time.kind_name());
+    for (name, value) in [
+        (TENANT, meta.tenant.to_string()),
+        (INGESTION_TIME, meta.ingestion_time.unix_nanos().to_string()),
+        (
+            INGESTION_TIME_KIND,
+            meta.ingestion_time.kind_name().to_owned(),
+        ),
+    ] {
+        if let Ok(value) = value.parse::<HeaderValue>() {
+            headers.insert(name, value);
+        }
+    }
     headers
 }
 
@@ -43,9 +54,12 @@ pub fn for_meta(meta: &Meta) -> HeaderMap {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum InvalidHeader {
-    /// `Fusion-Tenant` is present and empty.
-    #[error("`{TENANT}` is empty")]
-    EmptyTenant,
+    /// `Fusion-Tenant` is empty or holds a control character.
+    #[error("`{TENANT}` is empty or holds a control character")]
+    Tenant,
+    /// A pipeline header is present more than once.
+    #[error("`{0}` is present more than once")]
+    Repeated(&'static str),
     /// `Fusion-Ingestion-Time` is not a decimal `u64`.
     #[error("`{INGESTION_TIME}` is `{0}`, not nanoseconds as a decimal integer")]
     Time(String),
@@ -67,33 +81,59 @@ pub struct Arrived {
     pub invalid: Vec<InvalidHeader>,
 }
 
-/// The arrival of a message on `subject` with `headers`, published at `published` (the
-/// JetStream publish time, nanoseconds since the Unix epoch) and delivered `delivered`
-/// times.
+/// Where a message came from: its subject, its headers, the JetStream publish time
+/// (nanoseconds since the Unix epoch) and how many times it has been delivered.
+#[derive(Debug, Clone, Copy)]
+pub struct Message<'m> {
+    /// The subject it was published on.
+    pub subject: &'m str,
+    /// The first token of the subjects that name a tenant.
+    pub tenant_prefix: &'m str,
+    /// Its headers, if any.
+    pub headers: Option<&'m HeaderMap>,
+    /// The JetStream publish time.
+    pub published: Option<u64>,
+    /// The JetStream delivery count.
+    pub delivered: u64,
+}
+
+/// The arrival of `message`:
 ///
-/// - tenant: the subject's `logs.{tenant}.>` token, else `Fusion-Tenant`;
-/// - ingestion time: `Fusion-Ingestion-Time` with its kind, else `published` as reported;
-/// - delivery count: `delivered`.
+/// - tenant: the subject's `{tenant_prefix}.{tenant}.>` token, else `Fusion-Tenant`;
+/// - ingestion time: `Fusion-Ingestion-Time` with its kind, else the publish time as
+///   reported;
+/// - delivery count: the delivery count.
 #[must_use]
-pub fn arrival(
-    subject: &str,
-    headers: Option<&HeaderMap>,
-    published: Option<u64>,
-    delivered: u64,
-) -> Arrived {
+pub fn arrival(message: Message<'_>) -> Arrived {
+    let Message {
+        subject,
+        tenant_prefix,
+        headers,
+        published,
+        delivered,
+    } = message;
     let mut invalid = Vec::new();
-    let header_tenant = header(headers, TENANT).and_then(|tenant| {
-        if tenant.is_empty() {
-            invalid.push(InvalidHeader::EmptyTenant);
+    let mut read = |name| {
+        header(headers, name).unwrap_or_else(|problem| {
+            invalid.push(problem);
             None
-        } else {
-            Some(tenant)
+        })
+    };
+    let header_tenant = read(TENANT);
+    let time = read(INGESTION_TIME);
+    let kind = read(INGESTION_TIME_KIND);
+    let header_tenant = header_tenant.filter(|tenant| {
+        let valid = is_valid_tenant(tenant);
+        if !valid {
+            invalid.push(InvalidHeader::Tenant);
         }
+        valid
     });
-    let tenant = tenant_from_subject(subject)
+    let tenant = tenant_from_subject(subject, tenant_prefix)
+        .filter(|tenant| is_valid_tenant(tenant))
         .or(header_tenant)
         .map(str::to_owned);
-    let header_time = ingestion_time(headers).unwrap_or_else(|problems| {
+    let header_time = ingestion_time(time, kind).unwrap_or_else(|problems| {
         invalid.extend(problems);
         None
     });
@@ -109,12 +149,10 @@ pub fn arrival(
 
 /// The ingestion time the two time headers give, `None` when neither is present.
 fn ingestion_time(
-    headers: Option<&HeaderMap>,
+    time: Option<&str>,
+    kind: Option<&str>,
 ) -> Result<Option<IngestionTime>, Vec<InvalidHeader>> {
-    match (
-        header(headers, INGESTION_TIME),
-        header(headers, INGESTION_TIME_KIND),
-    ) {
+    match (time, kind) {
         (None, None) => Ok(None),
         (Some(_), None) => Err(vec![InvalidHeader::Unpaired(INGESTION_TIME)]),
         (None, Some(_)) => Err(vec![InvalidHeader::Unpaired(INGESTION_TIME_KIND)]),
@@ -142,6 +180,19 @@ fn is_decimal(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn header<'h>(headers: Option<&'h HeaderMap>, name: &str) -> Option<&'h str> {
-    headers?.get(name).map(|value| value.as_str())
+/// The one value of header `name`, `None` when it is absent; a header given more than once
+/// is refused, since which value is meant cannot be told.
+fn header<'h>(
+    headers: Option<&'h HeaderMap>,
+    name: &'static str,
+) -> Result<Option<&'h str>, InvalidHeader> {
+    let Some(headers) = headers else {
+        return Ok(None);
+    };
+    let mut values = headers.get_all(name);
+    let first = values.next();
+    if values.next().is_some() {
+        return Err(InvalidHeader::Repeated(name));
+    }
+    Ok(first.map(HeaderValue::as_str))
 }

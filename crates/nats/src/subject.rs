@@ -6,14 +6,17 @@
 
 use async_nats::jetstream::stream::Stream;
 
-/// The tenant token of a `{prefix}.{tenant}.>` subject: the second token, when it is not
-/// empty and at least one token follows it. A two-token subject such as `processed.logs`
-/// names no tenant, so a pipeline consuming another's output takes the tenant from the
-/// `Fusion-Tenant` header instead.
+/// The tenant token of a `{prefix}.{tenant}.>` subject: the second token, when the first is
+/// `prefix`, the second is not empty and at least one token follows it. Any other subject,
+/// such as `processed.logs` or `processed.logs.v2`, names no tenant, so a pipeline consuming
+/// another's output takes the tenant from the `Fusion-Tenant` header instead.
 #[must_use]
-pub fn tenant_from_subject(subject: &str) -> Option<&str> {
+pub fn tenant_from_subject<'s>(subject: &'s str, prefix: &str) -> Option<&'s str> {
     let mut tokens = subject.split('.');
-    let tenant = tokens.nth(1).filter(|tenant| !tenant.is_empty())?;
+    if tokens.next() != Some(prefix) {
+        return None;
+    }
+    let tenant = tokens.next().filter(|tenant| !tenant.is_empty())?;
     tokens.next().is_some().then_some(tenant)
 }
 

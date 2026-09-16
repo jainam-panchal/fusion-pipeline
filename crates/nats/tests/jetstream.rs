@@ -215,6 +215,7 @@ impl Fixture {
             url: Some(url()),
             stream: self.in_stream.clone(),
             consumer: self.consumer.clone(),
+            tenant_prefix: self.tenant_prefix.clone(),
         }
     }
 
@@ -691,6 +692,7 @@ fn a_downstream_pipeline_takes_the_tenant_and_the_first_ingestion_time_from_the_
                     url: Some(url()),
                     stream: fixture.out_stream.clone(),
                     consumer: "downstream".to_owned(),
+                    tenant_prefix: fusion_nats::config::DEFAULT_TENANT_PREFIX.to_owned(),
                 })
                 .expect("downstream source"),
         ),

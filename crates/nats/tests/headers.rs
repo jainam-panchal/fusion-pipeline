@@ -6,7 +6,7 @@ use async_nats::HeaderMap;
 use fusion_core::meta::{Arrival, IngestionTime, Meta};
 use fusion_core::record::RecordId;
 use fusion_nats::headers::{
-    self, INGESTION_TIME, INGESTION_TIME_KIND, InvalidHeader, TENANT, arrival,
+    self, INGESTION_TIME, INGESTION_TIME_KIND, InvalidHeader, Message, TENANT,
 };
 
 fn meta(ingestion_time: IngestionTime) -> Meta {
@@ -24,6 +24,22 @@ fn map(pairs: &[(&str, &str)]) -> HeaderMap {
         headers.insert(*name, *value);
     }
     headers
+}
+
+/// The arrival of a message on `subject` under the default `logs` prefix.
+fn arrival(
+    subject: &str,
+    headers: Option<&HeaderMap>,
+    published: Option<u64>,
+    delivered: u64,
+) -> headers::Arrived {
+    headers::arrival(Message {
+        subject,
+        tenant_prefix: "logs",
+        headers,
+        published,
+        delivered,
+    })
 }
 
 fn value<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
@@ -106,8 +122,9 @@ fn the_header_time_wins_over_the_publish_time() {
 
 #[test]
 fn a_header_that_does_not_parse_is_left_out_and_reported() {
-    let cases: [(&[(&str, &str)], InvalidHeader); 6] = [
-        (&[(TENANT, "")], InvalidHeader::EmptyTenant),
+    let cases: [(&[(&str, &str)], InvalidHeader); 7] = [
+        (&[(TENANT, "")], InvalidHeader::Tenant),
+        (&[(TENANT, "a\tb")], InvalidHeader::Tenant),
         (
             &[(INGESTION_TIME, "soon"), (INGESTION_TIME_KIND, "reported")],
             InvalidHeader::Time("soon".to_owned()),
@@ -154,4 +171,22 @@ fn a_bad_time_and_a_bad_kind_are_both_reported() {
         ]
     );
     assert_eq!(arrived.arrival.ingestion_time, None);
+}
+
+#[test]
+fn a_header_given_twice_is_refused() {
+    let mut headers = map(&[(TENANT, "acme")]);
+    headers.append(TENANT, "beta");
+    let arrived = arrival("processed", Some(&headers), None, 1);
+    assert_eq!(arrived.invalid, vec![InvalidHeader::Repeated(TENANT)]);
+    assert_eq!(arrived.arrival.tenant, None);
+}
+
+#[test]
+fn a_tenant_that_cannot_be_a_header_is_never_written() {
+    let mut meta = meta(IngestionTime::Reported(5));
+    meta.tenant = "a\nb".into();
+    let written = headers::for_meta(&meta);
+    assert_eq!(value(&written, TENANT), None, "left out, not a panic");
+    assert_eq!(value(&written, INGESTION_TIME), Some("5"));
 }

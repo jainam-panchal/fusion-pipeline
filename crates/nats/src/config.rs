@@ -28,6 +28,9 @@ pub fn url_from_env(yaml: Option<&str>) -> String {
     resolve_url(yaml, env.as_deref())
 }
 
+/// The first subject token of `{prefix}.{tenant}.>` when the config names none.
+pub const DEFAULT_TENANT_PREFIX: &str = "logs";
+
 /// `source` block parameters for `type: nats`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +42,15 @@ pub struct SourceParams {
     pub stream: String,
     /// The durable pull consumer to read from. Must already exist with explicit ack.
     pub consumer: String,
+    /// The first token of the subjects that name a tenant, `{tenant_prefix}.{tenant}.>`;
+    /// `logs` by default. A message on any other subject names no tenant, and its tenant
+    /// comes from the `Fusion-Tenant` header, as for a pipeline reading another's output.
+    #[serde(default = "default_tenant_prefix")]
+    pub tenant_prefix: String,
+}
+
+fn default_tenant_prefix() -> String {
+    DEFAULT_TENANT_PREFIX.to_owned()
 }
 
 /// `sink.nats` node parameters.

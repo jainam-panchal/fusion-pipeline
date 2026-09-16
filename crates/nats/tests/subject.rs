@@ -4,21 +4,38 @@ use fusion_nats::subject::tenant_from_subject;
 
 #[test]
 fn tenant_is_the_second_subject_token() {
-    assert_eq!(tenant_from_subject("logs.acme.syslog"), Some("acme"));
-    assert_eq!(tenant_from_subject("logs.acme.app.web"), Some("acme"));
+    assert_eq!(
+        tenant_from_subject("logs.acme.syslog", "logs"),
+        Some("acme")
+    );
+    assert_eq!(
+        tenant_from_subject("logs.acme.app.web", "logs"),
+        Some("acme")
+    );
 }
 
 #[test]
 fn subjects_without_a_tenant_token_yield_none() {
-    assert_eq!(tenant_from_subject("logs"), None);
-    assert_eq!(tenant_from_subject("logs."), None);
-    assert_eq!(tenant_from_subject("logs..syslog"), None);
+    assert_eq!(tenant_from_subject("logs", "logs"), None);
+    assert_eq!(tenant_from_subject("logs.", "logs"), None);
+    assert_eq!(tenant_from_subject("logs..syslog", "logs"), None);
 }
 
 #[test]
 fn a_two_token_subject_names_no_tenant() {
-    assert_eq!(tenant_from_subject("processed.logs"), None);
-    assert_eq!(tenant_from_subject("logs.acme"), None);
+    assert_eq!(tenant_from_subject("processed.logs", "logs"), None);
+    assert_eq!(tenant_from_subject("logs.acme", "logs"), None);
+}
+
+#[test]
+fn only_a_subject_under_the_prefix_names_a_tenant() {
+    assert_eq!(tenant_from_subject("processed.logs.v2", "logs"), None);
+    assert_eq!(tenant_from_subject("logsx.acme.syslog", "logs"), None);
+    assert_eq!(
+        tenant_from_subject("ingest.acme.syslog", "ingest"),
+        Some("acme")
+    );
+    assert_eq!(tenant_from_subject("logs.acme.syslog", "ingest"), None);
 }
 
 mod capture {

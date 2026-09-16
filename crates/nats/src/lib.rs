@@ -225,6 +225,7 @@ impl Nats {
             consumer,
             self.shutdown.subscribe(),
             self.metrics.clone(),
+            params.tenant_prefix.clone(),
         ))
     }
 

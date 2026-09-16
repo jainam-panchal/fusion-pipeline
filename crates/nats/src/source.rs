@@ -6,12 +6,14 @@
 //!   url: nats://127.0.0.1:4222   # overridden by NATS_URL
 //!   stream: LOGS
 //!   consumer: pipeline           # pull, explicit ack, ack_wait 30s, max_deliver 5
+//!   tenant_prefix: logs          # {tenant_prefix}.{tenant}.> names the tenant; the default
 //! ```
 //!
 //! Each message is decoded as one JSON record and handed to the engine, untouched, with an
 //! ack handle that acks or naks the JetStream message. What the transport says about the
 //! message goes beside the record as its [`Arrival`] (see [`crate::headers::arrival`]): the
-//! subject's tenant, else an upstream pipeline's `Fusion-Tenant`; an upstream pipeline's
+//! subject's tenant (`{tenant_prefix}.{tenant}.>`), else an upstream pipeline's
+//! `Fusion-Tenant`; an upstream pipeline's
 //! `Fusion-Ingestion-Time`, else the JetStream publish time; and the delivery count. The
 //! engine resolves the record's `Meta` from it (ADR 0005). Nothing is written into the
 //! record. The publish time is the server's and does not change on redelivery, so stateful
@@ -48,7 +50,7 @@ use futures::StreamExt;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
-use crate::headers;
+use crate::headers::{self, Message};
 use crate::subject::tenant_from_subject;
 
 /// Longest redelivery delay [`nak_delay`] asks for. A consumer with `max_deliver` 5, as the
@@ -74,6 +76,8 @@ pub struct NatsSource {
     consumer: PullConsumer,
     shutdown: watch::Receiver<bool>,
     metrics: Metrics,
+    /// The first token of the subjects that name a tenant.
+    tenant_prefix: String,
 }
 
 impl NatsSource {
@@ -82,12 +86,14 @@ impl NatsSource {
         consumer: PullConsumer,
         shutdown: watch::Receiver<bool>,
         metrics: Metrics,
+        tenant_prefix: String,
     ) -> Self {
         Self {
             runtime,
             consumer,
             shutdown,
             metrics,
+            tenant_prefix,
         }
     }
 
@@ -121,7 +127,7 @@ impl NatsSource {
                 .as_ref()
                 .and_then(|info| u64::try_from(info.published.unix_timestamp_nanos()).ok());
             let (message, acker) = message.split();
-            let subject_tenant = tenant_from_subject(&message.subject);
+            let subject_tenant = tenant_from_subject(&message.subject, &self.tenant_prefix);
             let record = match serde_json::from_slice::<Record>(&message.payload) {
                 Ok(record) => record,
                 Err(err) => {
@@ -143,12 +149,13 @@ impl NatsSource {
                     continue;
                 }
             };
-            let arrived = headers::arrival(
-                &message.subject,
-                message.headers.as_ref(),
+            let arrived = headers::arrival(Message {
+                subject: &message.subject,
+                tenant_prefix: &self.tenant_prefix,
+                headers: message.headers.as_ref(),
                 published,
                 delivered,
-            );
+            });
             for invalid in &arrived.invalid {
                 eprintln!(
                     "nats source: ignored a pipeline header on `{}`: {invalid}",
