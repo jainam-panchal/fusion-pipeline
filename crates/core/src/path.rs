@@ -11,6 +11,7 @@
 
 use std::cmp::Ordering;
 use std::fmt;
+use std::sync::LazyLock;
 
 use serde_json::{Map, Value};
 
@@ -54,7 +55,7 @@ pub enum PathError {
         instead: String,
     },
     /// The first segment is not a record field.
-    #[error("`{name}` is not a record field; instead use one of {FIELDS}")]
+    #[error("`{name}` is not a record field; instead use one of {}", FIELDS.as_str())]
     UnknownField {
         /// The segment text.
         name: String,
@@ -85,22 +86,30 @@ pub enum PathError {
     },
 }
 
-/// The record fields a path may start at, for error messages, in reading order rather than
-/// declaration order. Hand-written: keep it in step with [`Field`] and [`MapField`].
-const FIELDS: &str = "id, kind, body, severity_text, severity_number, time_unix_nano, \
-observed_time_unix_nano, trace_id, span_id, attributes.<key>, resource.<key>, scope.<key>";
+/// The roots a path may start at, as the unknown-field error lists them: every [`Field`],
+/// then every [`MapField`] with `.<key>`.
+static FIELDS: LazyLock<String> = LazyLock::new(|| {
+    let fields = Field::ALL
+        .into_iter()
+        .map(|field| field.as_str().to_owned());
+    let maps = MapField::ALL
+        .into_iter()
+        .map(|map| format!("{}.<key>", map.as_str()));
+    fields.chain(maps).collect::<Vec<_>>().join(", ")
+});
 
 closed_set! {
-    /// A top-level field that is addressed as a whole, by its path spelling.
+    /// A top-level field that is addressed as a whole, by its path spelling, in the order the
+    /// unknown-field error lists them.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Field {
         Id = "id",
         Kind = "kind",
-        TimeUnixNano = "time_unix_nano",
-        ObservedTimeUnixNano = "observed_time_unix_nano",
+        Body = "body",
         SeverityText = "severity_text",
         SeverityNumber = "severity_number",
-        Body = "body",
+        TimeUnixNano = "time_unix_nano",
+        ObservedTimeUnixNano = "observed_time_unix_nano",
         TraceId = "trace_id",
         SpanId = "span_id",
     }
@@ -680,11 +689,10 @@ impl FieldPath {
     }
 
     fn expect_kind(&self, value: &Value) -> Result<Kind, PathError> {
-        const KINDS: &str = "`log`, `metric` or `span`";
         value
             .as_str()
             .and_then(Kind::parse)
-            .ok_or_else(|| self.wrong_type(KINDS, value))
+            .ok_or_else(|| self.wrong_type(Kind::ONE_OF, value))
     }
 
     fn expect_i32(&self, value: Value) -> Result<Option<i32>, PathError> {

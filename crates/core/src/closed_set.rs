@@ -8,9 +8,9 @@
 //! them come from one list, so a variant cannot be left out of any.
 
 /// Declares a closed set: the enum, and on it `ALL` (every value, in declaration order),
-/// `as_str` (the value's name), `parse` (the value with a name, case-sensitive) and
-/// `Display` (the name). The generated items take the enum's visibility. Two values with one
-/// name fail to compile.
+/// `as_str` (the value's name), `parse` (the value with a name, case-sensitive), `ONE_OF`
+/// (every name as a message lists them, "`a`, `b` or `c`") and `Display` (the name). The
+/// generated items take the enum's visibility. Two values with one name fail to compile.
 ///
 /// ```ignore
 /// closed_set! {
@@ -28,6 +28,15 @@
 /// `as_str` and `parse` do not know. For an enum that derives serde, start with `serde;` and
 /// each variant is also `#[serde(rename = name)]`, so its JSON form is its name.
 macro_rules! closed_set {
+    (@one_of $only:literal) => {
+        concat!("`", $only, "`")
+    };
+    (@one_of $first:literal, $last:literal) => {
+        concat!("`", $first, "` or `", $last, "`")
+    };
+    (@one_of $first:literal, $($rest:literal),+) => {
+        concat!("`", $first, "`, ", $crate::closed_set::closed_set!(@one_of $($rest),+))
+    };
     (
         serde;
         $(#[$meta:meta])*
@@ -53,6 +62,11 @@ macro_rules! closed_set {
                     $(Self::$variant => $wire,)+
                 }
             }
+
+            /// Every name, as a message lists them: "`a`, `b` or `c`".
+            #[allow(dead_code, reason = "not every closed set lists its names in a message")]
+            $vis const ONE_OF: &'static str =
+                $crate::closed_set::closed_set!(@one_of $($wire),+);
 
             /// The value named `name`, the inverse of `as_str`. Case-sensitive.
             #[must_use]

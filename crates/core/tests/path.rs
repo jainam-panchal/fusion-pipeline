@@ -513,3 +513,14 @@ fn every_kind_round_trips_through_its_wire_name() {
         );
     }
 }
+
+#[test]
+fn an_unknown_field_is_refused_listing_every_root_in_reading_order() {
+    let err = FieldPath::parse("nonsense").expect_err("not a root");
+    assert_eq!(
+        err.to_string(),
+        "`nonsense` is not a record field; instead use one of id, kind, body, severity_text, \
+         severity_number, time_unix_nano, observed_time_unix_nano, trace_id, span_id, \
+         attributes.<key>, resource.<key>, scope.<key>"
+    );
+}
