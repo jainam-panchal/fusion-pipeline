@@ -5,6 +5,7 @@
 mod common;
 
 use common::{WAIT, deploy_config, for_each_worker_count, start};
+use fusion_core::config::Config;
 use fusion_core::memory::AckOutcome;
 use fusion_core::meta::{Arrival, IngestionTime, unix_nanos_now};
 use fusion_core::metrics::CounterMetric;
@@ -625,8 +626,8 @@ fn a_script_read_from_a_file_runs_over_records() {
 /// `http.status_class` from `http.status`. Read from the shipped file, so the script an
 /// operator copies is the one this test drives.
 fn shipped_split_lines() -> String {
-    let config = fusion_core::config::Config::from_yaml(&deploy_config("pipeline.yaml"))
-        .expect("the compose config parses");
+    let config =
+        Config::from_yaml(&deploy_config("pipeline.yaml")).expect("the compose config parses");
     let node = config
         .nodes
         .iter()
