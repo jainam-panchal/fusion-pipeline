@@ -22,7 +22,7 @@ use fusion_core::record::{Record, RecordId};
 use fusion_core::registry::Registry;
 use fusion_core::signals::Signals;
 use fusion_core::stage::{Context, Stage, StageError, StageOutput};
-use fusion_core::trace::TraceKey;
+use fusion_core::trace::{InMemoryTraceSink, TraceKey, TraceSampling};
 use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
 use fusion_nats::headers::{INGESTION_TIME, INGESTION_TIME_KIND, TENANT};
 use fusion_nats::{Nats, NatsError};
@@ -1129,7 +1129,10 @@ fn a_message_that_fails_every_delivery_is_dead_lettered_and_terminated() {
     let fixture = Fixture::with_max_deliver("dlq", 3);
     let recorder = InMemoryRecorder::new();
     let events = InMemoryEventLog::new();
-    let signals = Signals::new(Metrics::new(recorder.clone())).with_events(events.clone());
+    let traces = InMemoryTraceSink::new();
+    let signals = Signals::new(Metrics::new(recorder.clone()))
+        .with_events(events.clone())
+        .with_traces(traces.clone(), TraceSampling::default());
     let nats = std::sync::Arc::new(Nats::new(signals.clone()).expect("nats runtime"));
     let sinks = MemorySinks::new();
     sinks.fail_writes_to("out");
@@ -1202,13 +1205,18 @@ fn a_message_that_fails_every_delivery_is_dead_lettered_and_terminated() {
     assert_eq!(letter.record_id, Some(RecordId(50)));
     assert_eq!(&*letter.tenant, "acme");
     assert_eq!(letter.node, "out");
-    assert_eq!(letter.reason, Some(FailureKind::SinkError));
+    assert_eq!(letter.failure, Some(FailureKind::SinkError));
     assert_eq!(letter.delivery_count, 3);
     assert!(letter.stream_sequence.is_some());
     assert!(letter.message.contains("set to fail"), "{}", letter.message);
-    assert_eq!(
-        letter.trace,
-        Some(TraceKey::new(RecordId(50), "acme").delivery_context(3))
+    let context = TraceKey::new(RecordId(50), "acme").delivery_context(3);
+    assert_eq!(letter.trace, Some(context));
+    assert!(
+        traces
+            .traces()
+            .iter()
+            .any(|t| t.trace_id == context.trace_id && t.span_id == context.span_id),
+        "the dead letter names the final delivery's kept trace"
     );
     assert_eq!(
         events.of_kind(EventKind::Nak).len(),

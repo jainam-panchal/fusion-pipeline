@@ -301,7 +301,7 @@ impl Nats {
             Arc::clone(&self.runtime),
             consumer,
             self.shutdown.subscribe(),
-            self.signals.metrics().clone(),
+            self.signals.clone(),
             params.tenant_prefix.clone(),
             dead_letters,
         ))

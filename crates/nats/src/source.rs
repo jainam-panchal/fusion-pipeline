@@ -62,7 +62,6 @@ use async_nats::jetstream::{self, AckKind, message::Acker};
 use fusion_core::events::{Event, EventKind};
 use fusion_core::io::{AckHandle, Envelope, Failure, FailureKind, Intake, Source, SourceError};
 use fusion_core::meta::{IngestionTime, Meta};
-use fusion_core::metrics::Metrics;
 use fusion_core::record::Record;
 use fusion_core::signals::Signals;
 use fusion_core::trace::TraceKey;
@@ -147,18 +146,19 @@ impl DeadLetters {
         message: String,
     ) {
         self.signals.emit(Event {
-            kind,
-            record_id: failure.record_id,
-            tenant: delivery.tenant.as_str().into(),
-            node: failure.node.clone(),
-            reason: Some(failure.kind),
-            delivery_count: position.delivered,
             stream_sequence: Some(position.stream_sequence),
             message,
-            // The engine kept this delivery's trace: it failed.
+            // The delivery failed, so the engine kept its trace whenever anything traces.
             trace: failure
                 .record_id
+                .filter(|_| self.signals.tracing())
                 .map(|id| TraceKey::new(id, &delivery.tenant).delivery_context(position.delivered)),
+            ..Event::of_failure(
+                kind,
+                delivery.tenant.as_str().into(),
+                failure,
+                position.delivered,
+            )
         });
     }
 
@@ -313,7 +313,7 @@ pub struct NatsSource {
     runtime: Arc<Runtime>,
     consumer: PullConsumer,
     shutdown: watch::Receiver<bool>,
-    metrics: Metrics,
+    signals: Signals,
     /// The first token of the subjects that name a tenant.
     tenant_prefix: String,
     dead_letters: Arc<DeadLetters>,
@@ -324,7 +324,7 @@ impl NatsSource {
         runtime: Arc<Runtime>,
         consumer: PullConsumer,
         shutdown: watch::Receiver<bool>,
-        metrics: Metrics,
+        signals: Signals,
         tenant_prefix: String,
         dead_letters: DeadLetters,
     ) -> Self {
@@ -332,7 +332,7 @@ impl NatsSource {
             runtime,
             consumer,
             shutdown,
-            metrics,
+            signals,
             tenant_prefix,
             dead_letters: Arc::new(dead_letters),
         }
@@ -410,16 +410,16 @@ impl NatsSource {
                 Ok(record) => record,
                 Err(err) => {
                     if let Some(bytes) = arrival.bytes {
-                        self.metrics.bytes_in(&tenant, bytes);
+                        self.signals.metrics().bytes_in(&tenant, bytes);
                     }
                     if delivered > 1 {
-                        self.metrics.source_redelivery(&tenant);
+                        self.signals.metrics().source_redelivery(&tenant);
                     }
                     eprintln!(
                         "nats source: nak of undecodable message on `{}` (delivery {delivered}): {err}",
                         delivery.message.subject
                     );
-                    self.metrics.source_nak(&tenant);
+                    self.signals.metrics().source_nak(&tenant);
                     let failure = Failure::at_source(FailureKind::Undecodable, err.to_string());
                     // Settled here, on the runtime: `NatsAck` blocks on the runtime and
                     // cannot be used from inside it.
@@ -449,7 +449,7 @@ impl NatsSource {
     fn report_invalid_headers(&self, subject: &str, invalid: &[InvalidHeader], tenant: &str) {
         for problem in invalid {
             eprintln!("nats source: ignored a pipeline header on `{subject}`: {problem}");
-            self.metrics.source_invalid_header(tenant);
+            self.signals.metrics().source_invalid_header(tenant);
         }
     }
 }
