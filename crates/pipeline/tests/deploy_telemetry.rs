@@ -235,12 +235,12 @@ fn exprs(panel: &Json) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Every metric name in a PromQL expression, each with its selector (empty when it has
-/// none): the identifiers that end in `_total`, `_bucket`, `_count` or `_sum`, outside
-/// quoted strings, `{...}` selectors and the label lists of `by`, `without`, `on`,
-/// `ignoring`, `group_left` and `group_right`.
+/// Every series name in a PromQL expression, each with its selector (empty when it has
+/// none): every identifier that is not a function (followed by `(`), an operator or
+/// aggregation, part of a number or duration, or a dashboard variable (after `$`), and is
+/// not inside a string, a `{...}` selector, a `[...]` range or the label list of a grouping
+/// keyword.
 fn metric_names(expr: &str) -> Vec<(String, String)> {
-    const SUFFIXES: [&str; 4] = ["_total", "_bucket", "_count", "_sum"];
     const GROUPINGS: [&str; 6] = [
         "by",
         "without",
@@ -249,40 +249,90 @@ fn metric_names(expr: &str) -> Vec<(String, String)> {
         "group_left",
         "group_right",
     ];
+    // Operators and aggregations, which may be followed by `by (...)` rather than `(`.
+    const KEYWORDS: [&str; 17] = [
+        "and",
+        "or",
+        "unless",
+        "bool",
+        "offset",
+        "sum",
+        "avg",
+        "min",
+        "max",
+        "count",
+        "group",
+        "stddev",
+        "stdvar",
+        "topk",
+        "bottomk",
+        "quantile",
+        "count_values",
+    ];
     let chars: Vec<char> = expr.chars().collect();
+    let after_spaces = |mut j: usize| {
+        while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+            j += 1;
+        }
+        j
+    };
     let mut names = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
-            '"' => {
+            quote @ ('"' | '\'' | '`') => {
                 i += 1;
-                while i < chars.len() && chars[i] != '"' {
-                    i += if chars[i] == '\\' { 2 } else { 1 };
+                while i < chars.len() && chars[i] != quote {
+                    i += if chars[i] == '\\' && quote != '`' {
+                        2
+                    } else {
+                        1
+                    };
                 }
                 i += 1;
             }
             '{' => i = selector_end(&chars, i),
-            c if c.is_ascii_alphabetic() || c == '_' => {
-                let start = i;
+            '[' => {
+                i = chars[i..]
+                    .iter()
+                    .position(|c| *c == ']')
+                    .map_or(chars.len(), |p| i + p + 1);
+            }
+            // A number or a duration (`5m`), letters and all.
+            c if c.is_ascii_digit() => {
+                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '.') {
+                    i += 1;
+                }
+            }
+            '$' => {
+                i += 1;
                 while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
+            }
+            c if c.is_ascii_alphabetic() || c == '_' => {
+                let start = i;
+                while i < chars.len()
+                    && (chars[i].is_ascii_alphanumeric() || matches!(chars[i], '_' | ':'))
+                {
+                    i += 1;
+                }
                 let name: String = chars[start..i].iter().collect();
+                let next = after_spaces(i);
                 if GROUPINGS.contains(&name.as_str()) {
-                    let mut j = i;
-                    while chars.get(j).is_some_and(|c| c.is_whitespace()) {
-                        j += 1;
-                    }
-                    if chars.get(j) == Some(&'(') {
-                        i = chars[j..]
+                    if chars.get(next) == Some(&'(') {
+                        i = chars[next..]
                             .iter()
                             .position(|c| *c == ')')
-                            .map_or(chars.len(), |p| j + p + 1);
+                            .map_or(chars.len(), |p| next + p + 1);
                     }
-                } else if SUFFIXES.iter().any(|suffix| name.ends_with(suffix)) {
-                    let selector = if chars.get(i) == Some(&'{') {
-                        let end = selector_end(&chars, i);
-                        chars[i + 1..end - 1].iter().collect()
+                } else if chars.get(next) == Some(&'(') || KEYWORDS.contains(&name.as_str()) {
+                    // A function call or an operator keyword.
+                } else {
+                    let selector = if chars.get(next) == Some(&'{') {
+                        let end = selector_end(&chars, next);
+                        i = end;
+                        chars[next + 1..end - 1].iter().collect()
                     } else {
                         String::new()
                     };
@@ -336,9 +386,15 @@ fn metric_names_finds_bare_metrics_and_skips_labels_and_strings() {
             r#"tenant="$tenant", stage="x_total""#.to_owned()
         )]
     );
+    // Any series counts, not only the pipeline's: functions, keywords, strings, ranges and
+    // dashboard variables do not.
     assert_eq!(
-        metric_names(r#"label_replace(up, "x", "y_total", "", "")"#),
-        []
+        metric_names(r#"label_replace(up, "x", 'y_total', "", "") > bool 0"#),
+        [("up".to_owned(), String::new())]
+    );
+    assert_eq!(
+        metric_names(r#"sum(increase(gnatsd_varz_mem[$__range] offset 5m)) or vector(0)"#),
+        [("gnatsd_varz_mem".to_owned(), String::new())]
     );
 }
 

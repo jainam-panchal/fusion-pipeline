@@ -228,6 +228,10 @@ fn with_nothing_tracing_no_line_names_a_trace() {
         "{events:?}"
     );
     assert!(events.iter().all(|e| e.trace.is_none()), "{events:?}");
+    // The record id still names the record, so a line can be found without a trace.
+    let ids: Vec<Option<RecordId>> = events.iter().map(|e| e.record_id).collect();
+    let (first, second) = (Some(RecordId(16)), Some(RecordId(17)));
+    assert_eq!(ids, [first, first, second, second, second]);
     assert_eq!(h.traces(), []);
     h.finish();
 }
@@ -264,7 +268,10 @@ nodes:
         ),
         "{boom:?}"
     );
-    assert!(boom.start <= boom.end && boom.end <= trace.end, "{boom:?}");
+    assert!(
+        trace.start <= boom.start && boom.start <= boom.end && boom.end <= trace.end,
+        "{boom:?}"
+    );
 
     let events = h.events();
     let summary: Vec<(EventKind, &str, Option<FailureKind>)> = events

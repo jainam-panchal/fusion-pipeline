@@ -5,12 +5,10 @@
 
 mod common;
 
-use common::{WAIT, body_record, start, start_with};
-use fusion_core::config::{ConfigError, NodeConfig};
+use common::{WAIT, body_record, start};
 use fusion_core::io::FailureKind;
-use fusion_core::memory::{AckOutcome, MemorySinks};
+use fusion_core::memory::AckOutcome;
 use fusion_core::record::Record;
-use fusion_core::stage::{Context, Stage, StageOutput};
 
 /// A `lua` node that raises on every record, under `on_error: nak`, into one sink.
 const RAISES: &str = r#"
@@ -102,28 +100,9 @@ fn a_record_without_an_id_fails_at_source_with_missing_id() {
     h.finish();
 }
 
-/// A test-only stage that panics, so the engine's containment path is observable.
-struct Panics;
-
-impl Stage for Panics {
-    fn process(&self, _record: Record, _ctx: &Context<'_>) -> StageOutput {
-        panic!("stage blew up");
-    }
-}
-
-fn with_panics(yaml: &str) -> common::Harness {
-    let sinks = MemorySinks::new();
-    let mut registry = common::registry(&sinks);
-    registry.register_stage(
-        "panics",
-        |_: &NodeConfig| -> Result<Box<dyn Stage>, ConfigError> { Ok(Box::new(Panics)) },
-    );
-    start_with(yaml, 1, sinks, registry)
-}
-
 #[test]
 fn a_panicking_stage_fails_with_kind_panic() {
-    let h = with_panics(
+    let h = common::start_with_panics(
         r#"
 nodes:
   - id: boom
@@ -145,7 +124,7 @@ nodes:
 #[test]
 fn a_failure_then_a_panic_reports_the_first_failure() {
     // Branches run in consumer order: the failing sink `first` before the panicking `boom`.
-    let h = with_panics(
+    let h = common::start_with_panics(
         r#"
 nodes:
   - id: first
