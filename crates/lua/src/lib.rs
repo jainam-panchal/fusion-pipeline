@@ -46,7 +46,7 @@ use fusion_core::stage::{Context, DropReason, Stage, StageError, StageOutput};
 use fusion_core::state::StateErrorPolicy;
 use serde::Deserialize;
 
-use vm::{Fault, Returned, Script, Vm};
+use vm::{LuaError, Returned, Script, Stopped, Vm};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -162,13 +162,13 @@ impl Lua {
         if params.limits.output_kib == 0 {
             return Err(node.invalid_params("`limits.output_kib` must be at least 1"));
         }
-        let display = chunk_name.trim_start_matches(['@', '=']).to_owned();
         let mut uses_state = false;
         for (name, line) in scan::free_names(&source) {
             if vm::FORBIDDEN.contains(&name) {
                 let instead = vm::instead_of(name).map_or(String::new(), |i| format!("; use {i}"));
                 return Err(node.invalid_params(format!(
-                    "{display}:{line}: `{name}` is not available in the sandbox{instead}"
+                    "{}:{line}: `{name}` is not available in the sandbox{instead}",
+                    chunk_name.trim_start_matches(['@', '='])
                 )));
             }
             if name == "state" {
@@ -190,7 +190,7 @@ impl Lua {
         });
         // Compiled and run once in a throwaway sandbox, so a syntax error, a missing
         // `process` or a top level that misbehaves fails the config, not the first record.
-        Vm::new(Arc::clone(&script)).map_err(|fault| node.invalid_params(fault.describe()))?;
+        Vm::new(Arc::clone(&script)).map_err(|error| node.invalid_params(error.describe()))?;
         Ok(Self {
             key: NEXT_KEY.fetch_add(1, Ordering::Relaxed),
             script,
@@ -210,7 +210,7 @@ impl Lua {
     }
 
     /// This worker's VM for this node, built on the worker's first record through it.
-    fn vm(&self) -> Result<Rc<Vm>, Fault> {
+    fn vm(&self) -> Result<Rc<Vm>, LuaError> {
         VMS.with(|vms| {
             if let Some(vm) = vms.borrow().get(&self.key) {
                 return Ok(Rc::clone(vm));
@@ -224,23 +224,24 @@ impl Lua {
 
 impl Stage for Lua {
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
-        let run = self.vm().and_then(|vm| vm.run(&record, &ctx.state));
-        let fault = match run {
+        let run = match self.vm() {
+            Ok(vm) => vm.run(&record, &ctx.state),
+            Err(error) => Err(Stopped::Lua(error)),
+        };
+        let error = match run {
             Ok(Returned::Record(record)) => return StageOutput::Pass(*record),
             Ok(Returned::Drop) => return StageOutput::Drop(DropReason::LuaDrop),
             Ok(Returned::Split(records)) => return StageOutput::Split(records),
-            Err(Fault::State(error)) => return StageOutput::StateError { record, error },
-            Err(fault) => fault,
+            Err(Stopped::State(error)) => return StageOutput::StateError { record, error },
+            Err(Stopped::Lua(error)) => error,
         };
-        if matches!(fault, Fault::Memory) {
+        if matches!(error, LuaError::Memory) {
             // A VM at its cap stays there when the growth is in the script's upvalues, so
             // the next record starts a fresh one; the persistent state is what was leaking.
             VMS.with(|vms| vms.borrow_mut().remove(&self.key));
         }
-        if let Some(kind) = fault.kind() {
-            ctx.metrics.lua_error(kind);
-        }
-        let message = fault.describe();
+        ctx.metrics.lua_error(error.kind());
+        let message = error.describe();
         eprintln!(
             "pipeline: lua `{}` record {}: {message}",
             ctx.node_id, ctx.record_id

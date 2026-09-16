@@ -133,7 +133,7 @@ One of the limits on a script: the instruction budget (`limits.instructions`, pe
 _Avoid_: quota, timeout (nothing is measured in time)
 
 **Lua error**:
-A run of `process` that produced no records: the budget or cap tripped, the script raised, or the returned record was refused. Counted on `lua_errors_total{kind}` with `kind` from the closed set `instructions`, `memory`, `runtime`, `output`, then handled by the node's `on_error`. A `state.*` call the store could not answer is a state error, not a Lua error.
+A run of `process` that produced no records (`LuaError` in the lua crate, one variant per kind): the budget or cap tripped, the script raised, or the returned record was refused. Counted on `lua_errors_total{kind}` with `kind` from the closed set `instructions`, `memory`, `runtime`, `output`, then handled by the node's `on_error`. A `state.*` call the store could not answer is a state error, not a Lua error.
 _Avoid_: exception, script failure, crash
 
 **Error policy**:

@@ -61,10 +61,19 @@ pub(crate) struct Script {
     pub(crate) output_bytes: usize,
 }
 
-/// Why a run of `process` did not produce records: the `kind` label of `lua_errors_total`
-/// is [`Fault::kind`].
+impl Script {
+    /// The script as a message names it: the file path, or the node id for an inline
+    /// `source`, without the prefix Lua wants on a chunk name.
+    pub(crate) fn display_name(&self) -> &str {
+        self.chunk_name.trim_start_matches(['@', '='])
+    }
+}
+
+/// A run of `process` that produced no records, the glossary's Lua error: every variant is
+/// a `kind` of `lua_errors_total`, and the node's `on_error` decides what happens to the
+/// record. A state error is not one of these; see [`Stopped`].
 #[derive(Debug)]
-pub(crate) enum Fault {
+pub(crate) enum LuaError {
     /// The instruction budget tripped.
     Instructions,
     /// The memory cap tripped.
@@ -73,33 +82,55 @@ pub(crate) enum Fault {
     Runtime(String),
     /// The script returned something the stage refuses.
     Output(OutputError),
-    /// A `state.*` call could not reach the store. Not a Lua error: the engine applies the
-    /// node's `on_state_error`.
-    State(StateError),
 }
 
-impl Fault {
-    /// The `kind` label, `None` for a state error, which is the store's to count.
-    pub(crate) const fn kind(&self) -> Option<LuaErrorKind> {
+impl LuaError {
+    /// The `kind` label of `lua_errors_total`.
+    pub(crate) const fn kind(&self) -> LuaErrorKind {
         match self {
-            Self::Instructions => Some(LuaErrorKind::Instructions),
-            Self::Memory => Some(LuaErrorKind::Memory),
-            Self::Runtime(_) => Some(LuaErrorKind::Runtime),
-            Self::Output(_) => Some(LuaErrorKind::Output),
-            Self::State(_) => None,
+            Self::Instructions => LuaErrorKind::Instructions,
+            Self::Memory => LuaErrorKind::Memory,
+            Self::Runtime(_) => LuaErrorKind::Runtime,
+            Self::Output(_) => LuaErrorKind::Output,
         }
     }
 
     pub(crate) fn describe(&self) -> String {
         match self {
-            Self::Instructions => "instruction budget exceeded".to_owned(),
+            Self::Instructions => BUDGET_EXCEEDED.to_owned(),
             Self::Memory => "memory cap exceeded".to_owned(),
             Self::Runtime(message) => message.clone(),
             Self::Output(error) => format!("returned record refused: {error}"),
-            Self::State(error) => error.to_string(),
         }
     }
 }
+
+/// What stopped a run of `process`, and so who decides. A [`LuaError`] is the node's, through
+/// its `on_error`; a state error is the engine's, through the node's `on_state_error`. The
+/// two are kept apart here because the glossary keeps them apart: a store that could not
+/// answer is not something the script did.
+#[derive(Debug)]
+pub(crate) enum Stopped {
+    /// The script failed, or what it returned was refused.
+    Lua(LuaError),
+    /// A `state.*` call could not reach the store.
+    State(StateError),
+}
+
+impl Stopped {
+    /// This stop as a load-time failure. At load there is no record and no state handle, so
+    /// the API refuses before it reaches the store and the state arm cannot be taken; it is
+    /// reported like any other failure of the script's top level rather than by a panic.
+    fn at_load(self) -> LuaError {
+        match self {
+            Self::Lua(error) => error,
+            Self::State(error) => LuaError::Runtime(error.to_string()),
+        }
+    }
+}
+
+/// What the budget's marker error and [`LuaError::Instructions`] both say.
+const BUDGET_EXCEEDED: &str = "instruction budget exceeded";
 
 /// What `process` returned, once checked.
 pub(crate) enum Returned {
@@ -116,7 +147,7 @@ struct BudgetExceeded;
 
 impl std::fmt::Display for BudgetExceeded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("instruction budget exceeded")
+        f.write_str(BUDGET_EXCEEDED)
     }
 }
 
@@ -140,22 +171,19 @@ pub(crate) struct Vm {
 impl Vm {
     /// Build the sandbox, install the API and the guardrails, run the script's top level
     /// and take its `process`.
-    pub(crate) fn new(script: Arc<Script>) -> Result<Self, Fault> {
+    pub(crate) fn new(script: Arc<Script>) -> Result<Self, LuaError> {
         let lua = mlua::Lua::new_with(
             StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::UTF8,
             LuaOptions::default(),
         )
-        .map_err(|e| Fault::Runtime(e.to_string()))?;
+        .map_err(runtime)?;
         let globals = lua.globals();
         for name in REMOVED_GLOBALS {
-            globals
-                .raw_set(name, LuaValue::Nil)
-                .map_err(|e| Fault::Runtime(e.to_string()))?;
+            globals.raw_set(name, LuaValue::Nil).map_err(runtime)?;
         }
-        install_api(&lua, &script.node).map_err(|e| Fault::Runtime(e.to_string()))?;
-        install_pcall(&lua).map_err(|e| Fault::Runtime(e.to_string()))?;
-        lua.set_memory_limit(script.memory_bytes)
-            .map_err(|e| Fault::Runtime(e.to_string()))?;
+        install_api(&lua, &script.node).map_err(runtime)?;
+        install_pcall(&lua).map_err(runtime)?;
+        lua.set_memory_limit(script.memory_bytes).map_err(runtime)?;
 
         let used = Rc::new(Cell::new(0));
         let every = script.instructions.clamp(1, HOOK_EVERY);
@@ -175,22 +203,22 @@ impl Vm {
                 Ok(VmState::Continue)
             },
         )
-        .map_err(|e| Fault::Runtime(e.to_string()))?;
+        .map_err(runtime)?;
 
         // The top level runs under the same budget and cap as a record.
         lua.load(script.source.as_str())
             .set_name(script.chunk_name.clone())
             .exec()
-            .map_err(classify)?;
+            .map_err(|e| classify(e).at_load())?;
         let process: Function = match globals.raw_get::<LuaValue>("process") {
             Ok(LuaValue::Function(f)) => f,
             Ok(_) => {
-                return Err(Fault::Runtime(format!(
+                return Err(LuaError::Runtime(format!(
                     "{}: the script must define a function `process(record)`",
-                    script.chunk_name.trim_start_matches(['@', '='])
+                    script.display_name()
                 )));
             }
-            Err(e) => return Err(Fault::Runtime(e.to_string())),
+            Err(e) => return Err(runtime(e)),
         };
         Ok(Self {
             lua,
@@ -201,9 +229,11 @@ impl Vm {
     }
 
     /// Run `process` over `record` with `state` as the record's handle.
-    pub(crate) fn run(&self, record: &Record, state: &State) -> Result<Returned, Fault> {
+    pub(crate) fn run(&self, record: &Record, state: &State) -> Result<Returned, Stopped> {
         let Some(record_id) = record.id else {
-            return Err(Fault::Runtime("record has no id".to_owned()));
+            return Err(Stopped::Lua(LuaError::Runtime(
+                "record has no id".to_owned(),
+            )));
         };
         self.lua.set_app_data(Current {
             state: state.clone(),
@@ -215,7 +245,7 @@ impl Vm {
         if self.used.get() > self.script.instructions {
             // Cannot happen while `pcall` re-raises the budget; kept so a run that somehow
             // swallowed the trip is still refused.
-            return Err(Fault::Instructions);
+            return Err(Stopped::Lua(LuaError::Instructions));
         }
         let expected = Expected {
             id: record_id,
@@ -229,21 +259,21 @@ impl Vm {
                     // A record, or an empty table, which is neither a record nor a list.
                     return convert::from_table(&t, &expected)
                         .map(|record| Returned::Record(Box::new(record)))
-                        .map_err(Fault::Output);
+                        .map_err(output);
                 }
                 let mut records = Vec::with_capacity(t.raw_len());
                 for item in t.sequence_values::<LuaValue>() {
                     let item = item.map_err(classify)?;
                     let LuaValue::Table(item) = item else {
-                        return Err(Fault::Output(OutputError(
+                        return Err(output(OutputError(
                             "every entry of a returned list must be a record table".to_owned(),
                         )));
                     };
-                    records.push(convert::from_table(&item, &expected).map_err(Fault::Output)?);
+                    records.push(convert::from_table(&item, &expected).map_err(output)?);
                 }
                 Ok(Returned::Split(records))
             }
-            other => Err(Fault::Output(OutputError(format!(
+            other => Err(output(OutputError(format!(
                 "`process` must return a record table, a list of them, or nil; got {}",
                 type_name(&other)
             )))),
@@ -251,34 +281,49 @@ impl Vm {
     }
 }
 
-/// The `kind` of an `mlua` error: the budget marker, a memory error, a state error carried
-/// out of an API call, or anything else the script did.
-fn classify(error: mlua::Error) -> Fault {
+/// What an `mlua` error stopped the run as: the budget marker, a memory error, a state
+/// error carried out of an API call, or anything else the script did.
+fn classify(error: mlua::Error) -> Stopped {
     match guardrail(&error) {
-        Some(fault) => fault,
-        None => Fault::Runtime(error.to_string()),
+        Some(stopped) => stopped,
+        None => Stopped::Lua(LuaError::Runtime(error.to_string())),
     }
 }
 
-/// The fault when `error` is one a script must not catch: the budget marker, a memory
+/// An `mlua` error as a runtime [`LuaError`], for the paths where no other kind can arise.
+fn runtime(error: mlua::Error) -> LuaError {
+    LuaError::Runtime(error.to_string())
+}
+
+/// A refused output as a stop.
+fn output(error: OutputError) -> Stopped {
+    Stopped::Lua(LuaError::Output(error))
+}
+
+/// The stop when `error` is one a script must not catch: the budget marker, a memory
 /// error anywhere in the chain, or a state error carried out of an API call. `None` for the
 /// script's own errors.
-fn guardrail(error: &mlua::Error) -> Option<Fault> {
+fn guardrail(error: &mlua::Error) -> Option<Stopped> {
     if error.downcast_ref::<BudgetExceeded>().is_some() {
-        return Some(Fault::Instructions);
+        return Some(Stopped::Lua(LuaError::Instructions));
     }
     if let Some(state) = error.downcast_ref::<StateError>() {
-        return Some(Fault::State(state.clone()));
+        return Some(Stopped::State(state.clone()));
     }
-    let mut current = error;
-    loop {
-        match current {
-            mlua::Error::MemoryError(_) => return Some(Fault::Memory),
-            mlua::Error::CallbackError { cause, .. } | mlua::Error::WithContext { cause, .. } => {
-                current = cause;
-            }
-            _ => return None,
+    match root_cause(error) {
+        mlua::Error::MemoryError(_) => Some(Stopped::Lua(LuaError::Memory)),
+        _ => None,
+    }
+}
+
+/// The error under `mlua`'s wrappers: a callback error and a context error each carry the
+/// one that caused them, and neither says anything the caller needs.
+fn root_cause(error: &mlua::Error) -> &mlua::Error {
+    match error {
+        mlua::Error::CallbackError { cause, .. } | mlua::Error::WithContext { cause, .. } => {
+            root_cause(cause)
         }
+        other => other,
     }
 }
 
@@ -286,11 +331,8 @@ fn guardrail(error: &mlua::Error) -> Option<Fault> {
 /// runtime error, the display form otherwise. A non-string error value is flattened to its
 /// text, one difference from Lua's `pcall`.
 fn caught_message(error: &mlua::Error) -> String {
-    match error {
+    match root_cause(error) {
         mlua::Error::RuntimeError(message) => message.clone(),
-        mlua::Error::CallbackError { cause, .. } | mlua::Error::WithContext { cause, .. } => {
-            caught_message(cause)
-        }
         other => other.to_string(),
     }
 }

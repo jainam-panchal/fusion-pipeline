@@ -554,7 +554,7 @@ end"#,
 }
 
 #[test]
-fn a_memory_fault_rebuilds_the_worker_vm_so_a_leaky_upvalue_does_not_poison_every_record() {
+fn a_memory_error_rebuilds_the_worker_vm_so_a_leaky_upvalue_does_not_poison_every_record() {
     // `string.rep` builds its result in a buffer and then copies it into the string, so one
     // call peaks at twice the chunk: 1600 KiB of a 2048 KiB cap passes on a fresh VM, and
     // with 800 KiB already kept in the upvalue the next call cannot fit.

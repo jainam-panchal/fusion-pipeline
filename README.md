@@ -274,12 +274,12 @@ error of kind `output`. A script that loops is stopped by the instruction budget
 (`memory_kib`, at least 64, on the worker's VM as a whole, upvalues included), a script that
 raises is `runtime`; each counts on `lua_errors_total{kind}` and then `on_error` decides:
 `pass` forwards the record as it came in, `drop` drops it with reason `lua_error`, `nak`
-fails it so JetStream redelivers. `nak` is for faults a retry can cure; a `runtime` or
+fails it so JetStream redelivers. `nak` is for failures a retry can cure; a `runtime` or
 `output` error repeats on redelivery until the consumer's `max_deliver`, so under `nak` a
 bad script poisons its records until the dead-letter queue (#10) takes them. The next record
-is served either way: the VM survives a budget or runtime error, and a memory fault rebuilds
-it, upvalues included, since a script whose upvalues grow would otherwise fail every record
-from then on. `pcall` and `xpcall` catch the script's own errors and nothing else: a budget
+is served either way: the VM survives a budget or runtime error, and a `memory` error
+rebuilds it, upvalues included, since a script whose upvalues grow would otherwise fail
+every record from then on. `pcall` and `xpcall` catch the script's own errors and nothing else: a budget
 or cap trip and a state error go through them.
 
 The sandbox has `string`, `table`, `math` and `utf8`, plus `state.get(key)`,
