@@ -14,7 +14,7 @@ use std::fmt;
 
 use serde_json::{Map, Value};
 
-use crate::record::Record;
+use crate::record::{Kind, Record, RecordId};
 
 /// Errors from parsing a path or writing through one. Each message says what is wrong and
 /// what to write instead.
@@ -70,12 +70,6 @@ pub enum PathError {
     #[error("`{field}` needs a key; instead use `{field}.<key>`")]
     MapNeedsKey {
         /// The map field name.
-        field: String,
-    },
-    /// `id` and `kind` cannot be written or removed.
-    #[error("`{field}` is read-only and cannot be written or removed")]
-    ReadOnly {
-        /// The field name.
         field: String,
     },
     /// The value has the wrong JSON type for the field.
@@ -282,12 +276,6 @@ fn json_type(v: &Value) -> &'static str {
         Value::String(_) => "a string",
         Value::Array(_) => "an array",
         Value::Object(_) => "an object",
-    }
-}
-
-fn read_only(field: Field) -> PathError {
-    PathError::ReadOnly {
-        field: Root::Field(field).name().to_owned(),
     }
 }
 
@@ -584,14 +572,6 @@ impl FieldPath {
         }
     }
 
-    /// Whether [`FieldPath::write`] can ever succeed on this path: `false` for the read-only
-    /// `id` and `kind`, so a stage that will write can refuse them at load instead of per
-    /// record.
-    #[must_use]
-    pub fn is_writable(&self) -> bool {
-        !matches!(self.target, Target::Field(Field::Id | Field::Kind))
-    }
-
     /// Read the field as a borrowed view. An absent field is [`FieldValue::Null`].
     #[must_use]
     pub fn read<'a>(&self, record: &'a Record) -> FieldValue<'a> {
@@ -630,14 +610,16 @@ impl FieldPath {
 
     /// Write `value` to the field, creating or replacing it.
     ///
-    /// `null` clears an optional top-level field and is stored as-is under a map key.
+    /// `null` clears an optional top-level field and is stored as-is under a map key. Every
+    /// field is payload (ADR 0005), `id` and `kind` included; they only have types.
     ///
     /// # Errors
     ///
-    /// [`PathError::ReadOnly`] for `id` and `kind`; [`PathError::WrongType`] when a typed
-    /// field is offered the wrong JSON type (`severity_number` takes an integer in `i32`,
-    /// `severity_text`, `trace_id` and `span_id` a string, the time fields an integer in
-    /// `u64`) or a map key is offered an array or object. The record is unchanged on error.
+    /// [`PathError::WrongType`] when a typed field is offered the wrong JSON type (`id` and
+    /// the time fields take an integer in `u64`, `kind` one of `log`, `metric` or `span`,
+    /// `severity_number` an integer in `i32`, `severity_text`, `trace_id` and `span_id` a
+    /// string) or a map key is offered an array or object. The record is unchanged on
+    /// error.
     pub fn write(&self, record: &mut Record, value: Value) -> Result<(), PathError> {
         let field = match &self.target {
             Target::Key(map, key) => {
@@ -650,7 +632,8 @@ impl FieldPath {
             Target::Field(field) => *field,
         };
         match field {
-            Field::Id | Field::Kind => return Err(read_only(field)),
+            Field::Id => record.id = self.expect_u64(value)?.map(RecordId),
+            Field::Kind => record.kind = self.expect_kind(&value)?,
             Field::TimeUnixNano => record.time_unix_nano = self.expect_u64(value)?,
             Field::ObservedTimeUnixNano => {
                 record.observed_time_unix_nano = self.expect_u64(value)?;
@@ -664,18 +647,20 @@ impl FieldPath {
         Ok(())
     }
 
-    /// Remove the field, returning the old value. Absent is `Ok(None)`.
+    /// Remove the field, returning the old value. Absent is `Ok(None)`. `kind` is never
+    /// absent: removing it leaves the wire default, `log`.
     ///
     /// # Errors
     ///
-    /// [`PathError::ReadOnly`] for `id` and `kind`.
+    /// None today; the `Result` keeps removal symmetric with [`FieldPath::write`].
     pub fn remove(&self, record: &mut Record) -> Result<Option<Value>, PathError> {
         let field = match &self.target {
             Target::Key(map, key) => return Ok(map.get_mut(record).remove(key)),
             Target::Field(field) => *field,
         };
         Ok(match field {
-            Field::Id | Field::Kind => return Err(read_only(field)),
+            Field::Id => record.id.take().map(|id| Value::from(id.0)),
+            Field::Kind => Some(Value::from(std::mem::take(&mut record.kind).as_str())),
             Field::TimeUnixNano => record.time_unix_nano.take().map(Value::from),
             Field::ObservedTimeUnixNano => record.observed_time_unix_nano.take().map(Value::from),
             Field::SeverityText => record.severity_text.take().map(Value::from),
@@ -710,6 +695,19 @@ impl FieldPath {
                 .map(Some)
                 .ok_or_else(|| self.wrong_type("a non-negative integer", &value)),
             _ => Err(self.wrong_type("a non-negative integer", &value)),
+        }
+    }
+
+    fn expect_kind(&self, value: &Value) -> Result<Kind, PathError> {
+        const KINDS: &str = "`log`, `metric` or `span`";
+        match value {
+            Value::String(s) => match s.as_str() {
+                "log" => Ok(Kind::Log),
+                "metric" => Ok(Kind::Metric),
+                "span" => Ok(Kind::Span),
+                _ => Err(self.wrong_type(KINDS, value)),
+            },
+            _ => Err(self.wrong_type(KINDS, value)),
         }
     }
 

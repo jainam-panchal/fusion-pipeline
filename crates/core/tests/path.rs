@@ -2,7 +2,7 @@
 //! `scope` the rest of the path, joined with dots, is the flat map key.
 
 use fusion_core::path::{FieldPath, FieldValue, Num, PathError};
-use fusion_core::record::Record;
+use fusion_core::record::{Kind, Record, RecordId};
 use serde_json::{Value, json};
 
 #[test]
@@ -226,23 +226,32 @@ fn write_creates_or_replaces_a_map_key() {
 }
 
 #[test]
-fn write_to_id_or_kind_is_refused() {
+fn id_and_kind_are_payload_and_take_their_types() {
     let mut record = record();
+
+    write(&mut record, "id", json!(8)).expect("an id is a non-negative integer");
+    assert_eq!(record.id, Some(RecordId(8)));
+    write(&mut record, "kind", json!("metric")).expect("a kind is one of the three");
+    assert_eq!(record.kind, Kind::Metric);
+
     let before = record.clone();
-
-    let err = write(&mut record, "id", json!(8)).expect_err("id is read-only");
-    assert!(
-        matches!(err, PathError::ReadOnly { ref field } if field == "id"),
-        "{err}"
-    );
-
-    let err = write(&mut record, "kind", json!("metric")).expect_err("kind is read-only");
-    assert!(
-        matches!(err, PathError::ReadOnly { ref field } if field == "kind"),
-        "{err}"
-    );
-
+    for (path, value, expected) in [
+        ("id", json!(-1), "a non-negative integer"),
+        ("id", json!("8"), "a non-negative integer"),
+        ("kind", json!("trace"), "`log`, `metric` or `span`"),
+        ("kind", json!(1), "`log`, `metric` or `span`"),
+        ("kind", json!(null), "`log`, `metric` or `span`"),
+    ] {
+        let err = write(&mut record, path, value).expect_err("wrong type");
+        assert!(
+            matches!(err, PathError::WrongType { ref field, expected: e, .. } if field == path && e == expected),
+            "{path}: {err}"
+        );
+    }
     assert_eq!(record, before);
+
+    write(&mut record, "id", json!(null)).expect("null clears the id");
+    assert_eq!(record.id, None);
 }
 
 #[test]
@@ -364,15 +373,14 @@ fn remove_deletes_the_field_and_returns_the_old_value() {
         None
     );
 
-    let before = record.clone();
-    for path in ["id", "kind"] {
-        let err = remove(&mut record, path).expect_err("read-only");
-        assert!(
-            matches!(err, PathError::ReadOnly { ref field } if field == path),
-            "{err}"
-        );
-    }
-    assert_eq!(record, before);
+    record.kind = Kind::Span;
+    assert_eq!(remove(&mut record, "id").expect("removes"), Some(json!(7)));
+    assert_eq!(record.id, None);
+    assert_eq!(
+        remove(&mut record, "kind").expect("removes"),
+        Some(json!("span"))
+    );
+    assert_eq!(record.kind, Kind::Log, "a removed kind is the wire default");
 }
 
 #[test]

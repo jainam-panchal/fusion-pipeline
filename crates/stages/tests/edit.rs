@@ -98,26 +98,35 @@ fn a_malformed_path_is_rejected_with_the_parser_hint() {
 }
 
 #[test]
-fn a_write_to_id_or_kind_is_rejected_as_read_only() {
+fn every_op_may_name_id_or_kind_since_they_are_payload() {
+    for op in [
+        "set: { field: id, value: 7 }",
+        "set: { field: kind, value: span }",
+        "rename: { from: attributes.n, to: id }",
+        "copy: { from: attributes.k, to: kind }",
+        "delete: { fields: [id, kind] }",
+    ] {
+        let ops = format!("    ops:\n      - {op}\n");
+        assert!(build(&ops).is_ok(), "{op}");
+    }
+}
+
+#[test]
+fn a_literal_or_hash_id_and_kind_do_not_take_is_rejected_by_type() {
     rejects(
-        "    ops:\n      - set: { field: id, value: 7 }\n",
+        "    ops:\n      - set: { field: id, value: seven }\n",
         "op 0",
-        &["id", "read-only"],
+        &["id", "non-negative integer", "\"seven\""],
     );
     rejects(
-        "    ops:\n      - rename: { from: body, to: kind }\n",
+        "    ops:\n      - set: { field: kind, value: trace }\n",
         "op 0",
-        &["kind", "read-only"],
+        &["kind", "`log`, `metric` or `span`"],
     );
     rejects(
         "    ops:\n      - hash: { field: id }\n",
         "op 0",
-        &["id", "read-only"],
-    );
-    rejects(
-        "    ops:\n      - delete: { fields: [kind] }\n",
-        "op 0",
-        &["kind", "read-only"],
+        &["hash", "id"],
     );
 }
 

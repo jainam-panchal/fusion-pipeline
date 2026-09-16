@@ -8,6 +8,7 @@ use common::{WAIT, for_each_worker_count, start};
 use fusion_core::memory::AckOutcome;
 use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
+use fusion_core::state::StateStore as _;
 use serde_json::{Value, json};
 
 /// The issue's example, behind a filter, into one sink.
@@ -420,7 +421,7 @@ nodes:
 "#;
 
 #[test]
-fn a_tenant_rewritten_by_edit_is_payload_and_labels_and_state_keys_keep_the_arrival_tenant() {
+fn a_tenant_rewritten_by_edit_is_payload_and_labels_and_state_keys_keep_the_meta_tenant() {
     for_each_worker_count(|workers| {
         let (out, h) = run(
             RETENANT_THEN_DEDUPE,
@@ -443,6 +444,53 @@ fn a_tenant_rewritten_by_edit_is_payload_and_labels_and_state_keys_keep_the_arri
         assert!(
             keys[0].starts_with("ingest:acme:dedupe_body:"),
             "{keys:?} workers={workers}"
+        );
+        h.finish();
+    });
+}
+
+#[test]
+fn id_and_kind_rewritten_by_edit_are_payload_and_the_walk_keeps_the_records_meta() {
+    const REKIND: &str = r#"
+name: ingest
+nodes:
+  - id: normalise
+    type: edit
+    ops:
+      - set: { field: kind, value: span }
+      - delete: { fields: [id] }
+  - id: dedupe_body
+    type: dedupe
+    from: normalise
+    key: [body]
+    window: 10s
+  - id: out
+    type: sink.memory
+    from: dedupe_body
+"#;
+    for_each_worker_count(|workers| {
+        let h = start(REKIND, workers);
+        for id in [1, 2] {
+            let probe = h.source.push(record(id, json!({"body": "x"})));
+            assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
+        }
+        let out = h.sinks.records("out");
+        assert_eq!(
+            out.len(),
+            1,
+            "the second is the first's repeat: workers={workers}"
+        );
+        assert_eq!(out[0].id, None, "the sink writes the payload");
+        assert_eq!(out[0].kind, fusion_core::record::Kind::Span);
+        let holder = h
+            .state
+            .get(&h.state.keys()[0])
+            .expect("store answers")
+            .expect("key held");
+        assert!(
+            holder.starts_with(b"1 "),
+            "the window's holder is Meta's record id: {:?} workers={workers}",
+            String::from_utf8_lossy(&holder)
         );
         h.finish();
     });

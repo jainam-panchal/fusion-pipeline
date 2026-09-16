@@ -21,6 +21,7 @@ use fusion_core::record::Record;
 use fusion_core::stage::{Context, Stage, StageOutput};
 use fusion_regex::Regex;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::regex_stage::{
     RegexParams, engine_label, log_node_engine, match_failure, write_strings,
@@ -50,8 +51,8 @@ impl Redact {
     /// # Errors
     ///
     /// [`ConfigError::InvalidParams`] naming the node when a parameter is missing or
-    /// unknown, `fields` is empty, a field is not a path or is read-only (`id`, `kind`),
-    /// or the pattern does not compile under the node's limits and ReDoS policy.
+    /// unknown, `fields` is empty, a field is not a path or does not take any string (`id`,
+    /// `kind`, `severity_number` and the time fields do not), or the pattern does not compile under the node's limits and ReDoS policy.
     pub fn from_node(node: &NodeConfig) -> Result<Self, ConfigError> {
         let params: Params = node.parse_params()?;
         if params.fields.is_empty() {
@@ -63,11 +64,14 @@ impl Redact {
             .map(|field| {
                 let path = FieldPath::parse(field)
                     .map_err(|e| node.invalid_params(format!("field `{field}`: {e}")))?;
-                if !path.is_writable() {
-                    return Err(node.invalid_params(format!(
-                        "field `{field}` is read-only and cannot be redacted"
-                    )));
-                }
+                // A redaction writes a string of the operator's making, so the field must
+                // take any string: core's own write rules, run on an empty record.
+                path.write(&mut Record::default(), Value::String(String::new()))
+                    .map_err(|e| {
+                        node.invalid_params(format!(
+                            "field `{field}` cannot be redacted: {e}; a redaction writes a string"
+                        ))
+                    })?;
                 Ok(path)
             })
             .collect::<Result<Vec<_>, ConfigError>>()?;

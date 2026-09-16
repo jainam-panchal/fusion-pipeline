@@ -346,12 +346,16 @@ fn redact_over_input_bytes_drops_with_reason_regex_limit_and_nothing_reaches_the
 }
 
 #[test]
-fn redact_rejects_read_only_and_malformed_fields_at_load_naming_the_node() {
-    let message = load_error(&REDACT.replace("[body, attributes.msg]", "[id]"));
-    assert!(
-        message.contains("mask_phones") && message.contains("id"),
-        "{message}"
-    );
+fn redact_rejects_fields_that_take_no_string_and_malformed_fields_at_load_naming_the_node() {
+    for field in ["id", "kind", "severity_number"] {
+        let message = load_error(&REDACT.replace("[body, attributes.msg]", &format!("[{field}]")));
+        assert!(
+            message.contains("mask_phones")
+                && message.contains(field)
+                && message.contains("string"),
+            "{message}"
+        );
+    }
 
     let message = load_error(&REDACT.replace("[body, attributes.msg]", "[attributes]"));
     assert!(

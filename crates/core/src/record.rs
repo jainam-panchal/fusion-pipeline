@@ -8,8 +8,9 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-/// Producer-supplied snowflake id. Always present on a record the engine processes; a
-/// record that arrives without one is negatively acknowledged.
+/// Producer-supplied snowflake id. Present on every record the engine walks, as it arrived
+/// (a record that arrives without one is negatively acknowledged); the pipeline decides with
+/// the copy on the record's `Meta`, and a stage may change or drop the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct RecordId(pub u64);
@@ -65,7 +66,8 @@ impl Kind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[non_exhaustive]
 pub struct Record {
-    /// Producer-supplied id; `None` only for records that arrived without one.
+    /// Producer-supplied id; `None` for a record that arrived without one or whose id a
+    /// stage removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<RecordId>,
     /// Signal kind, `log` by default.
@@ -89,7 +91,7 @@ pub struct Record {
     /// Record attributes.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub attributes: Map<String, Value>,
-    /// Resource attributes. The tenant lives at `resource.tenant.id`.
+    /// Resource attributes. The producer's tenant lives at `resource.tenant.id`.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub resource: Map<String, Value>,
     /// Instrumentation scope attributes.
@@ -122,7 +124,8 @@ impl Record {
         serde_json::to_string(self)
     }
 
-    /// The tenant, read from `resource.tenant.id`.
+    /// The producer's tenant, `resource.tenant.id` when it is a string. The engine reads it
+    /// once, at intake, into the record's `Meta`.
     #[must_use]
     pub fn tenant(&self) -> Option<&str> {
         self.resource.get("tenant.id").and_then(Value::as_str)

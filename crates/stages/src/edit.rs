@@ -26,9 +26,10 @@
 //! text `sample consistent` hashes). It is a stable join key, not anonymisation: an
 //! unsalted digest of a low-entropy field is dictionary-reversible.
 //!
-//! What load can check, it refuses: every path parses, no op writes or removes `id` or
-//! `kind` (`copy` may read them), a `set` literal is a scalar the field takes, a `hash`
-//! target takes a string, `from` and `to` differ. Every refusal names the node and the op's
+//! Every field is payload (ADR 0005), `id`, `kind` and `resource.tenant.id` included: the
+//! pipeline decides from the record's `Meta`, so an op may write or remove any of them.
+//! What load can check, it refuses: every path parses, a `set` literal is a scalar the
+//! field takes, a `hash` target takes a string, `from` and `to` differ. Every refusal names the node and the op's
 //! position.
 
 use std::collections::BTreeMap;
@@ -186,18 +187,9 @@ impl At<'_> {
         }
     }
 
-    /// `text` parsed as a path the op may write or remove: it parses and is not `id` or
-    /// `kind`.
-    fn editable(&self, key: &str, text: &str) -> Result<FieldPath, ConfigError> {
-        let path = self.readable(key, text)?;
-        if !path.is_writable() {
-            return Err(self.error(format!("`{key}`: `{path}` is read-only")));
-        }
-        Ok(path)
-    }
-
-    /// `text` parsed as a path the op only reads.
-    fn readable(&self, key: &str, text: &str) -> Result<FieldPath, ConfigError> {
+    /// `text` parsed as a path. Every field is payload (ADR 0005): an op may read, write or
+    /// remove any of them, within the field's type.
+    fn path(&self, key: &str, text: &str) -> Result<FieldPath, ConfigError> {
         FieldPath::parse(text).map_err(|e| self.error(format!("`{key}`: {e}")))
     }
 
@@ -213,8 +205,8 @@ impl Edit {
     ///
     /// [`ConfigError::InvalidParams`] naming the node and the op's position when `ops` is
     /// empty, an entry does not hold exactly one op, the op is unknown, a key is missing
-    /// or unknown, a path does not parse, an op writes or removes `id` or `kind`,
-    /// a `set` literal is not a scalar or not of the field's type, a `hash` target does not
+    /// or unknown, a path does not parse, a `set` literal is not a scalar or not of the
+    /// field's type, a `hash` target does not
     /// take a string, `from` equals `to`, or `on_unapplied` is not `skip` or `drop`.
     pub fn from_node(node: &NodeConfig) -> Result<Self, ConfigError> {
         let params: Params = node.parse_params()?;
@@ -271,7 +263,7 @@ fn parse_op(
             if matches!(p.value, Value::Array(_) | Value::Object(_)) {
                 return Err(at.error("`value` must be a string, number, bool or null"));
             }
-            let field = at.editable("field", &p.field)?;
+            let field = at.path("field", &p.field)?;
             // Core's own write rules, on an empty record: the field's type, refused here
             // rather than on every record.
             field
@@ -284,12 +276,8 @@ fn parse_op(
         }
         EditOp::Rename | EditOp::Copy => {
             let p: MoveParams = at.params(body)?;
-            let from = if kind == EditOp::Rename {
-                at.editable("from", &p.from)?
-            } else {
-                at.readable("from", &p.from)?
-            };
-            let to = at.editable("to", &p.to)?;
+            let from = at.path("from", &p.from)?;
+            let to = at.path("to", &p.to)?;
             if from == to {
                 return Err(at.error("`from` and `to` are the same field"));
             }
@@ -302,7 +290,7 @@ fn parse_op(
         }
         EditOp::Hash => {
             let p: HashParams = at.params(body)?;
-            let field = at.editable("field", &p.field)?;
+            let field = at.path("field", &p.field)?;
             field
                 .write(&mut Record::default(), Value::String(String::new()))
                 .map_err(|e| at.error(format!("{e}; hash writes a string")))?;
@@ -318,7 +306,7 @@ fn parse_op(
             let fields = p
                 .fields
                 .iter()
-                .map(|f| at.editable("fields", f))
+                .map(|f| at.path("fields", f))
                 .collect::<Result<Vec<_>, _>>()?;
             Op::Delete { fields }
         }
