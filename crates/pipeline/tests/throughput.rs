@@ -16,6 +16,8 @@ use fusion_core::metrics::Metrics;
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
+use fusion_core::signals::Signals;
+use fusion_core::trace::{RecordTrace, TraceSampling, TraceSink};
 use fusion_pipeline::default_registry;
 
 const WORKERS: usize = 4;
@@ -47,7 +49,7 @@ fn record(id: u64) -> Record {
 }
 
 /// Records per second for `records` records through a fresh engine with `signals`.
-fn measure(records: u64, signals: impl Into<fusion_core::signals::Signals>) -> f64 {
+fn measure(records: u64, signals: impl Into<Signals>) -> f64 {
     let sinks = MemorySinks::new();
     let pipeline =
         Pipeline::from_yaml(&pipeline_yaml(), &registry(&sinks)).expect("pipeline loads");
@@ -81,22 +83,21 @@ fn records() -> u64 {
 
 #[test]
 #[ignore = "a measurement; run on a release build"]
-fn throughput_with_metrics_only() {
+fn throughput_untraced() {
+    // No metrics, events or traces are recorded: the engine and the stages alone.
     let records = records();
     for run in 1..=3 {
         let rate = measure(records, Metrics::noop());
-        println!("metrics only, run {run}: {rate:.0} records/s");
+        println!("untraced, run {run}: {rate:.0} records/s");
     }
 }
 
-/// A trace sink that counts what it is given and keeps nothing, so the measurement is the
-/// engine's cost of tracing, not a store's.
-struct Counting(std::sync::atomic::AtomicU64);
+/// A trace sink that drops what it is given, so the measurement is the engine's cost of
+/// tracing, not a store's.
+struct Discard;
 
-impl fusion_core::trace::TraceSink for Counting {
-    fn export(&self, _: fusion_core::trace::RecordTrace) {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
+impl TraceSink for Discard {
+    fn export(&self, _: RecordTrace) {}
 }
 
 #[test]
@@ -104,10 +105,7 @@ impl fusion_core::trace::TraceSink for Counting {
 fn throughput_tracing_one_percent() {
     let records = records();
     for run in 1..=3 {
-        let signals = fusion_core::signals::Signals::new(Metrics::noop()).with_traces(
-            Counting(std::sync::atomic::AtomicU64::new(0)),
-            fusion_core::trace::TraceSampling::default(),
-        );
+        let signals = Signals::new(Metrics::noop()).with_traces(Discard, TraceSampling::default());
         let rate = measure(records, signals);
         println!("tracing at 1%, run {run}: {rate:.0} records/s");
     }

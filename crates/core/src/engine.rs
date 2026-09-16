@@ -486,7 +486,7 @@ impl<'p> Walker<'p> {
     ) {
         let dag = self.pipeline.dag();
         let node_id = dag.node(index).id.as_str();
-        let metrics = self.signals.metrics();
+        let metrics = self.metrics();
         let node = self.pipeline.node(index);
         let engine = match node {
             CompiledNode::Sink(_) => None,
@@ -583,10 +583,12 @@ impl<'p> Walker<'p> {
                             );
                             return;
                         }
-                        if walk.spans.tracing() {
+                        if self.signals.tracing() {
                             // The pipeline's own copy of the label, found only when tracing:
                             // the span holds it before the branch runs, at no allocation.
-                            let declared = dag.label(index, &label).unwrap_or_default();
+                            let declared = dag
+                                .label(index, &label)
+                                .expect("a label with a consumer is one the graph holds");
                             walk.spans.close(span, ended, SpanResult::Routed(declared));
                         }
                         self.fan_out(targets, Arc::new(record), walk, Some(span));

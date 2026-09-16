@@ -232,6 +232,19 @@ pub enum SpanResult<L = String> {
 }
 
 impl<L> SpanResult<L> {
+    /// The same result with its label turned by `f`.
+    pub fn map_label<M>(self, f: impl FnOnce(L) -> M) -> SpanResult<M> {
+        match self {
+            Self::Pass => SpanResult::Pass,
+            Self::Routed(label) => SpanResult::Routed(f(label)),
+            Self::Split(records) => SpanResult::Split(records),
+            Self::Drop(reason) => SpanResult::Drop(reason),
+            Self::StateErrorPass => SpanResult::StateErrorPass,
+            Self::Written => SpanResult::Written,
+            Self::Error { failure, error } => SpanResult::Error { failure, error },
+        }
+    }
+
     /// The `outcome` attribute this result exports as.
     #[must_use]
     pub const fn outcome(&self) -> SpanOutcome {
@@ -360,7 +373,8 @@ impl<'p> TraceBuffer<'p> {
         }
     }
 
-    /// Start a new walk: forget the last one and anchor the clock.
+    /// Start a new walk: forget the last one, give back what a large one grew the buffer to,
+    /// and anchor the clock.
     pub(crate) fn begin(&mut self) {
         self.opened = 0;
         if !self.tracing {
@@ -390,13 +404,11 @@ impl<'p> TraceBuffer<'p> {
         handle
     }
 
-    /// Whether this buffer takes drafts at all.
-    pub(crate) const fn tracing(&self) -> bool {
-        self.tracing
-    }
-
     /// Close the span `handle` at `end` with what the node did.
     pub(crate) fn close(&mut self, handle: usize, end: Instant, result: SpanResult<&'p str>) {
+        if !self.tracing {
+            return;
+        }
         if let Some(draft) = self.drafts.get_mut(handle) {
             draft.end = end;
             draft.result = Some(result);
@@ -405,6 +417,9 @@ impl<'p> TraceBuffer<'p> {
 
     /// Close every span still open, as failed with `failure`: a panic unwound past them.
     pub(crate) fn fail_open(&mut self, end: Instant, failure: FailureKind, error: &str) {
+        if !self.tracing {
+            return;
+        }
         for draft in self.drafts.iter_mut().filter(|d| d.result.is_none()) {
             draft.end = end;
             draft.result = Some(SpanResult::Error {
@@ -439,11 +454,17 @@ impl<'p> TraceBuffer<'p> {
             .drain(..)
             .enumerate()
             .map(|(handle, draft)| {
-                // A span still open when the walk ended was left by a panic that
-                // `fail_open` did not see; it ends now, as it was.
+                // Every node closes its span and a panic closes the rest, so an open span
+                // here is an engine bug; it is shown as one rather than as a success.
                 let (result, end) = match draft.result {
                     Some(result) => (result, draft.end),
-                    None => (SpanResult::Pass, now),
+                    None => (
+                        SpanResult::Error {
+                            failure: FailureKind::Panic,
+                            error: "span was never closed".to_owned(),
+                        },
+                        now,
+                    ),
                 };
                 NodeSpan {
                     span_id: key.span_id(delivery, visit(handle)),
@@ -453,17 +474,7 @@ impl<'p> TraceBuffer<'p> {
                     node: draft.node.to_owned(),
                     start: at(draft.start),
                     end: at(end),
-                    result: match result {
-                        SpanResult::Pass => SpanResult::Pass,
-                        SpanResult::Routed(label) => SpanResult::Routed(label.to_owned()),
-                        SpanResult::Split(records) => SpanResult::Split(records),
-                        SpanResult::Drop(reason) => SpanResult::Drop(reason),
-                        SpanResult::StateErrorPass => SpanResult::StateErrorPass,
-                        SpanResult::Written => SpanResult::Written,
-                        SpanResult::Error { failure, error } => {
-                            SpanResult::Error { failure, error }
-                        }
-                    },
+                    result: result.map_label(str::to_owned),
                 }
             })
             .collect();

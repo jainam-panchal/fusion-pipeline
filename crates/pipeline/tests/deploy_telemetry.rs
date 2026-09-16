@@ -261,12 +261,7 @@ fn metric_names(expr: &str) -> Vec<(String, String)> {
                 }
                 i += 1;
             }
-            '{' => {
-                while i < chars.len() && chars[i] != '}' {
-                    i += 1;
-                }
-                i += 1;
-            }
+            '{' => i = selector_end(&chars, i),
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
                 while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
@@ -286,11 +281,8 @@ fn metric_names(expr: &str) -> Vec<(String, String)> {
                     }
                 } else if SUFFIXES.iter().any(|suffix| name.ends_with(suffix)) {
                     let selector = if chars.get(i) == Some(&'{') {
-                        let close = chars[i..]
-                            .iter()
-                            .position(|c| *c == '}')
-                            .map_or(chars.len(), |p| i + p);
-                        chars[i + 1..close].iter().collect()
+                        let end = selector_end(&chars, i);
+                        chars[i + 1..end - 1].iter().collect()
                     } else {
                         String::new()
                     };
@@ -303,11 +295,26 @@ fn metric_names(expr: &str) -> Vec<(String, String)> {
     names
 }
 
+/// The index just past the `}` closing the selector that opens at `open`, skipping quoted
+/// label values.
+fn selector_end(chars: &[char], open: usize) -> usize {
+    let mut i = open + 1;
+    while i < chars.len() && chars[i] != '}' {
+        if chars[i] == '"' {
+            i += 1;
+            while i < chars.len() && chars[i] != '"' {
+                i += if chars[i] == '\\' { 2 } else { 1 };
+            }
+        }
+        i += 1;
+    }
+    (i + 1).min(chars.len())
+}
+
 #[test]
 fn metric_names_finds_bare_metrics_and_skips_labels_and_strings() {
-    let names = |expr: &str| -> Vec<(String, String)> { metric_names(expr) };
     assert_eq!(
-        names(
+        metric_names(
             r#"sum by (stage) (rate(records_out_total{tenant="$tenant"}[1m]) and on (tenant, stage) bytes_out_total)"#
         ),
         [
@@ -319,13 +326,20 @@ fn metric_names_finds_bare_metrics_and_skips_labels_and_strings() {
         ]
     );
     assert_eq!(
-        names(r#"sum by (reason_count) (dlq_total{tenant="$tenant", stage="x_total"})"#),
+        metric_names(r#"rate(sink_total{stage="a}b_total"}[1m])"#),
+        [("sink_total".to_owned(), r#"stage="a}b_total""#.to_owned())]
+    );
+    assert_eq!(
+        metric_names(r#"sum by (reason_count) (dlq_total{tenant="$tenant", stage="x_total"})"#),
         [(
             "dlq_total".to_owned(),
             r#"tenant="$tenant", stage="x_total""#.to_owned()
         )]
     );
-    assert_eq!(names(r#"label_replace(up, "x", "y_total", "", "")"#), []);
+    assert_eq!(
+        metric_names(r#"label_replace(up, "x", "y_total", "", "")"#),
+        []
+    );
 }
 
 #[test]
