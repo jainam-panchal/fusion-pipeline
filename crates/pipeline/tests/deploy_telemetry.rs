@@ -383,12 +383,14 @@ impl Cursor {
 ///
 /// # Errors
 ///
-/// An unclosed string, selector, range or list, or a character PromQL does not have (a name
+/// An unclosed string, selector, range or list, unbalanced parentheses, a series named both
+/// in front of its selector and inside it, or a character PromQL does not have (a name
 /// starting with a non-ASCII letter), so a malformed dashboard query fails the test instead
 /// of passing or panicking.
 fn metric_names(expr: &str) -> Result<Vec<Series>, String> {
     let mut cursor = Cursor::new(expr);
     let mut found = Vec::new();
+    let mut depth = 0_usize;
     while let Some(c) = cursor.peek() {
         match c {
             '"' | '\'' | '`' => {
@@ -407,6 +409,13 @@ fn metric_names(expr: &str) -> Result<Vec<Series>, String> {
                 cursor.delimited(']')?;
             }
             '(' => {
+                depth += 1;
+                cursor.at += 1;
+            }
+            ')' => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| format!("unopened `)` at {}", cursor.at))?;
                 cursor.at += 1;
             }
             '$' => {
@@ -438,12 +447,18 @@ fn metric_names(expr: &str) -> Result<Vec<Series>, String> {
                     } else {
                         Vec::new()
                     };
+                    if matchers.iter().any(|m| m.label == "__name__") {
+                        return Err(format!("`{name}` is named twice"));
+                    }
                     found.push(Series { name, matchers });
                 }
             }
-            c if c.is_whitespace() || "+-*/%^=!<>,)@:".contains(c) => cursor.at += 1,
+            c if c.is_whitespace() || "+-*/%^=!<>,@:".contains(c) => cursor.at += 1,
             other => return Err(format!("unexpected `{other}` at {}", cursor.at)),
         }
+    }
+    if depth > 0 {
+        return Err(format!("{depth} unclosed `(`"));
     }
     Ok(found)
 }
@@ -593,6 +608,13 @@ fn a_malformed_query_is_an_error_not_a_panic() {
         "x{a=b}",
         "x{a}",
         r#"x{a=="b"}"#,
+        // Parentheses must balance.
+        "rate(x[5m]",
+        "sum(a_total))",
+        ")a_total(",
+        // A name in front leaves no room for another inside.
+        r#"x_total{"y_total"}"#,
+        r#"x_total{__name__="y_total"}"#,
     ] {
         assert!(metric_names(bad).is_err(), "`{bad}` scanned");
     }
