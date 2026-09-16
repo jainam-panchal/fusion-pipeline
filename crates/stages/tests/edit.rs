@@ -44,7 +44,7 @@ fn an_unknown_op_is_rejected_listing_the_ops() {
     rejects(
         "    ops:\n      - replace: { field: body, value: x }\n",
         "op 0",
-        &["replace", "set", "rename", "copy", "hash", "delete"],
+        &["`replace`", "`set`, `rename`, `copy`, `hash` or `delete`"],
     );
 }
 
@@ -55,7 +55,14 @@ fn an_entry_with_two_ops_or_none_is_rejected() {
         "op 0",
         &["one op per entry"],
     );
-    rejects("    ops:\n      - {}\n", "op 0", &["one op per entry"]);
+    rejects(
+        "    ops:\n      - {}\n",
+        "op 0",
+        &[
+            "one op per entry",
+            "`set`, `rename`, `copy`, `hash` or `delete`",
+        ],
+    );
 }
 
 #[test]

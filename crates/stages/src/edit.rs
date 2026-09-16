@@ -164,9 +164,6 @@ mod label {
     }
 }
 
-/// The op kinds as an error message lists them.
-const OP_NAMES: &str = "set, rename, copy, hash or delete";
-
 /// Where in the config an error is: the node, the op's position, and the op's kind once
 /// that is known.
 struct At<'a> {
@@ -246,15 +243,10 @@ fn parse_op(
         kind: None,
     };
     let Some((name, body)) = entry.pop_first().filter(|_| entry.is_empty()) else {
-        return Err(at.error(format!("one op per entry, one of {OP_NAMES}")));
+        return Err(at.error(format!("one op per entry, one of {}", EditOp::ONE_OF)));
     };
-    let kind = match name.as_str() {
-        "set" => EditOp::Set,
-        "rename" => EditOp::Rename,
-        "copy" => EditOp::Copy,
-        "hash" => EditOp::Hash,
-        "delete" => EditOp::Delete,
-        other => return Err(at.error(format!("unknown op `{other}`; use {OP_NAMES}"))),
+    let Some(kind) = EditOp::parse(&name) else {
+        return Err(at.error(format!("unknown op `{name}`; use {}", EditOp::ONE_OF)));
     };
     at.kind = Some(kind);
     Ok(match kind {
