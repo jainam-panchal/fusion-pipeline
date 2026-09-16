@@ -11,11 +11,11 @@
 //! Each message is decoded as one JSON record, stamped with the tenant from its subject when
 //! the record carries none and with the JetStream publish time as `observed_time_unix_nano`
 //! when it carries no timestamp at all, and handed to the engine with an ack handle that acks
-//! or naks the JetStream message. The same tenant, ingestion time and the delivery count go
-//! beside the record as its [`Arrival`], which is what the pipeline decides with (ADR 0005);
-//! the stamped fields are payload a stage may rewrite. The publish time is the server's and
-//! does not change on redelivery, so stateful stages that measure windows in ingestion time
-//! see the same value every time the record comes back.
+//! or naks the JetStream message. The subject's tenant, the publish time and the delivery
+//! count also go beside the record as its [`Arrival`], from which the engine resolves the
+//! record's `Meta` (ADR 0005); the stamped fields are payload a stage may rewrite. The
+//! publish time is the server's and does not change on redelivery, so stateful stages that
+//! measure windows in ingestion time see the same value every time the record comes back.
 //!
 //! A payload that is not a record is nak'd like any other failure and reported on stderr; it
 //! runs out `max_deliver` the same way a record without an id does, which is where the
@@ -25,9 +25,10 @@
 //! message's delivery count: 1s on the first failure, doubling to [`MAX_NAK_DELAY`], so a
 //! sink that is down does not burn through `max_deliver` in milliseconds.
 //!
-//! A message delivered more than once counts on `source_redeliveries_total`, and a nak the
-//! source issues itself (an undecodable payload) on `source_naks_total`, both under the
-//! tenant the subject names.
+//! The engine counts a redelivered record on `source_redeliveries_total` under its `Meta`
+//! tenant. A payload that does not decode has no record and no `Meta`, so the source counts
+//! it itself, the redelivery and the nak it issues (`source_naks_total`), under the tenant
+//! the subject names.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +36,7 @@ use std::time::Duration;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{AckKind, message::Acker};
 use fusion_core::io::{AckHandle, Envelope, Intake, Source, SourceError};
-use fusion_core::meta::Arrival;
+use fusion_core::meta::{Arrival, UNKNOWN_TENANT};
 use fusion_core::metrics::Metrics;
 use fusion_core::record::Record;
 use futures::StreamExt;
@@ -115,13 +116,13 @@ impl NatsSource {
                 .and_then(|info| u64::try_from(info.published.unix_timestamp_nanos()).ok());
             let (message, acker) = message.split();
             let subject_tenant = tenant_from_subject(&message.subject);
-            let tenant = subject_tenant.unwrap_or(Metrics::UNKNOWN_TENANT);
-            if delivered > 1 {
-                self.metrics.source_redelivery(tenant);
-            }
             let record = match decode(subject_tenant, published, &message.payload) {
                 Ok(record) => record,
                 Err(err) => {
+                    let tenant = subject_tenant.unwrap_or(UNKNOWN_TENANT);
+                    if delivered > 1 {
+                        self.metrics.source_redelivery(tenant);
+                    }
                     eprintln!(
                         "nats source: nak of undecodable message on `{}` (delivery {delivered}): {err}",
                         message.subject
@@ -137,8 +138,8 @@ impl NatsSource {
                 }
             };
             let arrival = Arrival {
-                tenant: record.tenant().map(str::to_owned),
-                ingestion_time: record.observed_time_unix_nano.or(record.time_unix_nano),
+                tenant: subject_tenant.map(str::to_owned),
+                ingestion_time: published,
                 delivery_count: delivered,
             };
             let ack = Box::new(NatsAck {

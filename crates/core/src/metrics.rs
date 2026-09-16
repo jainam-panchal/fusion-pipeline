@@ -57,7 +57,7 @@ pub enum Metric {
     SinkPublishDuration,
     /// `sink_publish_errors_total{tenant, stage}`: sink writes without durable acceptance.
     SinkPublishErrors,
-    /// `pipeline_end_to_end_seconds{tenant}`: observed time to settlement.
+    /// `pipeline_end_to_end_seconds{tenant}`: ingestion time to settlement.
     EndToEnd,
 }
 
@@ -412,9 +412,6 @@ impl std::fmt::Debug for Metrics {
 }
 
 impl Metrics {
-    /// The `tenant` label of a record that carries no `resource.tenant.id`.
-    pub const UNKNOWN_TENANT: &'static str = "unknown";
-
     /// Emit through `recorder`.
     pub fn new(recorder: impl Recorder + 'static) -> Self {
         Self {

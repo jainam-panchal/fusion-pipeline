@@ -25,10 +25,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::config::SOURCE_ID;
 use crate::dag::NodeIndex;
 use crate::io::{Envelope, Intake, Source, SourceError};
-use crate::meta::Meta;
+use crate::meta::{Meta, Rejected, Rejection};
 use crate::metrics::{Labels, Metrics};
 use crate::pipeline::{CompiledNode, Pipeline};
-use crate::record::{Kind, Record};
+use crate::record::Record;
 use crate::stage::{Context, DropReason, StageMetrics, StageOutput, State};
 use crate::state::{StateError, StateErrorPolicy, StateStore, StateStoreFactory};
 
@@ -257,51 +257,51 @@ impl<'p> Walker<'p> {
             arrival,
             ack,
         } = envelope;
-        let tenant: Arc<str> = arrival
-            .tenant
-            .as_deref()
-            .or_else(|| record.tenant())
-            .unwrap_or(Metrics::UNKNOWN_TENANT)
-            .into();
+        let resolved = Meta::resolve(&record, &arrival);
+        let tenant = match &resolved {
+            Ok(meta) => &meta.tenant,
+            Err(rejected) => &rejected.tenant,
+        };
         // `source` is a node like any other on the metrics: every record the source hands
         // over counts in, every record that enters the graph counts out, and the engine's
         // own rejections are its drops. Intake is then one series whatever the first node
         // is called.
-        let source = Labels::new(&tenant, SOURCE_ID);
+        let source = Labels::new(tenant, SOURCE_ID);
         self.metrics.records_in(&source);
-
-        let Some(record_id) = record.id else {
-            // Spec: the idempotency guarantee has no unguarded path, so a record without an
-            // id is nak'd. The record was not forwarded, which is the drop the spec counts
-            // under `missing_id`; the message is nak'd, which is the nak it counts.
-            self.metrics.dropped(&source, DropReason::MissingId);
-            self.metrics.source_nak(&tenant);
-            ack.nak(None);
-            return;
-        };
-        if record.kind != Kind::Log {
-            // Spec: metric and span are rejected by the engine (reason `invalid_record`).
-            // Rejection is a drop, and drops are acked.
-            self.metrics.dropped(&source, DropReason::InvalidRecord);
-            ack.ack();
-            return;
+        if arrival.delivery_count > 1 {
+            self.metrics.source_redelivery(tenant);
         }
-
-        self.metrics.records_out(&source, 1);
-
-        // The one read of the payload's time fields, before any stage can move them. The
-        // worker clock is for a source that stamps nothing; end to end is not measured
-        // against it.
-        let stamped = arrival
-            .ingestion_time
-            .or(record.observed_time_unix_nano)
-            .or(record.time_unix_nano);
-        let meta = Meta {
-            record_id,
-            tenant,
-            ingestion_time: stamped.unwrap_or_else(unix_nanos_now),
-            delivery_count: arrival.delivery_count,
+        let meta = match resolved {
+            Ok(meta) => meta,
+            Err(Rejected {
+                reason: Rejection::MissingId,
+                tenant,
+            }) => {
+                // Spec: the idempotency guarantee has no unguarded path, so a record
+                // without an id is nak'd. The record was not forwarded, which is the drop
+                // the spec counts under `missing_id`; the message is nak'd, which is the
+                // nak it counts.
+                self.metrics
+                    .dropped(&Labels::new(&tenant, SOURCE_ID), DropReason::MissingId);
+                self.metrics.source_nak(&tenant);
+                ack.nak(None);
+                return;
+            }
+            Err(Rejected {
+                reason: Rejection::NotLog,
+                tenant,
+            }) => {
+                // Spec: metric and span are rejected by the engine (reason
+                // `invalid_record`). Rejection is a drop, and drops are acked.
+                self.metrics
+                    .dropped(&Labels::new(&tenant, SOURCE_ID), DropReason::InvalidRecord);
+                ack.ack();
+                return;
+            }
         };
+        self.metrics
+            .records_out(&Labels::new(&meta.tenant, SOURCE_ID), 1);
+
         let mut walk = Walk {
             meta: &meta,
             at: None,
@@ -325,9 +325,12 @@ impl<'p> Walker<'p> {
             ack.nak(None);
         } else {
             // End to end is measured on the ack only: a nakked record comes back and is
-            // measured when it finally settles.
-            if let Some(elapsed) = stamped.and_then(since_unix_nanos) {
-                self.metrics.end_to_end(&meta.tenant, elapsed);
+            // measured when it finally settles. A worker-clock ingestion time says nothing
+            // about how long the record has been on its way.
+            if !meta.ingestion_time_from_clock {
+                if let Some(elapsed) = since_unix_nanos(meta.ingestion_time) {
+                    self.metrics.end_to_end(&meta.tenant, elapsed);
+                }
             }
             ack.ack();
         }
@@ -436,13 +439,6 @@ impl<'p> Walker<'p> {
             }
         }
     }
-}
-
-/// The worker clock in nanoseconds since the Unix epoch; zero before the epoch.
-fn unix_nanos_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
 /// How long ago `nanos` (nanoseconds since the Unix epoch) was; `None` if it is in the future

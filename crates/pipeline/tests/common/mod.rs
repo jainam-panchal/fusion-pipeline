@@ -103,7 +103,8 @@ pub fn acme_record(id: u64, body: &str) -> Record {
     .expect("record parses")
 }
 
-/// [`acme_record`] with an explicit ingestion time (`observed_time_unix_nano`).
+/// [`acme_record`] with `observed_time_unix_nano` set, which the engine reads at intake as
+/// the record's ingestion time.
 pub fn acme_record_observed_at(id: u64, body: &str, observed_unix_nanos: u64) -> Record {
     Record::from_json(&format!(
         r#"{{"id": {id}, "body": "{body}", "observed_time_unix_nano": {observed_unix_nanos},

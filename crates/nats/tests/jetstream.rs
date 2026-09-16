@@ -4,6 +4,7 @@
 //!
 //!     cargo test -p fusion-nats --test jetstream -- --ignored
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -415,14 +416,18 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
     engine.join().expect("clean shutdown");
 }
 
-/// Fails a record's first delivery, and on a later one writes the context's `Meta` into
-/// `attributes.meta.*` so the sink shows what the source filled in.
-struct RevealOnRedelivery;
+/// Fails a record's first delivery, noting its `Meta` ingestion time in `first`, and on a
+/// later one writes the context's `Meta` into `attributes.meta.*` so the sink shows what
+/// the source filled in.
+struct RevealOnRedelivery {
+    first: Arc<AtomicU64>,
+}
 
 impl Stage for RevealOnRedelivery {
     fn process(&self, mut record: Record, ctx: &Context<'_>) -> StageOutput {
         let meta = ctx.meta;
         if meta.delivery_count == 1 {
+            self.first.store(meta.ingestion_time, Ordering::SeqCst);
             return StageOutput::Error(StageError::new("first delivery"));
         }
         for (key, value) in [
@@ -452,10 +457,14 @@ fn source_fills_meta_with_the_subject_tenant_the_publish_time_and_the_delivery_c
     let sinks = MemorySinks::new();
     let mut registry = Registry::new();
     registry.register_sink("sink.memory", sinks.clone());
+    let first = Arc::new(AtomicU64::new(0));
+    let first_seen = Arc::clone(&first);
     registry.register_stage(
         "reveal",
-        |_: &NodeConfig| -> Result<Box<dyn Stage>, ConfigError> {
-            Ok(Box::new(RevealOnRedelivery))
+        move |_: &NodeConfig| -> Result<Box<dyn Stage>, ConfigError> {
+            Ok(Box::new(RevealOnRedelivery {
+                first: Arc::clone(&first_seen),
+            }))
         },
     );
     let pipeline = Pipeline::from_yaml(
@@ -489,7 +498,12 @@ fn source_fills_meta_with_the_subject_tenant_the_publish_time_and_the_delivery_c
     assert_eq!(
         attr("ingestion_time"),
         serde_json::json!(stamped),
-        "Meta's ingestion time is the publish time, unchanged by redelivery"
+        "Meta's ingestion time is the publish time stamped into the record"
+    );
+    assert_eq!(
+        attr("ingestion_time"),
+        serde_json::json!(first.load(Ordering::SeqCst)),
+        "and the same on the redelivery as on the first delivery"
     );
 
     assert!(

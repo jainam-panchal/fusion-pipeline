@@ -4,12 +4,10 @@
 
 mod common;
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use common::{WAIT, registry, start_with};
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::memory::{AckOutcome, MemorySinks};
-use fusion_core::meta::Arrival;
+use fusion_core::meta::{Arrival, unix_nanos_now};
 use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, Stage, StageOutput};
@@ -88,15 +86,8 @@ fn meta_of(record: &Record, key: &str) -> Value {
     record.attributes[&format!("meta.{key}")].clone()
 }
 
-fn unix_nanos_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("after the epoch")
-        .as_nanos() as u64
-}
-
 #[test]
-fn what_the_source_says_about_the_arrival_is_what_stages_and_labels_see() {
+fn the_records_own_tenant_and_time_come_before_what_the_transport_says() {
     let (out, h) = reveal(
         REVEAL,
         record(&json!({
@@ -111,12 +102,34 @@ fn what_the_source_says_about_the_arrival_is_what_stages_and_labels_see() {
         },
     );
     assert_eq!(meta_of(&out[0], "record_id"), json!(7));
-    assert_eq!(meta_of(&out[0], "tenant"), json!("from-subject"));
-    assert_eq!(meta_of(&out[0], "ingestion_time"), json!(9_000_000_000_u64));
+    assert_eq!(meta_of(&out[0], "tenant"), json!("acme"));
+    assert_eq!(meta_of(&out[0], "ingestion_time"), json!(5_000_000_000_u64));
     assert_eq!(meta_of(&out[0], "delivery_count"), json!(3));
     assert_eq!(
-        out[0].observed_time_unix_nano,
-        Some(5_000_000_000),
+        h.counter(
+            Metric::RecordsOut,
+            &[("tenant", "acme"), ("stage", "reveal")]
+        ),
+        1
+    );
+    h.finish();
+}
+
+#[test]
+fn a_record_without_a_tenant_or_a_time_takes_the_transports() {
+    let (out, h) = reveal(
+        REVEAL,
+        record(&json!({"id": 7})),
+        Arrival {
+            tenant: Some("from-subject".to_owned()),
+            ingestion_time: Some(9_000_000_000),
+            delivery_count: 1,
+        },
+    );
+    assert_eq!(meta_of(&out[0], "tenant"), json!("from-subject"));
+    assert_eq!(meta_of(&out[0], "ingestion_time"), json!(9_000_000_000_u64));
+    assert_eq!(
+        out[0].observed_time_unix_nano, None,
         "the payload is untouched"
     );
     assert_eq!(
@@ -125,6 +138,52 @@ fn what_the_source_says_about_the_arrival_is_what_stages_and_labels_see() {
             &[("tenant", "from-subject"), ("stage", "reveal")]
         ),
         1
+    );
+    h.finish();
+}
+
+#[test]
+fn a_tenant_field_that_is_not_a_string_is_no_tenant_and_the_transports_stands() {
+    let (out, h) = reveal(
+        REVEAL,
+        record(&json!({"id": 7, "resource": {"tenant.id": 42}})),
+        Arrival {
+            tenant: Some("acme".to_owned()),
+            ..Arrival::default()
+        },
+    );
+    assert_eq!(meta_of(&out[0], "tenant"), json!("acme"));
+    h.finish();
+}
+
+#[test]
+fn a_redelivery_is_counted_under_the_tenant_every_other_metric_of_the_record_carries() {
+    let (_, h) = reveal(
+        REVEAL,
+        record(&json!({"id": 7, "resource": {"tenant.id": "beta"}})),
+        Arrival {
+            tenant: Some("acme".to_owned()),
+            ingestion_time: None,
+            delivery_count: 2,
+        },
+    );
+    assert_eq!(
+        h.counter(Metric::SourceRedeliveries, &[("tenant", "beta")]),
+        1
+    );
+    assert_eq!(
+        h.counter(Metric::SourceRedeliveries, &[("tenant", "acme")]),
+        0
+    );
+    h.finish();
+}
+
+#[test]
+fn a_first_delivery_is_not_a_redelivery() {
+    let (_, h) = reveal(REVEAL, record(&json!({"id": 7})), Arrival::default());
+    assert_eq!(
+        h.counter(Metric::SourceRedeliveries, &[("tenant", "unknown")]),
+        0
     );
     h.finish();
 }

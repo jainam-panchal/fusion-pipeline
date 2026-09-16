@@ -646,15 +646,15 @@ nodes:
 "#;
 
 #[test]
-fn a_time_field_rewritten_upstream_does_not_move_the_window_the_record_arrived_with() {
+fn a_time_field_rewritten_upstream_does_not_move_the_window_of_the_records_ingestion_time() {
     for_each_worker_count(|workers| {
         let h = start(REWRITE_THEN_DEDUPE, workers);
 
-        // Arrived 20 s apart, past the 10 s window, then stamped with one time by `restamp`.
-        // The window is the arrival's, so both pass; the third arrived 5 s after the second
-        // and is its repeat.
-        for (id, arrived_s) in [(101, 1_000), (102, 1_020), (103, 1_025)] {
-            let pushed = h.source.push(record_at(id, "disk full", arrived_s));
+        // Ingested 20 s apart, past the 10 s window, then stamped with one time by
+        // `restamp`. The window is measured in ingestion time, so both pass; the third was
+        // ingested 5 s after the second and is its repeat.
+        for (id, ingested_s) in [(101, 1_000), (102, 1_020), (103, 1_025)] {
+            let pushed = h.source.push(record_at(id, "disk full", ingested_s));
             assert_eq!(
                 pushed.wait(WAIT),
                 Some(AckOutcome::Ack),
