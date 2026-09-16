@@ -5,6 +5,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use fusion_core::metrics::LuaErrorKind;
 use fusion_core::record::{Record, RecordId};
 use fusion_core::stage::State;
 use fusion_core::state::StateError;
@@ -56,6 +57,17 @@ pub(crate) enum Fault {
 }
 
 impl Fault {
+    /// The `kind` label, `None` for a state error, which is the store's to count.
+    pub(crate) const fn kind(&self) -> Option<LuaErrorKind> {
+        match self {
+            Self::Instructions => Some(LuaErrorKind::Instructions),
+            Self::Memory => Some(LuaErrorKind::Memory),
+            Self::Runtime(_) => Some(LuaErrorKind::Runtime),
+            Self::Output(_) => Some(LuaErrorKind::Output),
+            Self::State(_) => None,
+        }
+    }
+
     pub(crate) fn describe(&self) -> String {
         match self {
             Self::Instructions => "instruction budget exceeded".to_owned(),

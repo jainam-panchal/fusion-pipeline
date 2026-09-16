@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::metrics::{EditCause, EditOp, EngineLabel, Labels, Metrics};
+use crate::metrics::{EditCause, EditOp, EngineLabel, Labels, LuaErrorKind, Metrics};
 use crate::record::{Record, RecordId};
 use crate::state::{StateError, StateErrorPolicy, StateStore};
 
@@ -333,6 +333,11 @@ impl<'a> StageMetrics<'a> {
     pub fn edit_unapplied(&self, op: EditOp, field: &str, cause: EditCause) {
         self.metrics
             .edit_unapplied(&self.labels.with_edit(op, field, cause));
+    }
+
+    /// `lua_errors_total`: a run of the stage's script was stopped for `kind`.
+    pub fn lua_error(&self, kind: LuaErrorKind) {
+        self.metrics.lua_error(&self.labels.with_kind(kind.as_str()));
     }
 }
 

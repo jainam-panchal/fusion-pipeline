@@ -139,3 +139,73 @@ end"#,
         h.finish();
     });
 }
+
+/// The labels of one `lua_errors_total` count by `script` for tenant `acme`.
+fn lua_error(kind: &str) -> [(&str, &str); 3] {
+    [("tenant", "acme"), ("stage", "script"), ("kind", kind)]
+}
+
+const LOOPS: &str = "function process(record)\n  while true do end\nend";
+
+#[test]
+fn an_infinite_loop_is_stopped_by_the_instruction_budget_and_passes_by_default() {
+    for_each_worker_count(|workers| {
+        let yaml = config("    limits: { instructions: 10000 }\n", LOOPS);
+        let (out, h) = run(&yaml, workers, vec![record(1, json!({"body": "x"}))]);
+        assert_eq!(out.len(), 1, "workers {workers}: `pass` forwards the record unchanged");
+        assert_eq!(out[0].body, Some(json!("x")));
+        assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
+        assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
+        assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 1);
+        h.finish();
+    });
+}
+
+#[test]
+fn on_error_drop_drops_with_reason_lua_error_and_acks() {
+    let yaml = config("    limits: { instructions: 10000 }\n    on_error: drop\n", LOOPS);
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+    assert!(out.is_empty());
+    assert_eq!(
+        h.counter(
+            Metric::RecordsDropped,
+            &[("tenant", "acme"), ("stage", "script"), ("reason", "lua_error")]
+        ),
+        1
+    );
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
+    h.finish();
+}
+
+#[test]
+fn on_error_nak_fails_the_record_so_the_source_message_is_nakked() {
+    let yaml = config("    limits: { instructions: 10000 }\n    on_error: nak\n", LOOPS);
+    let h = start(&yaml, 1);
+    let probe = h.source.push(record(1, json!({"body": "x"})));
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Nak(None)));
+    assert!(h.sinks.records("out").is_empty());
+    assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 1);
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
+    assert_eq!(h.counter(Metric::SourceNaks, &[("tenant", "acme")]), 1);
+    h.finish();
+}
+
+#[test]
+fn the_budget_is_per_record_so_a_worker_keeps_serving_after_a_trip() {
+    let yaml = config(
+        "    limits: { instructions: 10000 }\n    on_error: drop\n",
+        "function process(record)\n  if record.body == \"loop\" then while true do end end\n  return record\nend",
+    );
+    let (out, h) = run(
+        &yaml,
+        1,
+        vec![
+            record(1, json!({"body": "loop"})),
+            record(2, json!({"body": "fine"})),
+            record(3, json!({"body": "fine"})),
+        ],
+    );
+    assert_eq!(out.iter().map(|r| r.id.map(|i| i.0)).collect::<Vec<_>>(), vec![Some(2), Some(3)]);
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
+    h.finish();
+}

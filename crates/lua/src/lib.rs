@@ -244,6 +244,9 @@ impl Stage for Lua {
             Err(Fault::State(error)) => return StageOutput::StateError { record, error },
             Err(fault) => fault,
         };
+        if let Some(kind) = fault.kind() {
+            ctx.metrics.lua_error(kind);
+        }
         let message = fault.describe();
         eprintln!(
             "pipeline: lua `{}` record {}: {message}",

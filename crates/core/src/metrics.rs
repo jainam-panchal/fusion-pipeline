@@ -247,6 +247,44 @@ impl std::fmt::Display for EditCause {
     }
 }
 
+/// The `kind` label of `lua_errors_total`: what stopped a run of a Lua script. Closed set;
+/// [`LuaErrorKind::ALL`] lists them all. Load-time failures (a script that does not parse,
+/// defines no `process` or names a forbidden global) reject the config and never count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LuaErrorKind {
+    /// The instruction budget tripped.
+    Instructions,
+    /// The memory cap tripped.
+    Memory,
+    /// The script raised, or indexed something it should not have.
+    Runtime,
+    /// The returned record was refused: a missing or mistyped field, a changed `id` or
+    /// tenant, an oversized output.
+    Output,
+}
+
+impl LuaErrorKind {
+    /// Every kind, for checks against the spec's closed set.
+    pub const ALL: [Self; 4] = [Self::Instructions, Self::Memory, Self::Runtime, Self::Output];
+
+    /// The label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Instructions => "instructions",
+            Self::Memory => "memory",
+            Self::Runtime => "runtime",
+            Self::Output => "output",
+        }
+    }
+}
+
+impl std::fmt::Display for LuaErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The labels of one measurement. `tenant` is always set; the rest as the metric requires.
 /// `engine` is set on every per-node metric of a node whose stage runs a regex, and on no
 /// other node, so `sum by (stage)` is unchanged and a regex node can be split by engine.
@@ -452,6 +490,11 @@ impl Metrics {
     /// `edit_unapplied_total`. `labels` carries the node's labels plus [`Labels::with_edit`].
     pub fn edit_unapplied(&self, labels: &Labels<'_>) {
         self.recorder.count(Metric::EditUnapplied, labels, 1);
+    }
+
+    /// `lua_errors_total`. `labels` carries the node's labels plus [`Labels::with_kind`].
+    pub fn lua_error(&self, labels: &Labels<'_>) {
+        self.recorder.count(Metric::LuaErrors, labels, 1);
     }
 
     /// `source_naks_total`.
