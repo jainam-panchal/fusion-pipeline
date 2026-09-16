@@ -112,13 +112,15 @@ pub(crate) struct Expected<'a> {
     pub(crate) output_bytes: usize,
 }
 
-/// Counts the bytes of every string in a returned record against the cap.
-struct Budget {
+/// The way back: Lua values read as JSON, with the bytes of every string counted against
+/// the output cap. One reader per returned record, so the cap is per record.
+struct Reader {
     used: usize,
     cap: usize,
 }
 
-impl Budget {
+impl Reader {
+    /// Charge `bytes` to the cap, naming `field` if that is what exceeds it.
     fn take(&mut self, bytes: usize, field: &str) -> Result<(), OutputError> {
         self.used += bytes;
         if self.used > self.cap {
@@ -129,6 +131,100 @@ impl Budget {
         }
         Ok(())
     }
+
+    /// A string field, `None` for `nil`.
+    fn string(&mut self, value: &LuaValue, field: &str) -> Result<Option<String>, OutputError> {
+        match value {
+            LuaValue::Nil => Ok(None),
+            LuaValue::String(s) => {
+                self.take(s.as_bytes().len(), field)?;
+                s.to_str()
+                    .map(|s| Some(s.to_owned()))
+                    .map_err(|_| OutputError(format!("`{field}` is not valid UTF-8")))
+            }
+            other => refuse(format!(
+                "`{field}` must be a string, not {}",
+                type_name(other)
+            )),
+        }
+    }
+
+    /// One of the record's maps: `nil` is the empty map, a table is its entries, anything
+    /// else is refused.
+    fn map(&mut self, value: &LuaValue, field: &str) -> Result<Map<String, Value>, OutputError> {
+        match value {
+            LuaValue::Nil => Ok(Map::new()),
+            LuaValue::Table(t) => self.entries(t, field),
+            other => refuse(format!(
+                "`{field}` must be a table, not {}",
+                type_name(other)
+            )),
+        }
+    }
+
+    /// A table's string-keyed entries as a JSON object. A value that is itself a table is
+    /// taken as the JSON it is: the flat-map rule is the source's contract, so a value that
+    /// arrived composite must leave an untouched script the way it came in.
+    fn entries(&mut self, table: &Table, field: &str) -> Result<Map<String, Value>, OutputError> {
+        let mut map = Map::new();
+        for pair in table.pairs::<LuaValue, LuaValue>() {
+            let (key, value) =
+                pair.map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
+            let LuaValue::String(key) = key else {
+                return refuse(format!("`{field}` key {} is not a string", type_name(&key)));
+            };
+            let key = key
+                .to_str()
+                .map_err(|_| OutputError(format!("a `{field}` key is not valid UTF-8")))?
+                .to_owned();
+            let at = format!("{field}.{key}");
+            let value = self.json(&value, &at)?.unwrap_or(Value::Null);
+            map.insert(key, value);
+        }
+        Ok(map)
+    }
+
+    /// A Lua value as JSON: `nil` is absent, a table is an array when its keys are `1..n`
+    /// and an object otherwise. Every string counts against the cap.
+    fn json(&mut self, value: &LuaValue, field: &str) -> Result<Option<Value>, OutputError> {
+        Ok(Some(match value {
+            LuaValue::Nil => return Ok(None),
+            LuaValue::Boolean(b) => Value::Bool(*b),
+            LuaValue::Integer(i) => Value::from(*i),
+            LuaValue::Number(f) => serde_json::Number::from_f64(*f)
+                .map(Value::Number)
+                .ok_or_else(|| OutputError(format!("`{field}` is not a finite number")))?,
+            LuaValue::String(s) => {
+                self.take(s.as_bytes().len(), field)?;
+                Value::String(
+                    s.to_str()
+                        .map_err(|_| OutputError(format!("`{field}` is not valid UTF-8")))?
+                        .to_owned(),
+                )
+            }
+            LuaValue::Table(t) => {
+                let len = t.raw_len();
+                if len == 0 {
+                    Value::Object(self.entries(t, field)?)
+                } else {
+                    let mut items = Vec::with_capacity(len);
+                    for (i, item) in t.sequence_values::<LuaValue>().enumerate() {
+                        let item =
+                            item.map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
+                        let at = format!("{field}[{}]", i + 1);
+                        items.push(self.json(&item, &at)?.unwrap_or(Value::Null));
+                    }
+                    Value::Array(items)
+                }
+            }
+            other => {
+                return refuse(format!(
+                    "`{field}` is {}, which has no JSON form",
+                    type_name(other)
+                ));
+            }
+        }))
+    }
 }
 
 /// The table the script returned as a record, checked against `expected`. The table must
@@ -137,7 +233,7 @@ impl Budget {
 /// silently drop data.
 pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Record, OutputError> {
     let mut record = Record::default();
-    let mut budget = Budget {
+    let mut reader = Reader {
         used: 0,
         cap: expected.output_bytes,
     };
@@ -160,7 +256,7 @@ pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Recor
                 record.id = Some(expected.id);
             }
             "kind" => {
-                if string(&value, "kind", &mut budget)?.as_deref() != Some(Kind::Log.as_str()) {
+                if reader.string(&value, "kind")?.as_deref() != Some(Kind::Log.as_str()) {
                     return refuse("`kind` must be `log` when returned");
                 }
                 record.kind = Kind::Log;
@@ -169,7 +265,7 @@ pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Recor
             "observed_time_unix_nano" => {
                 record.observed_time_unix_nano = time(&value, "observed_time_unix_nano")?;
             }
-            "severity_text" => record.severity_text = string(&value, "severity_text", &mut budget)?,
+            "severity_text" => record.severity_text = reader.string(&value, "severity_text")?,
             "severity_number" => {
                 record.severity_number = integer(&value, "severity_number")?
                     .map(|i| {
@@ -179,12 +275,12 @@ pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Recor
                     })
                     .transpose()?;
             }
-            "body" => record.body = lua_to_json(&value, "body", &mut budget)?,
-            "attributes" => record.attributes = map_from(&value, "attributes", &mut budget)?,
-            "resource" => record.resource = map_from(&value, "resource", &mut budget)?,
-            "scope" => record.scope = map_from(&value, "scope", &mut budget)?,
-            "trace_id" => record.trace_id = string(&value, "trace_id", &mut budget)?,
-            "span_id" => record.span_id = string(&value, "span_id", &mut budget)?,
+            "body" => record.body = reader.json(&value, "body")?,
+            "attributes" => record.attributes = reader.map(&value, "attributes")?,
+            "resource" => record.resource = reader.map(&value, "resource")?,
+            "scope" => record.scope = reader.map(&value, "scope")?,
+            "trace_id" => record.trace_id = reader.string(&value, "trace_id")?,
+            "span_id" => record.span_id = reader.string(&value, "span_id")?,
             other => return refuse(format!("`{other}` is not a record field")),
         }
     }
@@ -227,125 +323,6 @@ fn time(value: &LuaValue, field: &str) -> Result<Option<u64>, OutputError> {
             u64::try_from(i).map_err(|_| OutputError(format!("`{field}` must not be negative")))
         })
         .transpose()
-}
-
-fn string(
-    value: &LuaValue,
-    field: &str,
-    budget: &mut Budget,
-) -> Result<Option<String>, OutputError> {
-    match value {
-        LuaValue::Nil => Ok(None),
-        LuaValue::String(s) => {
-            budget.take(s.as_bytes().len(), field)?;
-            s.to_str()
-                .map(|s| Some(s.to_owned()))
-                .map_err(|_| OutputError(format!("`{field}` is not valid UTF-8")))
-        }
-        other => refuse(format!(
-            "`{field}` must be a string, not {}",
-            type_name(other)
-        )),
-    }
-}
-
-fn map_from(
-    value: &LuaValue,
-    field: &str,
-    budget: &mut Budget,
-) -> Result<Map<String, Value>, OutputError> {
-    let table = match value {
-        LuaValue::Nil => return Ok(Map::new()),
-        LuaValue::Table(t) => t,
-        other => {
-            return refuse(format!(
-                "`{field}` must be a table, not {}",
-                type_name(other)
-            ));
-        }
-    };
-    let mut map = Map::new();
-    for pair in table.pairs::<LuaValue, LuaValue>() {
-        let (key, value) = pair.map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
-        let LuaValue::String(key) = key else {
-            return refuse(format!("`{field}` key {} is not a string", type_name(&key)));
-        };
-        let key = key
-            .to_str()
-            .map_err(|_| OutputError(format!("a `{field}` key is not valid UTF-8")))?
-            .to_owned();
-        // A table here is accepted as the JSON it is: the flat-map rule is the source's
-        // contract, and a value that arrived composite must leave an untouched script the
-        // way it came in.
-        let at = format!("{field}.{key}");
-        let json = lua_to_json(&value, &at, budget)?;
-        map.insert(key, json.unwrap_or(Value::Null));
-    }
-    Ok(map)
-}
-
-/// A Lua value as JSON: `nil` is absent, a table is an array when its keys are `1..n` and
-/// an object otherwise. Every string counts against the cap.
-fn lua_to_json(
-    value: &LuaValue,
-    field: &str,
-    budget: &mut Budget,
-) -> Result<Option<Value>, OutputError> {
-    Ok(Some(match value {
-        LuaValue::Nil => return Ok(None),
-        LuaValue::Boolean(b) => Value::Bool(*b),
-        LuaValue::Integer(i) => Value::from(*i),
-        LuaValue::Number(f) => serde_json::Number::from_f64(*f)
-            .map(Value::Number)
-            .ok_or_else(|| OutputError(format!("`{field}` is not a finite number")))?,
-        LuaValue::String(s) => {
-            budget.take(s.as_bytes().len(), field)?;
-            Value::String(
-                s.to_str()
-                    .map_err(|_| OutputError(format!("`{field}` is not valid UTF-8")))?
-                    .to_owned(),
-            )
-        }
-        LuaValue::Table(t) => {
-            let len = t.raw_len();
-            if len > 0 {
-                let mut items = Vec::with_capacity(len);
-                for (i, item) in t.sequence_values::<LuaValue>().enumerate() {
-                    let item =
-                        item.map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
-                    let at = format!("{field}[{}]", i + 1);
-                    items.push(lua_to_json(&item, &at, budget)?.unwrap_or(Value::Null));
-                }
-                Value::Array(items)
-            } else {
-                let mut map = Map::new();
-                for pair in t.pairs::<LuaValue, LuaValue>() {
-                    let (key, item) =
-                        pair.map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
-                    let LuaValue::String(key) = key else {
-                        return refuse(format!(
-                            "`{field}` key {} is not a string",
-                            type_name(&key)
-                        ));
-                    };
-                    let key = key
-                        .to_str()
-                        .map_err(|_| OutputError(format!("a `{field}` key is not valid UTF-8")))?
-                        .to_owned();
-                    let at = format!("{field}.{key}");
-                    let item = lua_to_json(&item, &at, budget)?.unwrap_or(Value::Null);
-                    map.insert(key, item);
-                }
-                Value::Object(map)
-            }
-        }
-        other => {
-            return refuse(format!(
-                "`{field}` is {}, which has no JSON form",
-                type_name(other)
-            ));
-        }
-    }))
 }
 
 /// A Lua value's type as an error message names it.

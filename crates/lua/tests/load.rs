@@ -135,7 +135,7 @@ fn limits_and_policies_outside_their_values_are_rejected() {
 }
 
 #[test]
-fn print_and_xpcall_are_not_in_the_sandbox_and_say_what_to_use() {
+fn print_and_loadstring_are_refused_at_load_and_print_names_log_info() {
     let err = rejects(
         &inline("function process(r)\n  print(r.body)\n  return r\nend"),
         &["`print`", "log.info"],

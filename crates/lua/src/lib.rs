@@ -81,6 +81,14 @@ impl Default for Limits {
 /// The smallest memory cap accepted: the sandbox itself needs a few tens of KiB.
 const MIN_MEMORY_KIB: usize = 64;
 
+/// One limit checked against its floor, refused naming the field and the floor.
+fn at_least(node: &NodeConfig, name: &str, value: u64, min: u64) -> Result<(), ConfigError> {
+    if value < min {
+        return Err(node.invalid_params(format!("`limits.{name}` must be at least {min}")));
+    }
+    Ok(())
+}
+
 /// What the node does with a record whose run of `process` failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -153,24 +161,29 @@ impl Lua {
                 return Err(node.invalid_params("`script` and `source` are alternatives; give one"));
             }
         };
-        if params.limits.instructions == 0 {
-            return Err(node.invalid_params("`limits.instructions` must be at least 1"));
-        }
-        if params.limits.memory_kib < MIN_MEMORY_KIB {
-            return Err(node.invalid_params(format!(
-                "`limits.memory_kib` must be at least {MIN_MEMORY_KIB}"
-            )));
-        }
-        if params.limits.output_kib == 0 {
-            return Err(node.invalid_params("`limits.output_kib` must be at least 1"));
-        }
+        at_least(node, "instructions", params.limits.instructions, 1)?;
+        at_least(
+            node,
+            "memory_kib",
+            params.limits.memory_kib as u64,
+            MIN_MEMORY_KIB as u64,
+        )?;
+        at_least(node, "output_kib", params.limits.output_kib as u64, 1)?;
+        let script = Arc::new(Script {
+            chunk_name,
+            source,
+            node: node.id.clone(),
+            instructions: params.limits.instructions,
+            memory_bytes: params.limits.memory_kib * 1024,
+            output_bytes: params.limits.output_kib * 1024,
+        });
         let mut uses_state = false;
-        for (name, line) in scan::free_names(&source) {
+        for (name, line) in scan::free_names(&script.source) {
             if vm::FORBIDDEN.contains(&name) {
                 let instead = vm::instead_of(name).map_or(String::new(), |i| format!("; use {i}"));
                 return Err(node.invalid_params(format!(
                     "{}:{line}: `{name}` is not available in the sandbox{instead}",
-                    chunk_name.trim_start_matches(['@', '='])
+                    script.display_name()
                 )));
             }
             if name == "state" {
@@ -182,14 +195,6 @@ impl Lua {
                 node.invalid_params("`on_state_error` is given but the script never uses `state`")
             );
         }
-        let script = Arc::new(Script {
-            chunk_name,
-            source,
-            node: node.id.clone(),
-            instructions: params.limits.instructions,
-            memory_bytes: params.limits.memory_kib * 1024,
-            output_bytes: params.limits.output_kib * 1024,
-        });
         // Compiled and run once in a throwaway sandbox, so a syntax error, a missing
         // `process` or a top level that misbehaves fails the config, not the first record.
         Vm::new(Arc::clone(&script)).map_err(|error| node.invalid_params(error.describe()))?;

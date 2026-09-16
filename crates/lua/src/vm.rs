@@ -349,40 +349,46 @@ fn install_pcall(lua: &mlua::Lua) -> mlua::Result<()> {
     globals.raw_set(
         "pcall",
         lua.create_function(|lua, (f, args): (Function, MultiValue)| {
-            match f.call::<MultiValue>(args) {
-                Ok(mut values) => {
-                    values.push_front(LuaValue::Boolean(true));
-                    Ok(values)
-                }
-                Err(error) if guardrail(&error).is_some() => Err(error),
-                Err(error) => Ok(MultiValue::from_vec(vec![
-                    LuaValue::Boolean(false),
-                    LuaValue::String(lua.create_string(caught_message(&error))?),
-                ])),
-            }
+            protected(&f, args, |error| {
+                Ok(MultiValue::from_vec(vec![LuaValue::String(
+                    lua.create_string(caught_message(error))?,
+                )]))
+            })
         })?,
     )?;
     globals.raw_set(
         "xpcall",
         lua.create_function(
-            |lua, (f, handler, args): (Function, Function, MultiValue)| match f
-                .call::<MultiValue>(args)
-            {
-                Ok(mut values) => {
-                    values.push_front(LuaValue::Boolean(true));
-                    Ok(values)
-                }
-                Err(error) if guardrail(&error).is_some() => Err(error),
-                Err(error) => {
-                    let message = lua.create_string(caught_message(&error))?;
-                    let mut handled: MultiValue = handler.call(message)?;
-                    handled.push_front(LuaValue::Boolean(false));
-                    Ok(handled)
-                }
+            |lua, (f, handler, args): (Function, Function, MultiValue)| {
+                protected(&f, args, |error| {
+                    handler.call(lua.create_string(caught_message(error))?)
+                })
             },
         )?,
     )?;
     Ok(())
+}
+
+/// One `pcall`-shaped call: what `f` returned with `true` in front of it, a guardrail or a
+/// state error re-raised as if this call were not here, and any other error handed to
+/// `caught` with `false` in front of whatever that gives back.
+fn protected(
+    f: &Function,
+    args: MultiValue,
+    caught: impl FnOnce(&mlua::Error) -> mlua::Result<MultiValue>,
+) -> mlua::Result<MultiValue> {
+    match f.call::<MultiValue>(args) {
+        Ok(mut values) => {
+            values.push_front(LuaValue::Boolean(true));
+            Ok(values)
+        }
+        Err(error) if guardrail(&error).is_some() => Err(error),
+        Err(error) => {
+            let mut values = caught(&error)?;
+            values.push_front(LuaValue::Boolean(false));
+            Ok(values)
+        }
+    }
 }
 
 /// `state`, `log` and `now_ns` as globals.
