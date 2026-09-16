@@ -76,7 +76,7 @@ fn a_stage_error_is_one_event_naming_record_tenant_node_and_reason() {
     assert_eq!(error.record_id, Some(RecordId(7)));
     assert_eq!(&*error.tenant, TENANT);
     assert_eq!(error.node, "script");
-    assert_eq!(error.reason, Some(FailureKind::StageError));
+    assert_eq!(error.failure, Some(FailureKind::StageError));
     assert_eq!(error.delivery_count, 1);
     assert!(error.message.contains("no good"), "{}", error.message);
     let trace = error.trace.expect("a record with an id has a trace");
@@ -99,11 +99,11 @@ fn a_failing_branch_logs_its_error_then_one_nak_with_the_first_failure() {
     assert_eq!(nak.record_id, Some(RecordId(8)));
     assert_eq!(&*nak.tenant, TENANT);
     assert_eq!(nak.node, "bad");
-    assert_eq!(nak.reason, Some(FailureKind::SinkError));
+    assert_eq!(nak.failure, Some(FailureKind::SinkError));
     assert!(nak.message.contains("set to fail"), "{}", nak.message);
     assert_eq!(nak.trace, Some(trace_key(8).delivery_context(1)));
     assert_eq!(events[0].node, "bad");
-    assert_eq!(events[0].reason, Some(FailureKind::SinkError));
+    assert_eq!(events[0].failure, Some(FailureKind::SinkError));
     h.finish();
 }
 
@@ -142,7 +142,7 @@ fn a_record_without_an_id_logs_a_nak_at_source_with_no_record_and_no_trace() {
     assert_eq!(nak.record_id, None);
     assert_eq!(&*nak.tenant, TENANT);
     assert_eq!(nak.node, "source");
-    assert_eq!(nak.reason, Some(FailureKind::MissingId));
+    assert_eq!(nak.failure, Some(FailureKind::MissingId));
     assert_eq!(nak.trace, None);
     h.finish();
 }
@@ -154,7 +154,7 @@ fn a_state_error_under_nak_logs_state_error_and_under_pass_logs_nothing() {
     let probe = h.push(body_record(10, "x"));
     assert!(matches!(probe.wait(WAIT), Some(AckOutcome::Nak(_))));
     let reasons: Vec<(EventKind, Option<FailureKind>)> =
-        h.events().iter().map(|e| (e.kind, e.reason)).collect();
+        h.events().iter().map(|e| (e.kind, e.failure)).collect();
     assert_eq!(
         reasons,
         [
@@ -186,7 +186,7 @@ fn a_redelivery_is_one_event_with_its_delivery_count() {
     assert_eq!(redelivery.record_id, Some(RecordId(12)));
     assert_eq!(&*redelivery.tenant, TENANT);
     assert_eq!(redelivery.node, "source");
-    assert_eq!(redelivery.reason, None);
+    assert_eq!(redelivery.failure, None);
     assert_eq!(redelivery.delivery_count, 3);
     assert_eq!(redelivery.trace, Some(trace_key(12).delivery_context(3)));
     h.finish();
@@ -270,7 +270,7 @@ nodes:
     let events = h.events();
     let summary: Vec<(EventKind, &str, Option<FailureKind>)> = events
         .iter()
-        .map(|e| (e.kind, e.node.as_str(), e.reason))
+        .map(|e| (e.kind, e.node.as_str(), e.failure))
         .collect();
     assert_eq!(
         summary,

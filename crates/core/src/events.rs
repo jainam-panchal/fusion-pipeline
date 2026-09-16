@@ -12,7 +12,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use crate::closed_set::closed_set;
-use crate::io::FailureKind;
+use crate::io::{Failure, FailureKind};
 use crate::memory::lock_unpoisoned;
 use crate::record::RecordId;
 use crate::trace::TraceContext;
@@ -73,8 +73,8 @@ pub struct Event {
     pub tenant: Arc<str>,
     /// The node the event is about: the failing node, or `source`.
     pub node: String,
-    /// The failure kind; `None` for a redelivery.
-    pub reason: Option<FailureKind>,
+    /// The failure kind, exported as the `reason` attribute; `None` for a redelivery.
+    pub failure: Option<FailureKind>,
     /// How many times the message has been delivered, this one included.
     pub delivery_count: u64,
     /// The message's stream sequence, for the dead-letter events.
@@ -85,6 +85,46 @@ pub struct Event {
     pub trace: Option<TraceContext>,
 }
 
+impl Event {
+    /// An event of `kind` about `node` for a record of `tenant` on its `delivery_count`-th
+    /// delivery, with no record id, failure, stream sequence, message or trace.
+    #[must_use]
+    pub fn new(
+        kind: EventKind,
+        tenant: Arc<str>,
+        node: impl Into<String>,
+        delivery_count: u64,
+    ) -> Self {
+        Self {
+            kind,
+            record_id: None,
+            tenant,
+            node: node.into(),
+            failure: None,
+            delivery_count,
+            stream_sequence: None,
+            message: String::new(),
+            trace: None,
+        }
+    }
+
+    /// An event of `kind` about `failure`: its record id, node, kind and error text.
+    #[must_use]
+    pub fn of_failure(
+        kind: EventKind,
+        tenant: Arc<str>,
+        failure: &Failure,
+        delivery_count: u64,
+    ) -> Self {
+        Self {
+            record_id: failure.record_id,
+            failure: Some(failure.kind),
+            message: failure.error.clone(),
+            ..Self::new(kind, tenant, failure.node.clone(), delivery_count)
+        }
+    }
+}
+
 impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.kind)?;
@@ -92,8 +132,8 @@ impl fmt::Display for Event {
             write!(f, " record={id}")?;
         }
         write!(f, " tenant={} node={}", self.tenant, self.node)?;
-        if let Some(reason) = self.reason {
-            write!(f, " reason={reason}")?;
+        if let Some(failure) = self.failure {
+            write!(f, " reason={failure}")?;
         }
         write!(f, " delivery={}", self.delivery_count)?;
         if let Some(sequence) = self.stream_sequence {

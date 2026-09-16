@@ -138,7 +138,6 @@ impl Engine {
                     );
                     let walker = Walker {
                         pipeline: &pipeline,
-                        metrics: signals.metrics(),
                         signals: &signals,
                         environment: &environment,
                     };
@@ -196,40 +195,41 @@ struct Walk<'p: 't, 't> {
     meta: &'t Meta,
     /// What the record's trace ids derive from.
     key: TraceKey,
-    /// The labels and span of the node whose stage or sink is running, so a panic is
-    /// charged to it.
-    at: Option<(Labels<'t>, usize)>,
+    /// The node whose stage or sink is running, so a panic is charged to it.
+    at: Option<At<'t>>,
     /// The first failure of the walk, the one the nak reports.
     failure: Option<Failure>,
-    metrics: &'p Metrics,
     signals: &'p Signals,
     /// The worker's span drafts, begun for this record.
     spans: &'t mut TraceBuffer<'p>,
 }
 
+/// Where in the walk a failure happened: the node's labels, and its span (none for the
+/// source).
+#[derive(Clone, Copy)]
+struct At<'t> {
+    labels: Labels<'t>,
+    span: Option<usize>,
+}
+
 impl<'p> Walk<'p, '_> {
-    /// Count and log a failure of the node `labels` names, keep it if it is the walk's
-    /// first, and close the node's span, if it has one, at `ended` as failed.
+    /// Count and log a failure `at` a node, keep it if it is the walk's first, and close the
+    /// node's span, if it has one, at `ended` as failed.
     fn fail(
         &mut self,
-        labels: &Labels<'_>,
-        span: Option<usize>,
+        at: At<'_>,
         ended: Instant,
         kind: FailureKind,
         error: &dyn std::fmt::Display,
     ) {
+        let At { labels, span } = at;
         let node = labels.stage().unwrap_or(SOURCE_ID);
         let error = error.to_string();
         let delivery = self.meta.delivery_count;
-        self.metrics.errored(labels);
+        self.signals.metrics().errored(&labels);
         self.signals.emit(Event {
-            kind: EventKind::StageError,
             record_id: Some(self.meta.record_id),
-            tenant: Arc::clone(&self.meta.tenant),
-            node: node.to_owned(),
-            reason: Some(kind),
-            delivery_count: delivery,
-            stream_sequence: None,
+            failure: Some(kind),
             message: error.clone(),
             trace: self.signals.tracing().then(|| {
                 span.map_or_else(
@@ -237,6 +237,12 @@ impl<'p> Walk<'p, '_> {
                     |span| TraceBuffer::context(self.key, delivery, span),
                 )
             }),
+            ..Event::new(
+                EventKind::StageError,
+                Arc::clone(&self.meta.tenant),
+                node,
+                delivery,
+            )
         });
         self.failure.get_or_insert_with(|| Failure {
             node: node.to_owned(),
@@ -298,8 +304,7 @@ fn no_state_store() -> StateError {
 
 struct Walker<'p> {
     pipeline: &'p Pipeline,
-    metrics: &'p Metrics,
-    /// Where events and kept traces go.
+    /// Where measurements, events and kept traces go.
     signals: &'p Signals,
     /// What every stage this worker runs is given: the pipeline name, this worker's
     /// connection to the shared state store, the metrics.
@@ -307,6 +312,10 @@ struct Walker<'p> {
 }
 
 impl<'p> Walker<'p> {
+    fn metrics(&self) -> &'p Metrics {
+        self.signals.metrics()
+    }
+
     fn handle(&self, envelope: Envelope, spans: &mut TraceBuffer<'p>) {
         let Envelope {
             record,
@@ -325,26 +334,25 @@ impl<'p> Walker<'p> {
         // own rejections are its drops. Intake is then one series whatever the first node
         // is called.
         let source = Labels::new(&tenant, SOURCE_ID);
-        self.metrics.records_in(&source);
+        self.metrics().records_in(&source);
         if let Some(bytes) = arrival.bytes {
-            self.metrics.bytes_in(&tenant, bytes);
+            self.metrics().bytes_in(&tenant, bytes);
         }
         if delivery > 1 {
-            self.metrics.source_redelivery(&tenant);
+            self.metrics().source_redelivery(&tenant);
             let meta = resolved.as_ref().ok();
             self.signals.emit(Event {
-                kind: EventKind::Redelivery,
                 record_id: meta.map(|meta| meta.record_id),
-                tenant: Arc::clone(&tenant),
-                node: SOURCE_ID.to_owned(),
-                reason: None,
-                delivery_count: delivery,
-                stream_sequence: None,
-                message: String::new(),
                 // A walked redelivery's trace is kept whenever anything traces.
                 trace: meta
                     .filter(|_| self.signals.tracing())
                     .map(|meta| TraceKey::of(meta).delivery_context(delivery)),
+                ..Event::new(
+                    EventKind::Redelivery,
+                    Arc::clone(&tenant),
+                    SOURCE_ID,
+                    delivery,
+                )
             });
         }
         let meta = match resolved {
@@ -356,8 +364,8 @@ impl<'p> Walker<'p> {
                     // drop the spec counts under `missing_id`; the message is nak'd, which
                     // is the nak it counts.
                     Rejection::MissingId => {
-                        self.metrics.dropped(&source, DropReason::MissingId);
-                        self.metrics.source_nak(&tenant);
+                        self.metrics().dropped(&source, DropReason::MissingId);
+                        self.metrics().source_nak(&tenant);
                         let failure =
                             Failure::at_source(FailureKind::MissingId, "the record has no `id`");
                         self.log_nak(&tenant, delivery, &failure, None);
@@ -366,14 +374,14 @@ impl<'p> Walker<'p> {
                     // Spec: metric and span are rejected by the engine (reason
                     // `invalid_record`). Rejection is a drop, and drops are acked.
                     Rejection::NotLog => {
-                        self.metrics.dropped(&source, DropReason::InvalidRecord);
+                        self.metrics().dropped(&source, DropReason::InvalidRecord);
                         ack.ack();
                     }
                 }
                 return;
             }
         };
-        self.metrics.records_out(&source, 1);
+        self.metrics().records_out(&source, 1);
 
         let key = TraceKey::of(&meta);
         let mut walk = Walk {
@@ -381,7 +389,6 @@ impl<'p> Walker<'p> {
             key,
             at: None,
             failure: None,
-            metrics: self.metrics,
             signals: self.signals,
             spans,
         };
@@ -393,10 +400,11 @@ impl<'p> Walker<'p> {
         }));
         if outcome.is_err() {
             const PANICKED: &str = "stage or sink panicked";
-            let (labels, span) = walk
-                .at
-                .map_or((source, None), |(labels, span)| (labels, Some(span)));
-            walk.fail(&labels, span, Instant::now(), FailureKind::Panic, &PANICKED);
+            let at = walk.at.unwrap_or(At {
+                labels: source,
+                span: None,
+            });
+            walk.fail(at, Instant::now(), FailureKind::Panic, &PANICKED);
             walk.spans
                 .fail_open(Instant::now(), FailureKind::Panic, PANICKED);
         }
@@ -413,7 +421,7 @@ impl<'p> Walker<'p> {
             self.signals.export(spans.finish(key, &meta, settlement));
         }
         if let Some(failure) = failure {
-            self.metrics.source_nak(&tenant);
+            self.metrics().source_nak(&tenant);
             let trace = self
                 .signals
                 .tracing()
@@ -426,7 +434,7 @@ impl<'p> Walker<'p> {
             // about how long the record has been on its way.
             if let IngestionTime::Reported(nanos) = meta.ingestion_time {
                 if let Some(elapsed) = since_unix_nanos(nanos) {
-                    self.metrics.end_to_end(&tenant, elapsed);
+                    self.metrics().end_to_end(&tenant, elapsed);
                 }
             }
             ack.ack();
@@ -442,15 +450,8 @@ impl<'p> Walker<'p> {
         trace: Option<TraceContext>,
     ) {
         self.signals.emit(Event {
-            kind: EventKind::Nak,
-            record_id: failure.record_id,
-            tenant: Arc::clone(tenant),
-            node: failure.node.clone(),
-            reason: Some(failure.kind),
-            delivery_count: delivery,
-            stream_sequence: None,
-            message: failure.error.clone(),
             trace,
+            ..Event::of_failure(EventKind::Nak, Arc::clone(tenant), failure, delivery)
         });
     }
 
@@ -483,7 +484,7 @@ impl<'p> Walker<'p> {
     ) {
         let dag = self.pipeline.dag();
         let node_id = dag.node(index).id.as_str();
-        let metrics = self.metrics;
+        let metrics = self.signals.metrics();
         let node = self.pipeline.node(index);
         let engine = match node {
             CompiledNode::Sink(_) => None,
@@ -496,7 +497,11 @@ impl<'p> Walker<'p> {
             CompiledNode::Sink(sink) => {
                 let started = Instant::now();
                 let span = walk.spans.open(node_id, parent, started);
-                walk.at = Some((labels, span));
+                let at = At {
+                    labels,
+                    span: Some(span),
+                };
+                walk.at = Some(at);
                 let written = sink.write(&[Outgoing {
                     meta,
                     record: &record,
@@ -512,7 +517,7 @@ impl<'p> Walker<'p> {
                     }
                     Err(err) => {
                         metrics.sink_publish_error(&labels);
-                        walk.fail(&labels, Some(span), ended, FailureKind::SinkError, &err);
+                        walk.fail(at, ended, FailureKind::SinkError, &err);
                     }
                 }
             }
@@ -522,7 +527,11 @@ impl<'p> Walker<'p> {
                 let owned = Arc::unwrap_or_clone(record);
                 let started = Instant::now();
                 let span = walk.spans.open(node_id, parent, started);
-                walk.at = Some((labels, span));
+                let at = At {
+                    labels,
+                    span: Some(span),
+                };
+                walk.at = Some(at);
                 let output = stage.process(owned, &ctx);
                 let ended = Instant::now();
                 metrics.stage_duration(&labels, ended - started);
@@ -550,7 +559,7 @@ impl<'p> Walker<'p> {
                             self.fan_out(consumers(None), Arc::new(record), walk, Some(span));
                         }
                         StateErrorPolicy::Nak => {
-                            walk.fail(&labels, Some(span), ended, FailureKind::StateError, &error);
+                            walk.fail(at, ended, FailureKind::StateError, &error);
                         }
                     },
                     StageOutput::Split(records) => {
@@ -574,8 +583,7 @@ impl<'p> Walker<'p> {
                             // Load validation guarantees every declared label a consumer, so
                             // this is a stage emitting a label it never declared.
                             walk.fail(
-                                &labels,
-                                Some(span),
+                                at,
                                 ended,
                                 FailureKind::StageError,
                                 &format!("no consumer for route label `{label}`"),
@@ -591,7 +599,7 @@ impl<'p> Walker<'p> {
                         walk.spans.detail(span, Detail::Routed(label));
                     }
                     StageOutput::Error(err) => {
-                        walk.fail(&labels, Some(span), ended, FailureKind::StageError, &err);
+                        walk.fail(at, ended, FailureKind::StageError, &err);
                     }
                 }
             }

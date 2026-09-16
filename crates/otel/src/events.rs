@@ -84,8 +84,8 @@ impl EventLog for OtlpEventLog {
         }
         record.add_attribute("tenant", event.tenant.to_string());
         record.add_attribute("node", event.node);
-        if let Some(reason) = event.reason {
-            record.add_attribute("reason", reason.as_str());
+        if let Some(failure) = event.failure {
+            record.add_attribute("reason", failure.as_str());
         }
         record.add_attribute("delivery_count", saturating_i64(event.delivery_count));
         if let Some(sequence) = event.stream_sequence {
