@@ -294,7 +294,7 @@ impl Dag {
 
     /// The label `label` of node `index` as the graph holds it, when a consumer reads it.
     #[must_use]
-    pub fn label(&self, index: NodeIndex, label: &str) -> Option<&str> {
+    pub(crate) fn label(&self, index: NodeIndex, label: &str) -> Option<&str> {
         self.edges[index.0]
             .iter()
             .filter_map(|e| e.label.as_deref())

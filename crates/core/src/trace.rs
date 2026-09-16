@@ -233,7 +233,7 @@ pub enum SpanResult<L = String> {
 
 impl<L> SpanResult<L> {
     /// The same result with its label turned by `f`.
-    pub fn map_label<M>(self, f: impl FnOnce(L) -> M) -> SpanResult<M> {
+    pub(crate) fn map_label<M>(self, f: impl FnOnce(L) -> M) -> SpanResult<M> {
         match self {
             Self::Pass => SpanResult::Pass,
             Self::Routed(label) => SpanResult::Routed(f(label)),
@@ -455,7 +455,9 @@ impl<'p> TraceBuffer<'p> {
             .enumerate()
             .map(|(handle, draft)| {
                 // Every node closes its span and a panic closes the rest, so an open span
-                // here is an engine bug; it is shown as one rather than as a success.
+                // here is an engine bug; it is shown as a failure rather than a success.
+                // `panic` is the closest kind the closed set has: a kind of its own would be
+                // a spec amendment for a path no record can reach.
                 let (result, end) = match draft.result {
                     Some(result) => (result, draft.end),
                     None => (
