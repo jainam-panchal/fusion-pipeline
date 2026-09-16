@@ -74,15 +74,9 @@ nodes:
         end
         local out = {}
         for line in record.body:gmatch("[^\n]+") do
-          out[#out + 1] = {
-            id = record.id,
-            kind = record.kind,
-            body = line,
-            severity_text = record.severity_text,
-            attributes = record.attributes,
-            resource = record.resource,
-            scope = record.scope,
-          }
+          local copy = record:copy()
+          copy.body = line
+          out[#out + 1] = copy
         end
         return out
       end

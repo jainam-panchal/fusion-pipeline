@@ -1,6 +1,6 @@
 //! One worker's VM for one `lua` node: the sandbox, the API a script sees (`state`, `log`,
-//! `now_ns`, the read-only `meta` argument), the guardrails, and one run of `process` over
-//! one record.
+//! `now_ns`, `record:copy()`, the read-only `meta` argument), the guardrails, and one run of
+//! `process` over one record.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -169,6 +169,8 @@ pub(crate) struct Vm {
     /// The metatable of every `meta` table `process` receives: reads come from the current
     /// record's `Meta`, writes raise.
     meta_metatable: Table,
+    /// The metatable of every record table `process` receives: it gives the table `copy`.
+    record_metatable: Table,
     /// Instructions used by the current run, counted by the hook in steps of the trigger.
     used: Rc<Cell<u64>>,
     script: Arc<Script>,
@@ -190,6 +192,7 @@ impl Vm {
         install_api(&lua, &script.node).map_err(runtime)?;
         install_pcall(&lua).map_err(runtime)?;
         let meta_metatable = meta_metatable(&lua).map_err(runtime)?;
+        let record_metatable = record_metatable(&lua).map_err(runtime)?;
         lua.set_memory_limit(script.memory_bytes).map_err(runtime)?;
 
         let used = Rc::new(Cell::new(0));
@@ -231,6 +234,7 @@ impl Vm {
             lua,
             process,
             meta_metatable,
+            record_metatable,
             used,
             script,
         })
@@ -244,6 +248,9 @@ impl Vm {
         });
         self.used.set(0);
         let table = convert::to_table(&self.lua, record).map_err(classify)?;
+        table
+            .set_metatable(Some(self.record_metatable.clone()))
+            .map_err(classify)?;
         // A fresh table per run, so a `rawset` on one run's `meta` is gone by the next;
         // nothing a script does to it reaches the pipeline either way.
         let meta = self.lua.create_table().map_err(classify)?;
@@ -470,6 +477,37 @@ fn install_api(lua: &mlua::Lua, node: &str) -> mlua::Result<()> {
         lua.create_function(|_, ()| Ok(i64::try_from(unix_nanos_now()).unwrap_or(i64::MAX)))?,
     )?;
     Ok(())
+}
+
+/// `record:copy()`: a deep copy of the table, shared structure and cycles kept as they are,
+/// with the same metatable so the copy can be copied too. Written in Lua so it runs under the
+/// instruction budget and the memory cap like the script's own code.
+const COPY: &str = r#"
+local next, type, getmetatable, setmetatable = next, type, getmetatable, setmetatable
+local function deep(value, seen)
+  if type(value) ~= "table" then return value end
+  local done = seen[value]
+  if done then return done end
+  local out = {}
+  seen[value] = out
+  for k, v in next, value do
+    out[deep(k, seen)] = deep(v, seen)
+  end
+  return out
+end
+return function(record)
+  return setmetatable(deep(record, {}), getmetatable(record))
+end
+"#;
+
+/// The metatable behind every record table: `__index` holds `copy`.
+fn record_metatable(lua: &mlua::Lua) -> mlua::Result<Table> {
+    let copy: Function = lua.load(COPY).set_name("=record:copy").eval()?;
+    let methods = lua.create_table()?;
+    methods.raw_set("copy", copy)?;
+    let metatable = lua.create_table()?;
+    metatable.raw_set("__index", methods)?;
+    Ok(metatable)
 }
 
 /// The metatable behind `meta`: `__index` reads the current record's `Meta`, `__newindex`

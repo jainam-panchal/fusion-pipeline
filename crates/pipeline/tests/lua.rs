@@ -599,15 +599,9 @@ function process(record)
   end
   local out = {}
   for line in record.body:gmatch("[^\n]+") do
-    out[#out + 1] = {
-      id = record.id,
-      kind = record.kind,
-      body = line,
-      severity_text = record.severity_text,
-      attributes = record.attributes,
-      resource = record.resource,
-      scope = record.scope,
-    }
+    local copy = record:copy()
+    copy.body = line
+    out[#out + 1] = copy
   end
   return out
 end"#;
@@ -846,6 +840,51 @@ fn only_the_id_is_read_from_decimal_text_and_meta_is_not_a_record_field() {
         );
         h.finish();
     }
+}
+
+#[test]
+fn record_copy_is_a_deep_copy_so_a_split_record_changes_alone() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  local copy = record:copy()
+  copy.body = "second"
+  copy.attributes["only"] = "copy"
+  local again = copy:copy()
+  again.body = "third"
+  return { record, copy, again }
+end"#,
+    );
+    let (out, h) = run(
+        &yaml,
+        1,
+        vec![record(
+            1,
+            json!({"body": "first", "time_unix_nano": 5, "trace_id": "ab", "attributes": {"a": 1}}),
+        )],
+    );
+    let bodies: Vec<_> = out.iter().map(|r| r.body.clone()).collect();
+    assert_eq!(
+        bodies,
+        vec![
+            Some(json!("first")),
+            Some(json!("second")),
+            Some(json!("third"))
+        ]
+    );
+    assert_eq!(
+        out[0].attributes.get("only"),
+        None,
+        "the original is untouched"
+    );
+    for r in &out[1..] {
+        assert_eq!(r.attributes.get("only"), Some(&json!("copy")));
+        assert_eq!(r.time_unix_nano, Some(5), "every field is copied");
+        assert_eq!(r.trace_id.as_deref(), Some("ab"));
+        assert_eq!(r.resource.get("tenant.id"), Some(&json!("acme")));
+    }
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    h.finish();
 }
 
 #[test]
