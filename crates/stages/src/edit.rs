@@ -44,7 +44,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::key_hash::write_canonical;
-use source::{Source, Unapplied};
+use label::{LabelledPath, Unapplied};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,21 +98,21 @@ pub struct Edit {
     on_unapplied: OnUnapplied,
 }
 
-/// One op as parsed. The path an op can be unapplied on is a [`Source`]; `delete` has
+/// One op as parsed. The path an op can be unapplied on is a [`LabelledPath`]; `delete` has
 /// none, since it is never unapplied.
 #[derive(Debug)]
 enum Op {
-    Set { field: Source, value: Value },
-    Rename { from: Source, to: FieldPath },
-    Copy { from: Source, to: FieldPath },
-    Hash { field: Source },
+    Set { field: LabelledPath, value: Value },
+    Rename { from: LabelledPath, to: FieldPath },
+    Copy { from: LabelledPath, to: FieldPath },
+    Hash { field: LabelledPath },
     Delete { fields: Vec<FieldPath> },
 }
 
 /// The `field` label and what can build it. A module of its own so the fields are private
-/// to it: outside, an [`Unapplied`] comes only from [`Source::unapplied`], and so its label
+/// to it: outside, an [`Unapplied`] comes only from [`LabelledPath::unapplied`], and so its label
 /// is always a source path rendered at load, never a literal.
-mod source {
+mod label {
     use fusion_core::metrics::EditCause;
     use fusion_core::path::FieldPath;
 
@@ -122,12 +122,12 @@ mod source {
     /// the field, the steady state the metric exists to show. The label is never empty: a
     /// path's canonical form always starts with the root's name.
     #[derive(Debug)]
-    pub(super) struct Source {
+    pub(super) struct LabelledPath {
         pub(super) path: FieldPath,
         label: Box<str>,
     }
 
-    impl Source {
+    impl LabelledPath {
         pub(super) fn new(path: FieldPath) -> Self {
             Self {
                 label: path.to_string().into_boxed_str(),
@@ -297,7 +297,7 @@ fn parse_op(
                 .write(&mut Record::default(), p.value.clone())
                 .map_err(|e| at.error(format!("value {}: {e}", p.value)))?;
             Op::Set {
-                field: Source::new(field),
+                field: LabelledPath::new(field),
                 value: p.value,
             }
         }
@@ -312,7 +312,7 @@ fn parse_op(
             if from == to {
                 return Err(at.error("`from` and `to` are the same field"));
             }
-            let from = Source::new(from);
+            let from = LabelledPath::new(from);
             if kind == EditOp::Rename {
                 Op::Rename { from, to }
             } else {
@@ -326,7 +326,7 @@ fn parse_op(
                 .write(&mut Record::default(), Value::String(String::new()))
                 .map_err(|e| at.error(format!("{e}; hash writes a string")))?;
             Op::Hash {
-                field: Source::new(field),
+                field: LabelledPath::new(field),
             }
         }
         EditOp::Delete => {
@@ -360,7 +360,11 @@ impl Op {
     fn apply(&self, record: &mut Record) -> Result<(), Unapplied<'_>> {
         match self {
             // The literal was written to an empty record at load and `write` never reads
-            // the record, so this cannot refuse; the arm is here so the type says so.
+            // the record, so this cannot refuse. The arm still needs an answer, and the
+            // three without a label are worse: a panic path, a swallowed error that goes
+            // silent exactly when core changes `write` to read the record, or a made-up
+            // label in a metric. So `set` carries a label it never emits today, one
+            // `Box<str>` per op at load, and stays visible if the invariant ever breaks.
             Self::Set { field, value } => field
                 .path
                 .write(record, value.clone())
