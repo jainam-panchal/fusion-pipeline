@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::metrics::{EngineLabel, Labels, Metrics};
+use crate::metrics::{EditCause, EditOp, EngineLabel, Labels, Metrics};
 use crate::record::{Record, RecordId};
 use crate::state::{StateError, StateErrorPolicy, StateStore};
 
@@ -37,11 +37,13 @@ pub enum DropReason {
     InvalidRecord,
     /// The record carries no `id`.
     MissingId,
+    /// An `edit` op could not apply and the node's `on_unapplied` is `drop`.
+    EditUnapplied,
 }
 
 impl DropReason {
     /// Every reason, for checks against the spec's closed set.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Filter,
         Self::RouteDefaultDrop,
         Self::Sample,
@@ -52,6 +54,7 @@ impl DropReason {
         Self::StateError,
         Self::InvalidRecord,
         Self::MissingId,
+        Self::EditUnapplied,
     ];
 
     /// The metric label value.
@@ -68,6 +71,7 @@ impl DropReason {
             Self::StateError => "state_error",
             Self::InvalidRecord => "invalid_record",
             Self::MissingId => "missing_id",
+            Self::EditUnapplied => "edit_unapplied",
         }
     }
 }
@@ -322,6 +326,13 @@ impl<'a> StageMetrics<'a> {
     /// `regex_nonmatch_total`: the stage's pattern did not match this record.
     pub fn regex_nonmatch(&self) {
         self.metrics.regex_nonmatch(&self.labels);
+    }
+
+    /// `edit_unapplied_total`: the `op` reading `field` could not apply to this record
+    /// because of `cause`.
+    pub fn edit_unapplied(&self, op: EditOp, field: &str, cause: EditCause) {
+        self.metrics
+            .edit_unapplied(&self.labels.with_edit(op, field, cause));
     }
 }
 
