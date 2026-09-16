@@ -16,6 +16,7 @@ fusion-stages.workspace = true
 fusion-nats.workspace = true
 fusion-state.workspace = true
 fusion-otel.workspace = true
+fusion-lua.workspace = true
 mimalloc.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

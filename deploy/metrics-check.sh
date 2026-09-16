@@ -6,15 +6,16 @@
 #      prometheus-nats-exporter, Dragonfly, and the collector's self-metrics;
 #   2. traffic: 1,000 records with distinct bodies, one repeated body the dedupe node drops,
 #      one TRACE record the filter drops, one syslog line the extract node parses and the
-#      redact node masks, one record without an id and one sink failure;
+#      redact node masks, one with a non-numeric http.status the lua node raises on, one
+#      record without an id and one sink failure;
 #   3. every metric with a producer is in Prometheus with the labels the spec gives it;
 #   4. the `reason` values seen on records_dropped_total are within the spec's closed set;
 #   5. the NATS exporter reports JetStream consumer pending, redelivered and ack floor;
 #   6. every pipeline series carries the instance id, and the pipeline, NATS and Dragonfly
 #      each report their own CPU and resident memory;
 #   7. Grafana serves the provisioned internal dashboard.
-# The Lua and dead-letter metrics have no producer until #8 and #10; they are reported as
-# pending, not required.
+# The dead-letter metrics have no producer until #10; they are reported as pending, not
+# required.
 # Exits non-zero on the first failure. Needs docker compose, the `nats` CLI, curl and jq.
 set -euo pipefail
 
@@ -62,7 +63,7 @@ for job in pipeline nats dragonfly otel-collector prometheus; do
     echo "up: $job"
 done
 
-step "2. traffic: $RECORDS records, one repeat (deduped), one TRACE (filtered), one without an id, one sink failure"
+step "2. traffic: $RECORDS records, one repeat (deduped), one TRACE (filtered), one the lua node raises on, one without an id, one sink failure"
 nats stream purge LOGS -f >/dev/null
 # Distinct bodies, so the dedupe node lets every one of them through.
 nats pub logs.acme.syslog \
@@ -71,6 +72,8 @@ nats pub logs.acme.syslog \
 nats pub logs.acme.syslog '{"id": 999999, "severity_text": "ERROR", "body": "disk full 1"}' >/dev/null
 nats pub logs.acme.syslog '{"id": 1000000, "severity_text": "TRACE", "body": "noise"}' >/dev/null
 nats pub logs.acme.syslog '{"id": 1000002, "body": "Jun 14 15:16:01 combo sshd(pam_unix)[19939]: authentication failure; rhost=218.188.2.4"}' >/dev/null
+# `"abc" // 100` raises inside the lua node: a `runtime` error, forwarded by `on_error: pass`.
+nats pub logs.acme.syslog '{"id": 1000003, "body": "bad status", "attributes": {"http.status": "abc"}}' >/dev/null
 nats pub logs.acme.syslog '{"body": "no id"}' >/dev/null
 # Sink failure: the PROCESSED stream is gone, so the write gets no PubAck, the source
 # message is nakked and JetStream redelivers it; nats-init recreates the stream.
@@ -101,6 +104,8 @@ SPEC_METRICS=(
     'regex_nonmatch_total{tenant="acme",stage="parse_syslog",engine="linear"}'
     'records_out_total{tenant="acme",stage="mask_ips",engine="linear"}'
     'edit_unapplied_total{tenant="acme",stage="tag_service",op="copy",field="attributes.Component",cause="absent"}'
+    'lua_errors_total{tenant="acme",stage="split_lines",kind="runtime"}'
+    'records_out_total{tenant="acme",stage="split_lines"}'
     'state_ops_total{tenant="acme",stage="dedupe_body"}'
     'state_op_duration_seconds_bucket{tenant="acme",stage="dedupe_body"}'
     'source_naks_total{tenant="acme"}'
@@ -109,12 +114,13 @@ SPEC_METRICS=(
     'sink_publish_errors_total{tenant="acme",stage="out"}'
     'pipeline_end_to_end_seconds_bucket{tenant="acme"}'
 )
-# Named in the spec, emitted by stages that do not exist yet (#8 Lua, #10 dead-letter
-# queue). Reported, not required, until their tickets land. `state_errors_total` has a
-# producer but a healthy run gives it nothing to count, and so does the `regex_limit` drop
-# reason: no pattern in deploy/pipeline.yaml trips a limit on this traffic.
+# Named in the spec, emitted by a stage that does not exist yet (#10 dead-letter queue).
+# Reported, not required, until its ticket lands. `state_errors_total` has a producer but a
+# healthy run gives it nothing to count, and so do the `regex_limit`, `lua_drop` and
+# `lua_error` drop reasons: no pattern in deploy/pipeline.yaml trips a limit on this traffic,
+# the lua node returns nil for nothing, and its `on_error` is `pass`.
 PENDING_METRICS=(
-    state_errors_total lua_errors_total dlq_total
+    state_errors_total dlq_total
 )
 for expr in "${SPEC_METRICS[@]}"; do
     wait_for 30 "$expr" prom_has "$expr"

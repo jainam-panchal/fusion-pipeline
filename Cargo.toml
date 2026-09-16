@@ -7,6 +7,7 @@ members = [
     "crates/nats",
     "crates/state",
     "crates/otel",
+    "crates/lua",
     "crates/pipeline",
 ]
 
@@ -24,11 +25,13 @@ fusion-regex = { path = "crates/regex" }
 fusion-nats = { path = "crates/nats" }
 fusion-state = { path = "crates/state" }
 fusion-otel = { path = "crates/otel" }
+fusion-lua = { path = "crates/lua" }
 
 async-nats = "0.50"
 crossbeam-channel = "0.5"
 csv = "1"
 mimalloc = { version = "0.1", default-features = false }
+mlua = { version = "0.12", features = ["lua54", "vendored"] }
 opentelemetry = { version = "0.32", default-features = false, features = ["metrics"] }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["metrics", "http-proto", "reqwest-blocking-client"] }
