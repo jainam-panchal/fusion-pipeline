@@ -356,7 +356,9 @@ fn owned(value: FieldValue<'_>) -> Option<Value> {
                 .or_else(|_| u64::try_from(i).map(Value::from))
                 .unwrap_or(Value::Null),
         ),
-        FieldValue::Num(Num::Float(f)) => Some(serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number)),
+        FieldValue::Num(Num::Float(f)) => {
+            Some(serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number))
+        }
         FieldValue::Json(v) => Some(v.clone()),
         _ => None,
     }

@@ -13,7 +13,10 @@
 # is `pass`) because in the chaos test a paused Dragonfly must hold records back, not let
 # duplicates through: the redelivery lands after the pause is over. The extract node gives
 # the regex panels a producer: a body that is not a syslog line is a non-match and passes
-# unchanged. The redact node masks IPv4 addresses in the body and the extracted content.
+# unchanged. The edit node gives `edit_unapplied_total` a producer: it copies the extracted
+# component into `attributes.service`, which is unapplied on a body that was not a syslog line,
+# and stamps the pipeline name. The redact node masks IPv4 addresses in the body and the
+# extracted content.
 name: compose
 source:
   type: nats
@@ -34,6 +37,12 @@ nodes:
     type: extract
     field: body
     pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$'
+  - id: tag_service
+    type: edit
+    on_unapplied: skip
+    ops:
+      - copy: { from: attributes.Component, to: attributes.service }
+      - set:  { field: attributes.pipeline, value: compose }
   - id: mask_ips
     type: redact
     fields: [body, attributes.Content]

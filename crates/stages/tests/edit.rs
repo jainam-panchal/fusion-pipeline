@@ -30,7 +30,10 @@ fn the_issue_example_builds() {
 fn rejects(params: &str, index: &str, hints: &[&str]) {
     let err = build(params).expect_err("rejected");
     assert!(err.contains("normalise"), "names the node: {err}");
-    assert!(err.contains(index), "names the op position `{index}`: {err}");
+    assert!(
+        err.contains(index),
+        "names the op position `{index}`: {err}"
+    );
     for hint in hints {
         assert!(err.contains(hint), "says `{hint}`: {err}");
     }
@@ -96,14 +99,26 @@ fn a_malformed_path_is_rejected_with_the_parser_hint() {
 
 #[test]
 fn a_write_to_id_or_kind_is_rejected_as_read_only() {
-    rejects("    ops:\n      - set: { field: id, value: 7 }\n", "op 0", &["id", "read-only"]);
+    rejects(
+        "    ops:\n      - set: { field: id, value: 7 }\n",
+        "op 0",
+        &["id", "read-only"],
+    );
     rejects(
         "    ops:\n      - rename: { from: body, to: kind }\n",
         "op 0",
         &["kind", "read-only"],
     );
-    rejects("    ops:\n      - hash: { field: id }\n", "op 0", &["id", "read-only"]);
-    rejects("    ops:\n      - delete: { fields: [kind] }\n", "op 0", &["kind", "read-only"]);
+    rejects(
+        "    ops:\n      - hash: { field: id }\n",
+        "op 0",
+        &["id", "read-only"],
+    );
+    rejects(
+        "    ops:\n      - delete: { fields: [kind] }\n",
+        "op 0",
+        &["kind", "read-only"],
+    );
 }
 
 #[test]
@@ -213,14 +228,21 @@ fn from_equal_to_to_is_rejected_on_parsed_paths() {
 
 #[test]
 fn an_empty_delete_list_is_rejected() {
-    rejects("    ops:\n      - delete: { fields: [] }\n", "op 0", &["delete", "fields"]);
+    rejects(
+        "    ops:\n      - delete: { fields: [] }\n",
+        "op 0",
+        &["delete", "fields"],
+    );
 }
 
 #[test]
 fn on_unapplied_outside_skip_and_drop_is_rejected_listing_both() {
     let err = build(&format!("    on_unapplied: nak\n{EXAMPLE}")).expect_err("rejected");
     assert!(
-        err.contains("normalise") && err.contains("nak") && err.contains("skip") && err.contains("drop"),
+        err.contains("normalise")
+            && err.contains("nak")
+            && err.contains("skip")
+            && err.contains("drop"),
         "{err}"
     );
     assert!(build(&format!("    on_unapplied: drop\n{EXAMPLE}")).is_ok());
@@ -230,5 +252,8 @@ fn on_unapplied_outside_skip_and_drop_is_rejected_listing_both() {
 #[test]
 fn an_unknown_node_key_is_rejected() {
     let err = build(&format!("    on_missing: skip\n{EXAMPLE}")).expect_err("rejected");
-    assert!(err.contains("normalise") && err.contains("on_missing"), "{err}");
+    assert!(
+        err.contains("normalise") && err.contains("on_missing"),
+        "{err}"
+    );
 }

@@ -1326,6 +1326,62 @@
       ]
     },
     {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Edit ops that could not apply (by op, field, cause)",
+      "description": "edit_unapplied_total for this stage: ops/s whose source read as null (cause=absent) or whose target refused the value (cause=type). Under on_unapplied: skip this is the only sign the node is not doing its job; under drop the same records show in \"Why records left here\" as edit_unapplied. Empty for stages that are not edit nodes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0,
+          "noValue": "no unapplied ops from this stage"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (op, field, cause) (rate(edit_unapplied_total{tenant=~\"$tenant\",stage=\"$stage\"}[1m]))",
+          "legendFormat": "{{op}} {{field}} {{cause}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 21,
       "type": "row",
       "title": "Internals",
@@ -1334,7 +1390,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 46
+        "y": 54
       },
       "panels": [
         {
@@ -1350,7 +1406,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 47
+            "y": 55
           },
           "fieldConfig": {
             "defaults": {
@@ -1406,7 +1462,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 47
+            "y": 55
           },
           "fieldConfig": {
             "defaults": {
@@ -1462,7 +1518,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 47
+            "y": 55
           },
           "fieldConfig": {
             "defaults": {
@@ -1518,7 +1574,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 55
+            "y": 63
           },
           "fieldConfig": {
             "defaults": {
@@ -1583,7 +1639,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 55
+            "y": 63
           },
           "fieldConfig": {
             "defaults": {
@@ -1647,7 +1703,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 55
+            "y": 63
           },
           "fieldConfig": {
             "defaults": {
@@ -1720,7 +1776,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 63
+            "y": 71
           },
           "fieldConfig": {
             "defaults": {
@@ -1784,7 +1840,7 @@
             "h": 8,
             "w": 16,
             "x": 8,
-            "y": 63
+            "y": 71
           },
           "fieldConfig": {
             "defaults": {

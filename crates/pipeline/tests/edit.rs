@@ -104,7 +104,11 @@ fn filter_then_edit_then_sink_acks_every_record_and_the_sink_sees_the_edits() {
             assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "record {i}");
         }
         let out = h.sinks.records("out");
-        assert_eq!(out.len(), 50, "workers {workers}: every ERROR record reached the sink");
+        assert_eq!(
+            out.len(),
+            50,
+            "workers {workers}: every ERROR record reached the sink"
+        );
         for r in &out {
             assert_eq!(r.resource.get("env"), Some(&json!("prod")));
             assert_eq!(r.attributes.get("http.route"), Some(&json!("/users/42")));
@@ -165,7 +169,11 @@ fn ops_run_in_order_on_the_same_record() {
         "",
         "      - rename: { from: attributes.a, to: attributes.b }\n      - set: { field: attributes.b, value: set }\n",
     );
-    let (out, h) = run(&yaml, 1, vec![record(1, json!({"attributes": {"a": "moved"}}))]);
+    let (out, h) = run(
+        &yaml,
+        1,
+        vec![record(1, json!({"attributes": {"a": "moved"}}))],
+    );
     assert_eq!(out[0].attributes.get("b"), Some(&json!("set")));
     assert_eq!(out[0].attributes.get("a"), None);
     h.finish();
@@ -175,7 +183,11 @@ fn ops_run_in_order_on_the_same_record() {
         "",
         "      - set: { field: attributes.a, value: set }\n      - rename: { from: attributes.a, to: attributes.b }\n",
     );
-    let (out, h) = run(&yaml, 1, vec![record(1, json!({"attributes": {"a": "old"}}))]);
+    let (out, h) = run(
+        &yaml,
+        1,
+        vec![record(1, json!({"attributes": {"a": "old"}}))],
+    );
     assert_eq!(out[0].attributes.get("b"), Some(&json!("set")));
     assert_eq!(out[0].attributes.get("a"), None);
     h.finish();
@@ -197,7 +209,10 @@ fn rename_and_copy_overwrite_an_existing_to() {
     );
     assert_eq!(
         out[0].attributes,
-        json!({"b": "from a", "c": "new"}).as_object().cloned().expect("object")
+        json!({"b": "from a", "c": "new"})
+            .as_object()
+            .cloned()
+            .expect("object")
     );
     h.finish();
 }
@@ -213,19 +228,31 @@ fn an_absent_source_leaves_the_record_and_counts_absent_for_that_op_and_field() 
         let (out, h) = run(&yaml, workers, vec![record(1, before)]);
         assert_eq!(
             out[0].attributes,
-            json!({"nil": null, "after": "ran"}).as_object().cloned().expect("object"),
+            json!({"nil": null, "after": "ran"})
+                .as_object()
+                .cloned()
+                .expect("object"),
             "workers {workers}: nothing written, the op after the misses still ran"
         );
         assert_eq!(
-            h.counter(Metric::EditUnapplied, &unapplied("rename", "attributes.http.path", "absent")),
+            h.counter(
+                Metric::EditUnapplied,
+                &unapplied("rename", "attributes.http.path", "absent")
+            ),
             1
         );
         assert_eq!(
-            h.counter(Metric::EditUnapplied, &unapplied("copy", "attributes.nothing", "absent")),
+            h.counter(
+                Metric::EditUnapplied,
+                &unapplied("copy", "attributes.nothing", "absent")
+            ),
             1
         );
         assert_eq!(
-            h.counter(Metric::EditUnapplied, &unapplied("hash", "attributes.nil", "absent")),
+            h.counter(
+                Metric::EditUnapplied,
+                &unapplied("hash", "attributes.nil", "absent")
+            ),
             1
         );
         assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 1);
@@ -254,7 +281,10 @@ fn a_target_that_refuses_the_value_leaves_the_record_and_counts_type() {
         "a composite cannot go under a map key, and body is still there"
     );
     assert_eq!(
-        h.counter(Metric::EditUnapplied, &unapplied("hash", "attributes.list", "type")),
+        h.counter(
+            Metric::EditUnapplied,
+            &unapplied("hash", "attributes.list", "type")
+        ),
         1
     );
     assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
@@ -270,7 +300,10 @@ fn hash_takes_a_number_or_bool_as_its_canonical_text() {
     let before = json!({"severity_text": "42", "attributes": {"n": 42, "f": 1.5, "b": true}});
     let (out, h) = run(&yaml, 1, vec![record(1, before)]);
     assert_eq!(out[0].attributes.get("n"), Some(&json!(FORTY_TWO_SHA256)));
-    assert_eq!(out[0].attributes.get("f"), Some(&json!(ONE_POINT_FIVE_SHA256)));
+    assert_eq!(
+        out[0].attributes.get("f"),
+        Some(&json!(ONE_POINT_FIVE_SHA256))
+    );
     assert_eq!(out[0].attributes.get("b"), Some(&json!(TRUE_SHA256)));
     assert_eq!(
         out[0].severity_text.as_deref(),
@@ -310,7 +343,10 @@ fn on_unapplied_drop_drops_with_reason_edit_unapplied_and_acks() {
             1
         );
         assert_eq!(
-            h.counter(Metric::EditUnapplied, &unapplied("rename", "attributes.a", "absent")),
+            h.counter(
+                Metric::EditUnapplied,
+                &unapplied("rename", "attributes.a", "absent")
+            ),
             1
         );
         assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 1);
@@ -324,11 +360,23 @@ fn edit_never_errors_whatever_the_record_holds() {
     let mixed = vec![
         record(1, json!({})),
         record(2, json!({"body": null})),
-        record(3, json!({"body": [1, [2]], "attributes": {"http.path": {"deep": 1}}})),
-        record(4, json!({"severity_number": 3, "attributes": {"user.email": 1e300}})),
-        record(5, json!({"body": "", "attributes": {"http.path": "", "debug": null}})),
+        record(
+            3,
+            json!({"body": [1, [2]], "attributes": {"http.path": {"deep": 1}}}),
+        ),
+        record(
+            4,
+            json!({"severity_number": 3, "attributes": {"user.email": 1e300}}),
+        ),
+        record(
+            5,
+            json!({"body": "", "attributes": {"http.path": "", "debug": null}}),
+        ),
     ];
-    let yaml = EXAMPLE.replace("condition: severity_text == \"ERROR\"\n    action: keep", "condition: id > 0\n    action: keep");
+    let yaml = EXAMPLE.replace(
+        "condition: severity_text == \"ERROR\"\n    action: keep",
+        "condition: id > 0\n    action: keep",
+    );
     let (out, h) = run(&yaml, 4, mixed);
     assert_eq!(out.len(), 5);
     assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);

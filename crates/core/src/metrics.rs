@@ -189,7 +189,13 @@ pub enum EditOp {
 
 impl EditOp {
     /// Every op, for checks against the spec's closed set.
-    pub const ALL: [Self; 5] = [Self::Set, Self::Rename, Self::Copy, Self::Hash, Self::Delete];
+    pub const ALL: [Self; 5] = [
+        Self::Set,
+        Self::Rename,
+        Self::Copy,
+        Self::Hash,
+        Self::Delete,
+    ];
 
     /// The label value.
     #[must_use]
