@@ -2045,7 +2045,7 @@
                 "showPoints": "never"
               },
               "min": 0,
-              "noValue": "no dead letter yet"
+              "noValue": "no bytes yet"
             },
             "overrides": []
           },
