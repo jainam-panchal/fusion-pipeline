@@ -4,14 +4,12 @@
 
 mod common;
 
-use common::{TENANT, WAIT, body_record, start, start_untraced, start_with};
-use fusion_core::config::{ConfigError, NodeConfig};
+use common::{TENANT, WAIT, body_record, start, start_untraced};
 use fusion_core::events::EventKind;
 use fusion_core::io::FailureKind;
-use fusion_core::memory::{AckOutcome, MemorySinks};
+use fusion_core::memory::AckOutcome;
 use fusion_core::record::{Record, RecordId};
-use fusion_core::stage::{Context, Stage, StageOutput};
-use fusion_core::trace::TraceKey;
+use fusion_core::trace::{Settlement, SpanResult, TraceKey};
 
 /// A `lua` node that raises on every record, under `on_error: nak`, into one sink.
 const RAISES: &str = r#"
@@ -234,24 +232,9 @@ fn with_nothing_tracing_no_line_names_a_trace() {
     h.finish();
 }
 
-/// A test-only stage that panics, so the engine's containment path is observable.
-struct Panics;
-
-impl Stage for Panics {
-    fn process(&self, _record: Record, _ctx: &Context<'_>) -> StageOutput {
-        panic!("stage blew up");
-    }
-}
-
 #[test]
 fn a_panicking_stage_logs_a_stage_error_of_kind_panic() {
-    let sinks = MemorySinks::new();
-    let mut registry = common::registry(&sinks);
-    registry.register_stage(
-        "panics",
-        |_: &NodeConfig| -> Result<Box<dyn Stage>, ConfigError> { Ok(Box::new(Panics)) },
-    );
-    let h = start_with(
+    let h = common::start_with_panics(
         r#"
 nodes:
   - id: boom
@@ -259,13 +242,29 @@ nodes:
   - id: out
     type: sink.memory
 "#,
-        1,
-        sinks,
-        registry,
     );
 
     let probe = h.push(body_record(15, "x"));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Nak(None)));
+
+    let traces = h.traces();
+    assert_eq!(traces.len(), 1, "a panicked walk is traced");
+    let trace = &traces[0];
+    assert_eq!(trace.settlement, Settlement::Nak);
+    let spans: Vec<&str> = trace.spans.iter().map(|s| s.node.as_str()).collect();
+    assert_eq!(spans, ["boom"], "the panic unwound before the sink");
+    let boom = &trace.spans[0];
+    assert!(
+        matches!(
+            &boom.result,
+            SpanResult::Error {
+                failure: FailureKind::Panic,
+                ..
+            }
+        ),
+        "{boom:?}"
+    );
+    assert!(boom.start <= boom.end && boom.end <= trace.end, "{boom:?}");
 
     let events = h.events();
     let summary: Vec<(EventKind, &str, Option<FailureKind>)> = events

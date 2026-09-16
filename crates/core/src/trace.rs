@@ -206,6 +206,47 @@ closed_set! {
     }
 }
 
+/// What a node did with a record, with what goes with it. `L` is the route label: owned on a
+/// kept trace, borrowed from the pipeline while the walk runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpanResult<L = String> {
+    /// The stage passed the record on.
+    Pass,
+    /// The route sent it to this label.
+    Routed(L),
+    /// The stage split it into this many records.
+    Split(u64),
+    /// The stage dropped it for this reason.
+    Drop(DropReason),
+    /// The stage could not reach the state store and its node passed the record on.
+    StateErrorPass,
+    /// The sink wrote it with durable acceptance.
+    Written,
+    /// The node failed.
+    Error {
+        /// The kind of failure.
+        failure: FailureKind,
+        /// What the node said.
+        error: String,
+    },
+}
+
+impl<L> SpanResult<L> {
+    /// The `outcome` attribute this result exports as.
+    #[must_use]
+    pub const fn outcome(&self) -> SpanOutcome {
+        match self {
+            Self::Pass => SpanOutcome::Pass,
+            Self::Routed(_) => SpanOutcome::Routed,
+            Self::Split(_) => SpanOutcome::Split,
+            Self::Drop(_) => SpanOutcome::Drop,
+            Self::StateErrorPass => SpanOutcome::StateErrorPass,
+            Self::Written => SpanOutcome::Written,
+            Self::Error { .. } => SpanOutcome::Error,
+        }
+    }
+}
+
 /// One node's span in a kept trace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeSpan {
@@ -220,17 +261,7 @@ pub struct NodeSpan {
     /// When the node finished with it, before its consumers ran.
     pub end: SystemTime,
     /// What the node did.
-    pub outcome: SpanOutcome,
-    /// The drop reason, for [`SpanOutcome::Drop`].
-    pub reason: Option<DropReason>,
-    /// The failure kind, for [`SpanOutcome::Error`].
-    pub failure: Option<FailureKind>,
-    /// The route label, for [`SpanOutcome::Routed`].
-    pub label: Option<String>,
-    /// How many records left, for [`SpanOutcome::Split`].
-    pub records: Option<u64>,
-    /// The error text, for [`SpanOutcome::Error`].
-    pub error: Option<String>,
+    pub result: SpanResult,
 }
 
 /// One kept delivery of one record: its delivery span and the spans of the nodes it visited,
@@ -290,26 +321,15 @@ impl TraceSink for InMemoryTraceSink {
     }
 }
 
-/// What a node span says beyond its outcome. Owned values here were already allocated by
-/// the stage (a route label) or are built only on failure (the error text).
-#[derive(Debug)]
-pub(crate) enum Detail {
-    None,
-    Drop(DropReason),
-    Routed(String),
-    Split(u64),
-    Failure(FailureKind, String),
-}
-
 /// One node's span while the walk runs.
 #[derive(Debug)]
 struct Draft<'p> {
     node: &'p str,
     parent: Option<usize>,
     start: Instant,
-    end: Option<Instant>,
-    outcome: SpanOutcome,
-    detail: Detail,
+    /// `None` while the node runs.
+    result: Option<SpanResult<&'p str>>,
+    end: Instant,
 }
 
 /// The most drafts a buffer keeps room for between walks: a walk that split into more gives
@@ -364,41 +384,33 @@ impl<'p> TraceBuffer<'p> {
             node,
             parent,
             start,
-            end: None,
-            outcome: SpanOutcome::Pass,
-            detail: Detail::None,
+            result: None,
+            end: start,
         });
         handle
     }
 
-    /// Close the span `handle` at `end` with what the node did.
-    pub(crate) fn close(
-        &mut self,
-        handle: usize,
-        end: Instant,
-        outcome: SpanOutcome,
-        detail: Detail,
-    ) {
-        if let Some(draft) = self.drafts.get_mut(handle) {
-            draft.end = Some(end);
-            draft.outcome = outcome;
-            draft.detail = detail;
-        }
+    /// Whether this buffer takes drafts at all.
+    pub(crate) const fn tracing(&self) -> bool {
+        self.tracing
     }
 
-    /// Replace the detail of the span `handle`.
-    pub(crate) fn detail(&mut self, handle: usize, detail: Detail) {
+    /// Close the span `handle` at `end` with what the node did.
+    pub(crate) fn close(&mut self, handle: usize, end: Instant, result: SpanResult<&'p str>) {
         if let Some(draft) = self.drafts.get_mut(handle) {
-            draft.detail = detail;
+            draft.end = end;
+            draft.result = Some(result);
         }
     }
 
     /// Close every span still open, as failed with `failure`: a panic unwound past them.
     pub(crate) fn fail_open(&mut self, end: Instant, failure: FailureKind, error: &str) {
-        for draft in self.drafts.iter_mut().filter(|d| d.end.is_none()) {
-            draft.end = Some(end);
-            draft.outcome = SpanOutcome::Error;
-            draft.detail = Detail::Failure(failure, error.to_owned());
+        for draft in self.drafts.iter_mut().filter(|d| d.result.is_none()) {
+            draft.end = end;
+            draft.result = Some(SpanResult::Error {
+                failure,
+                error: error.to_owned(),
+            });
         }
     }
 
@@ -427,12 +439,11 @@ impl<'p> TraceBuffer<'p> {
             .drain(..)
             .enumerate()
             .map(|(handle, draft)| {
-                let (reason, failure, label, records, error) = match draft.detail {
-                    Detail::None => (None, None, None, None, None),
-                    Detail::Drop(reason) => (Some(reason), None, None, None, None),
-                    Detail::Routed(label) => (None, None, Some(label), None, None),
-                    Detail::Split(records) => (None, None, None, Some(records), None),
-                    Detail::Failure(kind, error) => (None, Some(kind), None, None, Some(error)),
+                // A span still open when the walk ended was left by a panic that
+                // `fail_open` did not see; it ends now, as it was.
+                let (result, end) = match draft.result {
+                    Some(result) => (result, draft.end),
+                    None => (SpanResult::Pass, now),
                 };
                 NodeSpan {
                     span_id: key.span_id(delivery, visit(handle)),
@@ -441,13 +452,18 @@ impl<'p> TraceBuffer<'p> {
                         .map_or(root, |parent| key.span_id(delivery, visit(parent))),
                     node: draft.node.to_owned(),
                     start: at(draft.start),
-                    end: at(draft.end.unwrap_or(now)),
-                    outcome: draft.outcome,
-                    reason,
-                    failure,
-                    label,
-                    records,
-                    error,
+                    end: at(end),
+                    result: match result {
+                        SpanResult::Pass => SpanResult::Pass,
+                        SpanResult::Routed(label) => SpanResult::Routed(label.to_owned()),
+                        SpanResult::Split(records) => SpanResult::Split(records),
+                        SpanResult::Drop(reason) => SpanResult::Drop(reason),
+                        SpanResult::StateErrorPass => SpanResult::StateErrorPass,
+                        SpanResult::Written => SpanResult::Written,
+                        SpanResult::Error { failure, error } => {
+                            SpanResult::Error { failure, error }
+                        }
+                    },
                 }
             })
             .collect();

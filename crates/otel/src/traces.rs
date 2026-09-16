@@ -17,11 +17,11 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use fusion_core::trace::{NodeSpan, RecordTrace, Settlement, SpanOutcome, TraceSink};
+use fusion_core::trace::{NodeSpan, RecordTrace, Settlement, SpanResult, TraceSink};
 use opentelemetry::trace::{
     SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
 };
-use opentelemetry::{InstrumentationScope, KeyValue};
+use opentelemetry::{InstrumentationScope, KeyValue, Value};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{BatchSpanProcessor, SpanData, SpanExporter, SpanProcessor};
@@ -101,67 +101,95 @@ struct Span {
     status: Status,
 }
 
-fn node_attributes(trace: &RecordTrace, span: &NodeSpan) -> Vec<KeyValue> {
-    let mut attributes = vec![
-        KeyValue::new("node", span.node.clone()),
-        KeyValue::new("outcome", span.outcome.as_str()),
-        KeyValue::new("record.id", trace.record_id.to_string()),
-        KeyValue::new("tenant", trace.tenant.to_string()),
-    ];
-    if let Some(reason) = span.reason {
-        attributes.push(KeyValue::new("reason", reason.as_str()));
-    }
-    if let Some(failure) = span.failure {
-        attributes.push(KeyValue::new("failure", failure.as_str()));
-    }
-    if let Some(label) = &span.label {
-        attributes.push(KeyValue::new("label", label.clone()));
-    }
-    if let Some(records) = span.records {
-        attributes.push(KeyValue::new("records", saturating_i64(records)));
-    }
-    attributes
+/// The attributes of the node span `span`, after the ones every span of the trace shares.
+/// Returns them with the span's status.
+fn node_attributes(shared: &[KeyValue], span: NodeSpan) -> (Vec<KeyValue>, Status) {
+    let mut attributes = Vec::with_capacity(shared.len() + 3);
+    attributes.extend_from_slice(shared);
+    attributes.push(KeyValue::new("node", span.node));
+    attributes.push(KeyValue::new("outcome", span.result.outcome().as_str()));
+    let status = match span.result {
+        SpanResult::Pass | SpanResult::StateErrorPass | SpanResult::Written => Status::Unset,
+        SpanResult::Routed(label) => {
+            attributes.push(KeyValue::new("label", label));
+            Status::Unset
+        }
+        SpanResult::Split(records) => {
+            attributes.push(KeyValue::new("records", saturating_i64(records)));
+            Status::Unset
+        }
+        SpanResult::Drop(reason) => {
+            attributes.push(KeyValue::new("reason", reason.as_str()));
+            Status::Unset
+        }
+        SpanResult::Error { failure, error } => {
+            attributes.push(KeyValue::new("failure", failure.as_str()));
+            Status::error(error)
+        }
+    };
+    (attributes, status)
 }
 
 impl TraceSink for OtlpTraceSink {
     fn export(&self, trace: RecordTrace) {
-        let trace_id = TraceId::from(trace.trace_id.get());
-        for span in &trace.spans {
-            let status = if span.outcome == SpanOutcome::Error {
-                Status::error(span.error.clone().unwrap_or_default())
-            } else {
-                Status::Unset
-            };
+        let RecordTrace {
+            trace_id,
+            span_id,
+            record_id,
+            tenant,
+            delivery_count,
+            settlement,
+            start,
+            end,
+            spans,
+        } = trace;
+        let trace_id = TraceId::from(trace_id.get());
+        // Every span carries these; the values are reference-counted, so each span clones a
+        // pointer, not the text.
+        let shared = [
+            KeyValue::new(
+                "record.id",
+                Value::from(Arc::<str>::from(record_id.to_string())),
+            ),
+            KeyValue::new("tenant", Value::from(tenant)),
+        ];
+        for span in spans {
+            let id = span.span_id.get();
+            let parent = SpanId::from(span.parent_span_id.get());
+            let name = Cow::Owned(span.node.clone());
+            let (start, end) = (span.start, span.end);
+            let (attributes, status) = node_attributes(&shared, span);
             self.processor.on_end(self.span(
                 trace_id,
                 Span {
-                    id: span.span_id.get(),
-                    parent: SpanId::from(span.parent_span_id.get()),
-                    name: Cow::Owned(span.node.clone()),
-                    start: span.start,
-                    end: span.end,
-                    attributes: node_attributes(&trace, span),
+                    id,
+                    parent,
+                    name,
+                    start,
+                    end,
+                    attributes,
                     status,
                 },
             ));
         }
-        let status = match trace.settlement {
+        let status = match settlement {
             Settlement::Ack => Status::Unset,
             Settlement::Nak => Status::error("nak"),
         };
+        let [record_id, tenant] = shared;
         self.processor.on_end(self.span(
             trace_id,
             Span {
-                id: trace.span_id.get(),
+                id: span_id.get(),
                 parent: SpanId::INVALID,
                 name: Cow::Borrowed("delivery"),
-                start: trace.start,
-                end: trace.end,
+                start,
+                end,
                 attributes: vec![
-                    KeyValue::new("record.id", trace.record_id.to_string()),
-                    KeyValue::new("tenant", trace.tenant.to_string()),
-                    KeyValue::new("delivery_count", saturating_i64(trace.delivery_count)),
-                    KeyValue::new("settlement", trace.settlement.as_str()),
+                    record_id,
+                    tenant,
+                    KeyValue::new("delivery_count", saturating_i64(delivery_count)),
+                    KeyValue::new("settlement", settlement.as_str()),
                 ],
                 status,
             },

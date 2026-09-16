@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::engine::Engine;
 use fusion_core::events::{Event, EventKind, InMemoryEventLog};
 use fusion_core::memory::{AckProbe, MemoryInput, MemorySinks, MemorySource, MemoryStateStore};
@@ -18,6 +19,7 @@ use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_core::signals::Signals;
+use fusion_core::stage::{Context, Stage, StageOutput};
 use fusion_core::state::StateStoreFactory;
 use fusion_core::trace::{InMemoryTraceSink, RecordTrace, TraceSampling};
 use fusion_pipeline::default_registry;
@@ -131,6 +133,27 @@ fn launch(
         event_log,
         trace_sink,
     }
+}
+
+/// A test-only stage that panics on every record, so the engine's containment path is
+/// observable. Registered as `panics` by [`start_with_panics`].
+pub struct Panics;
+
+impl Stage for Panics {
+    fn process(&self, _record: Record, _ctx: &Context<'_>) -> StageOutput {
+        panic!("stage blew up");
+    }
+}
+
+/// As [`start`] with one worker, and the `panics` stage type registered.
+pub fn start_with_panics(yaml: &str) -> Harness {
+    let sinks = MemorySinks::new();
+    let mut registry = registry(&sinks);
+    registry.register_stage(
+        "panics",
+        |_: &NodeConfig| -> Result<Box<dyn Stage>, ConfigError> { Ok(Box::new(Panics)) },
+    );
+    start_with(yaml, 1, sinks, registry)
 }
 
 /// A record with `id` and `body`, the shape the dedupe tests push. It carries no tenant and

@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use fusion_core::io::FailureKind;
 use fusion_core::record::RecordId;
 use fusion_core::stage::DropReason;
-use fusion_core::trace::{NodeSpan, RecordTrace, Settlement, SpanOutcome, TraceKey, TraceSink};
+use fusion_core::trace::{NodeSpan, RecordTrace, Settlement, SpanResult, TraceKey, TraceSink};
 use fusion_otel::OtlpTraceSink;
 use opentelemetry::trace::{SpanId, Status, TraceId};
 use opentelemetry::{Key, Value};
@@ -38,34 +38,37 @@ fn at(millis: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_millis(1_000_000 + millis)
 }
 
-fn node(key: TraceKey, visit: u32, parent: u32, name: &str, outcome: SpanOutcome) -> NodeSpan {
+fn node(key: TraceKey, visit: u32, parent: u32, name: &str, result: SpanResult) -> NodeSpan {
     NodeSpan {
         span_id: key.span_id(2, visit),
         parent_span_id: key.span_id(2, parent),
         node: name.to_owned(),
         start: at(u64::from(visit) * 10),
         end: at(u64::from(visit) * 10 + 5),
-        outcome,
-        reason: None,
-        failure: None,
-        label: None,
-        records: None,
-        error: None,
+        result,
     }
 }
 
 #[test]
 fn a_kept_trace_exports_a_delivery_span_and_a_span_per_node() {
     let key = TraceKey::new(RecordId(9), "acme");
-    let dropped = NodeSpan {
-        reason: Some(DropReason::Filter),
-        ..node(key, 1, 0, "keep_errors", SpanOutcome::Drop)
-    };
-    let failed = NodeSpan {
-        failure: Some(FailureKind::SinkError),
-        error: Some("downstream is gone".to_owned()),
-        ..node(key, 2, 1, "out", SpanOutcome::Error)
-    };
+    let dropped = node(
+        key,
+        1,
+        0,
+        "keep_errors",
+        SpanResult::Drop(DropReason::Filter),
+    );
+    let failed = node(
+        key,
+        2,
+        1,
+        "out",
+        SpanResult::Error {
+            failure: FailureKind::SinkError,
+            error: "downstream is gone".to_owned(),
+        },
+    );
     let spans = export(RecordTrace {
         trace_id: key.trace_id(),
         span_id: key.delivery_span_id(2),
@@ -131,14 +134,14 @@ fn a_kept_trace_exports_a_delivery_span_and_a_span_per_node() {
 #[test]
 fn an_acked_delivery_is_not_an_error_and_names_its_label_and_split() {
     let key = TraceKey::new(RecordId(3), "acme");
-    let routed = NodeSpan {
-        label: Some("linux".to_owned()),
-        ..node(key, 1, 0, "by_format", SpanOutcome::Routed)
-    };
-    let split = NodeSpan {
-        records: Some(4),
-        ..node(key, 2, 1, "lines", SpanOutcome::Split)
-    };
+    let routed = node(
+        key,
+        1,
+        0,
+        "by_format",
+        SpanResult::Routed("linux".to_owned()),
+    );
+    let split = node(key, 2, 1, "lines", SpanResult::Split(4));
     let spans = export(RecordTrace {
         trace_id: key.trace_id(),
         span_id: key.delivery_span_id(2),

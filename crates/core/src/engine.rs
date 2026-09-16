@@ -33,7 +33,7 @@ use crate::record::Record;
 use crate::signals::Signals;
 use crate::stage::{DropReason, StageEnvironment, StageOutput};
 use crate::state::{StateError, StateErrorPolicy, StateStore, StateStoreFactory};
-use crate::trace::{Detail, Settlement, SpanOutcome, TraceBuffer, TraceContext, TraceKey};
+use crate::trace::{Settlement, SpanResult, TraceBuffer, TraceContext, TraceKey};
 
 /// Envelopes buffered between the source and the workers, per worker.
 const INTAKE_DEPTH_PER_WORKER: usize = 64;
@@ -254,8 +254,10 @@ impl<'p> Walk<'p, '_> {
             self.spans.close(
                 span,
                 ended,
-                SpanOutcome::Error,
-                Detail::Failure(kind, error),
+                SpanResult::Error {
+                    failure: kind,
+                    error,
+                },
             );
         }
     }
@@ -512,8 +514,7 @@ impl<'p> Walker<'p> {
                     Ok(bytes) => {
                         metrics.records_out(&labels, 1);
                         metrics.bytes_out(&labels, bytes);
-                        walk.spans
-                            .close(span, ended, SpanOutcome::Written, Detail::None);
+                        walk.spans.close(span, ended, SpanResult::Written);
                     }
                     Err(err) => {
                         metrics.sink_publish_error(&labels);
@@ -539,8 +540,7 @@ impl<'p> Walker<'p> {
                 match output {
                     StageOutput::Pass(record) => {
                         metrics.records_out(&labels, 1);
-                        walk.spans
-                            .close(span, ended, SpanOutcome::Pass, Detail::None);
+                        walk.spans.close(span, ended, SpanResult::Pass);
                         self.fan_out(consumers(None), Arc::new(record), walk, Some(span));
                     }
                     // The stage could not reach the store and hands the record back. The
@@ -550,12 +550,7 @@ impl<'p> Walker<'p> {
                     StageOutput::StateError { record, error } => match stage.on_state_error() {
                         StateErrorPolicy::Pass => {
                             metrics.records_out(&labels, 1);
-                            walk.spans.close(
-                                span,
-                                ended,
-                                SpanOutcome::StateErrorPass,
-                                Detail::None,
-                            );
+                            walk.spans.close(span, ended, SpanResult::StateErrorPass);
                             self.fan_out(consumers(None), Arc::new(record), walk, Some(span));
                         }
                         StateErrorPolicy::Nak => {
@@ -565,16 +560,14 @@ impl<'p> Walker<'p> {
                     StageOutput::Split(records) => {
                         let count = records.len() as u64;
                         metrics.records_out(&labels, count);
-                        walk.spans
-                            .close(span, ended, SpanOutcome::Split, Detail::Split(count));
+                        walk.spans.close(span, ended, SpanResult::Split(count));
                         for record in records {
                             self.fan_out(consumers(None), Arc::new(record), walk, Some(span));
                         }
                     }
                     StageOutput::Drop(reason) => {
                         metrics.dropped(&labels, reason);
-                        walk.spans
-                            .close(span, ended, SpanOutcome::Drop, Detail::Drop(reason));
+                        walk.spans.close(span, ended, SpanResult::Drop(reason));
                     }
                     StageOutput::Routed(label, record) => {
                         metrics.records_out(&labels, 1);
@@ -590,13 +583,13 @@ impl<'p> Walker<'p> {
                             );
                             return;
                         }
-                        walk.spans
-                            .close(span, ended, SpanOutcome::Routed, Detail::None);
+                        if walk.spans.tracing() {
+                            // The pipeline's own copy of the label, found only when tracing:
+                            // the span holds it before the branch runs, at no allocation.
+                            let declared = dag.label(index, &label).unwrap_or_default();
+                            walk.spans.close(span, ended, SpanResult::Routed(declared));
+                        }
                         self.fan_out(targets, Arc::new(record), walk, Some(span));
-                        // The label is borrowed by the targets until the branch is done; it
-                        // was allocated by the stage, so the span takes it rather than a
-                        // copy.
-                        walk.spans.detail(span, Detail::Routed(label));
                     }
                     StageOutput::Error(err) => {
                         walk.fail(at, ended, FailureKind::StageError, &err);

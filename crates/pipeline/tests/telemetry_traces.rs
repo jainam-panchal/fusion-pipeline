@@ -14,7 +14,7 @@ use fusion_core::memory::AckOutcome;
 use fusion_core::metrics::CounterMetric;
 use fusion_core::record::{Record, RecordId};
 use fusion_core::stage::DropReason;
-use fusion_core::trace::{NodeSpan, Settlement, SpanOutcome, TraceKey, TraceSampling};
+use fusion_core::trace::{NodeSpan, Settlement, SpanResult, TraceKey, TraceSampling};
 
 /// A pass-through filter feeding two sinks, `good` then `bad`.
 const FAN_OUT: &str = r#"
@@ -102,14 +102,14 @@ fn a_failing_record_is_traced_with_a_span_per_node_on_both_branches() {
     assert_eq!(filter.parent_span_id, trace.span_id);
     assert_eq!(good.parent_span_id, filter.span_id);
     assert_eq!(bad.parent_span_id, filter.span_id);
-    assert_eq!(filter.outcome, SpanOutcome::Pass);
-    assert_eq!(good.outcome, SpanOutcome::Written);
-    assert_eq!(bad.outcome, SpanOutcome::Error);
-    assert_eq!(bad.failure, Some(FailureKind::SinkError));
+    assert_eq!(filter.result, SpanResult::Pass);
+    assert_eq!(good.result, SpanResult::Written);
     assert!(
-        bad.error
-            .as_deref()
-            .is_some_and(|e| e.contains("set to fail")),
+        matches!(
+            &bad.result,
+            SpanResult::Error { failure: FailureKind::SinkError, error }
+                if error.contains("set to fail")
+        ),
         "{bad:?}"
     );
 
@@ -147,6 +147,10 @@ fn about_one_percent_of_passing_records_are_traced_and_always_the_same_ones() {
         h.finish();
         ids
     };
+    // The ids the default share takes; `keeps` only picks them, the traces are the engine's.
+    let sampled: BTreeSet<u64> = (0..10_000)
+        .filter(|&id| TraceSampling::default().keeps(key(id)))
+        .collect();
 
     let first = kept();
     assert!(
@@ -154,7 +158,55 @@ fn about_one_percent_of_passing_records_are_traced_and_always_the_same_ones() {
         "kept {} of 10000",
         first.len()
     );
+    assert_eq!(first, sampled, "exactly the sampled ids are traced");
     assert_eq!(kept(), first);
+}
+
+#[test]
+fn a_passing_record_is_traced_only_when_its_id_is_sampled() {
+    let h = start(TO_SINK, 1);
+    let unsampled = unsampled_id(400);
+    let sampled = (400..)
+        .find(|&id| TraceSampling::default().keeps(key(id)))
+        .expect("some id is sampled");
+
+    for id in [unsampled, sampled] {
+        assert_eq!(
+            h.push(body_record(id, "x")).wait(WAIT),
+            Some(AckOutcome::Ack)
+        );
+    }
+
+    let traced: Vec<u64> = h.traces().iter().map(|t| t.record_id.0).collect();
+    assert_eq!(traced, [sampled]);
+    h.finish();
+}
+
+#[test]
+fn a_passing_redelivery_of_record_zero_under_two_tenants_is_two_valid_traces() {
+    let h = start(TO_SINK, 1);
+
+    for tenant in ["acme", "beta"] {
+        let probe = h.source.push_arrival(
+            body_record(0, "x"),
+            fusion_core::meta::Arrival {
+                delivery_count: 2,
+                ..common::arrival_as(tenant)
+            },
+        );
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    }
+
+    let traces = h.traces();
+    assert_eq!(traces.len(), 2);
+    assert!(traces.iter().all(|t| t.settlement == Settlement::Ack));
+    assert!(
+        traces
+            .iter()
+            .all(|t| t.trace_id.get() != 0 && t.span_id.get() != 0)
+    );
+    assert_ne!(traces[0].trace_id, traces[1].trace_id);
+    h.finish();
 }
 
 #[test]
@@ -200,11 +252,9 @@ fn a_routed_span_names_its_label_and_a_drop_span_its_reason() {
     let trace = &traces[0];
     assert_eq!(trace.settlement, Settlement::Ack);
     let (route, filter) = (span(&trace.spans, "by_body"), span(&trace.spans, "only_y"));
-    assert_eq!(route.outcome, SpanOutcome::Routed);
-    assert_eq!(route.label.as_deref(), Some("err"));
+    assert_eq!(route.result, SpanResult::Routed("err".to_owned()));
     assert_eq!(filter.parent_span_id, route.span_id);
-    assert_eq!(filter.outcome, SpanOutcome::Drop);
-    assert_eq!(filter.reason, Some(DropReason::Filter));
+    assert_eq!(filter.result, SpanResult::Drop(DropReason::Filter));
     assert_eq!(trace.spans.len(), 2, "the sink was never reached");
     h.finish();
 }
@@ -308,5 +358,41 @@ nodes:
         ),
         0
     );
+    h.finish();
+}
+
+#[test]
+fn a_panic_downstream_of_a_route_keeps_the_route_label() {
+    let h = common::start_with_panics(
+        r#"
+nodes:
+  - id: by_body
+    type: route
+    routes:
+      err: body == "x"
+    default: drop
+  - id: boom
+    type: panics
+    from: by_body.err
+  - id: out
+    type: sink.memory
+    from: boom
+"#,
+    );
+
+    let probe = h.push(body_record(unsampled_id(500), "x"));
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Nak(None)));
+
+    let traces = h.traces();
+    assert_eq!(traces.len(), 1);
+    let route = span(&traces[0].spans, "by_body");
+    assert_eq!(route.result, SpanResult::Routed("err".to_owned()));
+    assert!(matches!(
+        span(&traces[0].spans, "boom").result,
+        SpanResult::Error {
+            failure: FailureKind::Panic,
+            ..
+        }
+    ));
     h.finish();
 }
