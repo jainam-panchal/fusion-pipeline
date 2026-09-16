@@ -44,7 +44,8 @@ pub(crate) fn hash_key_fields(fields: &[FieldPath], record: &Record) -> u64 {
 }
 
 /// One key field as canonical JSON, so equal values hash equal whatever their source.
-fn write_canonical(out: &mut String, value: FieldValue<'_>) {
+/// `edit`'s `hash` uses it for numbers and bools, so the two agree on a number's text.
+pub(crate) fn write_canonical(out: &mut String, value: FieldValue<'_>) {
     match value {
         FieldValue::Null => out.push_str("null"),
         FieldValue::Bool(b) => out.push_str(if b { "true" } else { "false" }),
