@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fusion_core::meta::{Meta, unix_nanos_now};
+use fusion_core::meta::{Meta, MetaField, unix_nanos_now};
 use fusion_core::metrics::LuaErrorKind;
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, State};
@@ -529,8 +529,11 @@ fn meta_metatable(lua: &mlua::Lua) -> mlua::Result<Table> {
             let LuaValue::String(key) = key else {
                 return Ok(LuaValue::Nil);
             };
+            let Some(field) = MetaField::parse(&key.to_str()?) else {
+                return Ok(LuaValue::Nil);
+            };
             let current = current(lua)?;
-            convert::meta_value(lua, &current.meta, &key.to_str()?)
+            convert::meta_value(lua, &current.meta, field)
         })?,
     )?;
     metatable.raw_set(
@@ -548,8 +551,11 @@ fn meta_metatable(lua: &mlua::Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, _: Table| {
             let current = current(lua)?;
             let snapshot = lua.create_table()?;
-            for key in convert::META_KEYS {
-                snapshot.raw_set(key, convert::meta_value(lua, &current.meta, key)?)?;
+            for field in MetaField::ALL {
+                snapshot.raw_set(
+                    field.as_str(),
+                    convert::meta_value(lua, &current.meta, field)?,
+                )?;
             }
             let next: Function = lua.globals().raw_get("next")?;
             Ok((next, snapshot, LuaValue::Nil))
