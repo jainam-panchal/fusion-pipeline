@@ -38,6 +38,10 @@ impl OtlpEventLog {
 
     /// As [`OtlpEventLog::with_exporter`], with a queue of `max_queue` records, which is also
     /// the most records one export carries. A full queue drops the record.
+    ///
+    /// For tests that need a queue of a known size; a deployment sizes it through the
+    /// environment.
+    #[doc(hidden)]
     #[must_use]
     pub fn with_queue(
         exporter: impl LogExporter + 'static,
