@@ -29,9 +29,11 @@ cargo clippy --workspace --all-targets
 ## Running against NATS
 
 `deploy/compose.yaml` brings up JetStream plus a one-shot `nats-init` that creates the
-`LOGS` (`logs.>`) and `PROCESSED` (`processed.>`) streams and the `pipeline` pull consumer
-(explicit ack, `ack_wait` 30s, `max_deliver` 5). The pipeline never creates streams itself
-and fails fast at startup when the server, stream or consumer is missing.
+`LOGS` (`logs.>`), `PROCESSED` (`processed.>`) and `DLQ` (`dlq.>`) streams and the
+`pipeline` pull consumer (explicit ack, `ack_wait` 30s, `max_deliver` 5, no `backoff`). The
+pipeline never creates streams itself and fails fast at startup when the server, stream or
+consumer is missing, when the consumer has no `max_deliver` or sets `backoff`, and when no
+stream captures every `dlq.<tenant>` subject.
 
 ```sh
 docker compose -f deploy/compose.yaml up -d
@@ -54,7 +56,27 @@ subject names one, wins over the header). Only a subject of the form
 config says otherwise, so `processed.logs` names none. A sink
 that cannot get its `PubAck` (delete `PROCESSED` to see it) makes the engine nak the source
 message and JetStream redeliver it. `NATS_URL` overrides the `url` of the source and every
-sink. The compose pipeline has a `dedupe` node, so it also needs the compose Dragonfly:
+sink.
+
+A message that fails its last delivery is dead-lettered: the source publishes it as it
+arrived (payload and the producer's headers, minus any `Nats-*`) to `dlq.{tenant}`, waits
+for the `PubAck` and terminates it. The dead letter carries `Fusion-Dlq-Reason` (the node that
+failed and its error, `source` for a payload that is not a record or a record without an
+`id`), `Fusion-Dlq-Subject` (where it arrived), the tenant and ingestion time headers, so
+republishing it to its subject replays it with the same `Meta`, and `Nats-Msg-Id`
+(`{stream}:{sequence}`), so a second dead letter of one message is dropped. It counts
+`dlq_total{tenant, stage, reason}`, `reason` being `stage_error`, `state_error`,
+`sink_error`, `panic`, `missing_id` or `undecodable`. `DLQ` is one stream with a subject per
+tenant, capped per subject; `dlq_prefix` on the source moves the subjects (default `dlq`).
+When the publish fails four times the message is not terminated: its last nak has no delay,
+JetStream gives up on it at once, `dlq_publish_errors_total` counts it, and the message stays
+in `LOGS` under the stream sequence the pipeline logs.
+
+```sh
+nats pub logs.acme.syslog '{"body": "no id"}'   # fails every delivery
+nats sub 'dlq.>' --count 1                       # about 15 s later, with Fusion-Dlq-Reason
+```
+ The compose pipeline has a `dedupe` node, so it also needs the compose Dragonfly:
 `DRAGONFLY_URL` names it (default `redis://127.0.0.1:6379`), and a config with no stateful
 node never touches it. `deploy/nats-smoke.sh` runs these checks end to end and exits
 non-zero on any failure.
@@ -302,8 +324,8 @@ the worker's VM as a whole, upvalues included), a script that raises is `runtime
 counts on `lua_errors_total{kind}` and then `on_error` decides: `pass` forwards the record
 as it came in, `drop` drops it with reason `lua_error`, `nak` fails it so JetStream
 redelivers. `nak` is for failures a retry can cure; a `runtime` or `output` error repeats on
-redelivery until the consumer's `max_deliver`, so under `nak` a bad script poisons its
-records until the dead-letter queue (#10) takes them. The next record is served either way:
+redelivery until the consumer's `max_deliver`, so under `nak` a bad script sends its
+records to the dead-letter queue. The next record is served either way:
 the VM survives a budget or runtime error, and a `memory` error rebuilds it, upvalues
 included, since a script whose upvalues grow would otherwise fail every record from then on.
 `pcall` and `xpcall` catch the script's own errors and nothing else: a budget or cap trip
