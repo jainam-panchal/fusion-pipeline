@@ -20,6 +20,7 @@ use fusion_state::Dragonfly;
 pub fn default_registry() -> Registry {
     let mut registry = Registry::new();
     fusion_stages::register_all(&mut registry);
+    fusion_lua::register(&mut registry);
     registry
 }
 

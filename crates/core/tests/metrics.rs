@@ -2,7 +2,7 @@
 //! reasons that label `records_dropped_total`. Nothing else is observable below the trait
 //! boundary; what the engine emits is tested through it in the pipeline crate.
 
-use fusion_core::metrics::{EditCause, EditOp, Metric, MetricKind};
+use fusion_core::metrics::{EditCause, EditOp, LuaErrorKind, Metric, MetricKind};
 use fusion_core::stage::DropReason;
 
 /// Spec, Telemetry: the drop reasons are exactly this set, in this spelling.
@@ -79,4 +79,10 @@ fn edit_label_values_are_exactly_the_spec_sets() {
     assert_eq!(ops, ["set", "rename", "copy", "hash", "delete"]);
     let causes: Vec<&str> = EditCause::ALL.iter().map(|c| c.as_str()).collect();
     assert_eq!(causes, ["absent", "type"]);
+}
+
+#[test]
+fn lua_error_kinds_are_exactly_the_spec_set() {
+    let kinds: Vec<&str> = LuaErrorKind::ALL.iter().map(|k| k.as_str()).collect();
+    assert_eq!(kinds, ["instructions", "memory", "runtime", "output"]);
 }

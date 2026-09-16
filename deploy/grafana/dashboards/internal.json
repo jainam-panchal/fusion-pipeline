@@ -1509,7 +1509,7 @@
           "id": 15,
           "type": "timeseries",
           "title": "Lua errors by kind",
-          "description": "Populated once the Lua ticket (#8) lands.",
+          "description": "lua_errors_total by kind, every lua node summed: instructions (budget tripped), memory (cap tripped), runtime (the script raised), output (the returned record was refused). What happened to those records is the node's on_error: pass forwards them, drop shows them under lua_error in the stage rows, nak shows them as errors. The compose pipeline's split_lines node runs with pass.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1529,7 +1529,7 @@
                 "showPoints": "never"
               },
               "min": 0,
-              "noValue": "no Lua stage yet (#8)"
+              "noValue": "no lua error yet"
             },
             "overrides": []
           },
