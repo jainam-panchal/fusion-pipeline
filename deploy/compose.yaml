@@ -6,6 +6,13 @@
 # the pipeline itself never creates them (spec: the sink stream is pre-created by compose).
 # Re-running it is safe: every command is skipped when its object already exists.
 #
+# Dead letters: a message that fails its fifth delivery is published to `dlq.{tenant}` and
+# terminated. `DLQ` is one stream for every tenant, one subject each; a consumer filtered on
+# `dlq.acme` reads one tenant's. Its limits are shared, so `--max-msgs-per-subject` keeps a
+# noisy tenant from pushing out another's dead letters, `--dupe-window` drops a message
+# dead-lettered twice, and `--max-age` keeps it from growing without bound. The consumer
+# sets no `backoff`: the pipeline sets each redelivery delay on its nak.
+#
 # State: the pipeline's stateful nodes keep their windows in `dragonfly`, reached through
 # `DRAGONFLY_URL`; the pipeline opens one connection per worker at start and fails fast when
 # the store is unreachable.
@@ -56,6 +63,10 @@ services:
         nats stream info PROCESSED >/dev/null 2>&1 \
           || nats stream add PROCESSED --subjects 'processed.>' --storage file \
                --retention limits --defaults
+        nats stream info DLQ >/dev/null 2>&1 \
+          || nats stream add DLQ --subjects 'dlq.>' --storage file --retention limits \
+               --discard old --dupe-window 2m --max-age 7d --max-msgs-per-subject 100000 \
+               --defaults
         nats consumer info LOGS pipeline >/dev/null 2>&1 \
           || nats consumer add LOGS pipeline --pull --ack explicit --wait 30s \
                --max-deliver 5 --deliver all --replay instant --defaults

@@ -497,7 +497,7 @@
       "id": 5,
       "type": "timeseries",
       "title": "Is anything failing?  (errors, naks, redeliveries)",
-      "description": "Flat at zero is healthy. errored counts a stage error or a sink without PubAck once, under its node; pipeline headers ignored counts a Fusion-* header the source could not parse (the message is still walked); each failed record naks; JetStream redelivers up to max_deliver, then the dead-letter queue (#10) takes it.",
+      "description": "Flat at zero is healthy. errored counts a stage error or a sink without PubAck once, under its node; pipeline headers ignored counts a Fusion-* header the source could not parse (the message is still walked); each failed record naks; JetStream redelivers up to max_deliver, and a record that fails its last delivery is dead-lettered to dlq.{tenant} and terminated. dead-letter publish failed: the last delivery could not reach the DLQ either; the message is left in its stream (see the stream sequence in the pipeline log). Internals shows dead letters by stage and reason.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -627,6 +627,15 @@
           "expr": "(sum(rate(source_invalid_headers_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
           "legendFormat": "pipeline headers ignored",
           "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(rate(dlq_publish_errors_total{tenant=~\"$tenant\"}[1m]))) or vector(0)",
+          "legendFormat": "dead-letter publish failed",
+          "refId": "F"
         }
       ]
     },
@@ -1888,6 +1897,127 @@
               "expr": "process_thread_count{job=\"fusion-pipeline\"}",
               "legendFormat": "{{instance}}",
               "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "Dead letters by stage and reason",
+          "description": "dlq_total by the node that failed (source: before any node ran) and the kind of failure: stage_error, state_error, sink_error, panic (dev builds only), missing_id, undecodable. Each is a message that failed every delivery, now on dlq.{tenant} with a Fusion-Dlq-Reason header, and terminated.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 79
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 12,
+                "showPoints": "never"
+              },
+              "min": 0,
+              "noValue": "no dead letter yet"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (stage, reason) (rate(dlq_total{tenant=~\"$tenant\"}[1m]))",
+              "legendFormat": "{{reason}} @ {{stage}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 23,
+          "type": "timeseries",
+          "title": "Dead-letter publish time (p50 / p99)",
+          "description": "dlq_publish_duration_seconds: one dead letter from the first publish to its PubAck or the last failed retry, retries included. This long, a worker (or, for an undecodable payload, the source) was held on a message's last delivery.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 79
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 12,
+                "showPoints": "never"
+              },
+              "min": 0,
+              "noValue": "no dead letter yet"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "histogram_quantile(0.5, sum by (le) (rate(dlq_publish_duration_seconds_bucket{tenant=~\"$tenant\"}[1m])))",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(dlq_publish_duration_seconds_bucket{tenant=~\"$tenant\"}[1m])))",
+              "legendFormat": "p99",
+              "refId": "B"
             }
           ]
         }

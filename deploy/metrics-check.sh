@@ -9,13 +9,15 @@
 #      redact node masks, one with a non-numeric http.status the lua node raises on, one
 #      with a malformed pipeline header, one record without an id and one sink failure;
 #   3. every metric with a producer is in Prometheus with the labels the spec gives it;
-#   4. the `reason` values seen on records_dropped_total are within the spec's closed set;
+#   4. the `reason` values seen on records_dropped_total and dlq_total are within the spec's
+#      closed sets;
 #   5. the NATS exporter reports JetStream consumer pending, redelivered and ack floor;
 #   6. every pipeline series carries the instance id, and the pipeline, NATS and Dragonfly
 #      each report their own CPU and resident memory;
 #   7. Grafana serves the provisioned internal dashboard.
-# The dead-letter metrics have no producer until #10; they are reported as pending, not
-# required.
+# The record without an id fails every delivery and is dead-lettered after the fifth, about
+# 15 s after it is published, which is what dlq_total and dlq_publish_duration_seconds
+# show; no dead-letter publish fails, so dlq_publish_errors_total is reported as pending.
 # Exits non-zero on the first failure. Needs docker compose, the `nats` CLI, curl and jq.
 set -euo pipefail
 
@@ -65,6 +67,7 @@ done
 
 step "2. traffic: $RECORDS records, one repeat (deduped), one TRACE (filtered), one the lua node raises on, one with a malformed pipeline header, one without an id, one sink failure"
 nats stream purge LOGS -f >/dev/null
+nats stream purge DLQ -f >/dev/null
 # Distinct bodies, so the dedupe node lets every one of them through.
 nats pub logs.acme.syslog \
     "{\"id\": {{Count}}, \"severity_text\": \"ERROR\", \"body\": \"disk full {{Count}}\", \"observed_time_unix_nano\": {{UnixNano}}}" \
@@ -78,6 +81,7 @@ nats pub logs.acme.syslog '{"id": 1000003, "body": "bad status", "attributes": {
 # source_invalid_headers_total, and the record is still walked.
 nats pub logs.acme.syslog '{"id": 1000004, "body": "bad header"}' \
     -H 'Fusion-Ingestion-Time:soon' -H 'Fusion-Ingestion-Time-Kind:reported' >/dev/null
+# No id: nakked on every delivery, then dead-lettered to dlq.acme and terminated.
 nats pub logs.acme.syslog '{"body": "no id"}' >/dev/null
 # Sink failure: the PROCESSED stream is gone, so the write gets no PubAck, the source
 # message is nakked and JetStream redelivers it; nats-init recreates the stream.
@@ -118,14 +122,16 @@ SPEC_METRICS=(
     'sink_publish_duration_seconds_bucket{tenant="acme",stage="out"}'
     'sink_publish_errors_total{tenant="acme",stage="out"}'
     'pipeline_end_to_end_seconds_bucket{tenant="acme"}'
+    'dlq_total{tenant="acme",stage="source",reason="missing_id"}'
+    'dlq_publish_duration_seconds_bucket{tenant="acme"}'
 )
-# Named in the spec, emitted by a stage that does not exist yet (#10 dead-letter queue).
-# Reported, not required, until its ticket lands. `state_errors_total` has a producer but a
-# healthy run gives it nothing to count, and so do the `regex_limit`, `lua_drop` and
-# `lua_error` drop reasons: no pattern in deploy/pipeline.yaml trips a limit on this traffic,
-# the lua node returns nil for nothing, and its `on_error` is `pass`.
+# Named in the spec, with a producer, but a healthy run gives them nothing to count:
+# `state_errors_total` needs a store failure and `dlq_publish_errors_total` a dead-letter
+# publish that fails. So do the `regex_limit`, `lua_drop` and `lua_error` drop reasons: no
+# pattern in deploy/pipeline.yaml trips a limit on this traffic, the lua node returns nil for
+# nothing, and its `on_error` is `pass`.
 PENDING_METRICS=(
-    state_errors_total dlq_total
+    state_errors_total dlq_publish_errors_total
 )
 for expr in "${SPEC_METRICS[@]}"; do
     wait_for 30 "$expr" prom_has "$expr"
@@ -135,13 +141,23 @@ for name in "${PENDING_METRICS[@]}"; do
     if prom_has "$name"; then echo "present: $name"; else echo "pending: $name (nothing to count in this run, or no producer yet)"; fi
 done
 
-step "4. records_dropped_total reasons within the closed set"
+step "4. records_dropped_total and dlq_total reasons within the closed sets"
 CLOSED_SET="filter route_default_drop sample dedupe lua_drop lua_error regex_limit state_error invalid_record missing_id edit_unapplied"
 seen=$(curl -sf --get "$PROM/api/v1/label/reason/values" --data-urlencode 'match[]=records_dropped_total' | jq -r '.data[]')
 for reason in $seen; do
     [[ " $CLOSED_SET " == *" $reason "* ]] || fail "reason \`$reason\` is not in the spec's closed set"
     echo "reason: $reason"
 done
+
+DLQ_REASONS="stage_error state_error sink_error panic missing_id undecodable"
+seen=$(curl -sf --get "$PROM/api/v1/label/reason/values" --data-urlencode 'match[]=dlq_total' | jq -r '.data[]')
+for reason in $seen; do
+    [[ " $DLQ_REASONS " == *" $reason "* ]] || fail "dlq reason \`$reason\` is not in the spec's closed set"
+    echo "dlq reason: $reason"
+done
+[[ "$(nats stream info DLQ --json | jq -r '.state.messages')" -ge 1 ]] \
+    || fail "the record without an id is not on the DLQ stream"
+echo "DLQ stream messages: $(nats stream info DLQ --json | jq -r '.state.messages')"
 
 step "5. NATS exporter: JetStream consumer pending, redelivered, ack floor"
 for name in jetstream_consumer_num_pending jetstream_consumer_num_redelivered jetstream_consumer_ack_floor_stream_seq; do
