@@ -44,6 +44,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::key_hash::write_canonical;
+use source::{Source, Unapplied};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -108,30 +109,57 @@ enum Op {
     Delete { fields: Vec<FieldPath> },
 }
 
-/// A path an op reads (for `set`, the field it writes), with its `field` label for
-/// `edit_unapplied_total` rendered once at load, so a record on the unapplied path pays no
-/// display: under `on_unapplied: skip` that path is every record of a tenant lacking the
-/// field, the steady state the metric exists to show. The label is never empty: a path's
-/// canonical form always starts with the root's name.
-#[derive(Debug)]
-struct Source {
-    path: FieldPath,
-    label: Box<str>,
-}
+/// The `field` label and what can build it. A module of its own so the fields are private
+/// to it: outside, an [`Unapplied`] comes only from [`Source::unapplied`], and so its label
+/// is always a source path rendered at load, never a literal.
+mod source {
+    use fusion_core::metrics::EditCause;
+    use fusion_core::path::FieldPath;
 
-impl Source {
-    fn new(path: FieldPath) -> Self {
-        Self {
-            label: path.to_string().into_boxed_str(),
-            path,
+    /// A path an op reads (for `set`, the field it writes), with its `field` label for
+    /// `edit_unapplied_total` rendered once at load, so a record on the unapplied path pays
+    /// no display: under `on_unapplied: skip` that path is every record of a tenant lacking
+    /// the field, the steady state the metric exists to show. The label is never empty: a
+    /// path's canonical form always starts with the root's name.
+    #[derive(Debug)]
+    pub(super) struct Source {
+        pub(super) path: FieldPath,
+        label: Box<str>,
+    }
+
+    impl Source {
+        pub(super) fn new(path: FieldPath) -> Self {
+            Self {
+                label: path.to_string().into_boxed_str(),
+                path,
+            }
+        }
+
+        /// This source's op could not apply because of `cause`.
+        pub(super) fn unapplied(&self, cause: EditCause) -> Unapplied<'_> {
+            Unapplied {
+                field: &self.label,
+                cause,
+            }
         }
     }
 
-    /// This source's op could not apply because of `cause`.
-    fn unapplied(&self, cause: EditCause) -> Unapplied<'_> {
-        Unapplied {
-            field: &self.label,
-            cause,
+    /// An op that could not apply to a record: the `field` and `cause` labels of
+    /// `edit_unapplied_total`.
+    pub(super) struct Unapplied<'a> {
+        field: &'a str,
+        cause: EditCause,
+    }
+
+    impl<'a> Unapplied<'a> {
+        /// The `field` label: the source path the op stopped on.
+        pub(super) const fn field(&self) -> &'a str {
+            self.field
+        }
+
+        /// The `cause` label.
+        pub(super) const fn cause(&self) -> EditCause {
+            self.cause
         }
     }
 }
@@ -143,14 +171,6 @@ const OP_NAMES: &str = "set, rename, copy, hash or delete";
 /// per record for every label and state key, so an edit changing it would leave them
 /// disagreeing.
 const TENANT: &str = "resource.tenant.id";
-
-/// An op that could not apply to a record: the `field` and `cause` labels of
-/// `edit_unapplied_total`. Built only by [`Source::unapplied`], so the label is always the
-/// source the op stopped on.
-struct Unapplied<'a> {
-    field: &'a str,
-    cause: EditCause,
-}
 
 /// Where in the config an error is: the node, the op's position, and the op's kind once
 /// that is known. `tenant` is [`TENANT`] parsed once, at load.
@@ -420,8 +440,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 impl Stage for Edit {
     fn process(&self, mut record: Record, ctx: &Context<'_>) -> StageOutput {
         for op in &self.ops {
-            if let Err(Unapplied { field, cause }) = op.apply(&mut record) {
-                ctx.metrics.edit_unapplied(op.kind(), field, cause);
+            if let Err(unapplied) = op.apply(&mut record) {
+                ctx.metrics
+                    .edit_unapplied(op.kind(), unapplied.field(), unapplied.cause());
                 if self.on_unapplied == OnUnapplied::Drop {
                     return StageOutput::Drop(DropReason::EditUnapplied);
                 }
