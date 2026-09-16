@@ -5,7 +5,7 @@
 mod common;
 
 use fusion_core::memory::AckOutcome;
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::{CounterMetric, HistogramMetric};
 use fusion_core::record::Record;
 use serde_json::{Value, json};
 
@@ -87,12 +87,12 @@ fn a_non_matching_line_passes_unchanged_and_is_counted() {
             ("engine", "linear"),
         ];
         assert_eq!(
-            h.counter(Metric::RegexNonmatch, &labels),
+            h.counter(CounterMetric::RegexNonmatch, &labels),
             1,
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::RecordsOut, &labels),
+            h.counter(CounterMetric::RecordsOut, &labels),
             1,
             "workers={workers}"
         );
@@ -112,15 +112,18 @@ fn regex_node_metrics_carry_the_engine_label_and_other_nodes_do_not() {
         ("stage", "parse_linux"),
         ("engine", "linear"),
     ];
-    assert_eq!(h.counter(Metric::RecordsIn, &linear), 1);
-    assert_eq!(h.samples(Metric::StageDuration, &linear).len(), 1);
+    assert_eq!(h.counter(CounterMetric::RecordsIn, &linear), 1);
+    assert_eq!(h.samples(HistogramMetric::StageDuration, &linear).len(), 1);
     assert_eq!(
-        h.counter(Metric::RecordsIn, &linear[..2]),
+        h.counter(CounterMetric::RecordsIn, &linear[..2]),
         0,
         "no series without the label"
     );
     assert_eq!(
-        h.counter(Metric::RecordsIn, &[("tenant", "acme"), ("stage", "out")]),
+        h.counter(
+            CounterMetric::RecordsIn,
+            &[("tenant", "acme"), ("stage", "out")]
+        ),
         1
     );
     h.finish();
@@ -136,7 +139,7 @@ fn regex_node_metrics_carry_the_engine_label_and_other_nodes_do_not() {
         ("stage", "parse_linux"),
         ("engine", "backtracking"),
     ];
-    assert_eq!(h.counter(Metric::RecordsIn, &backtracking), 1);
+    assert_eq!(h.counter(CounterMetric::RecordsIn, &backtracking), 1);
     assert_eq!(
         attributes(&h, "out", 2),
         json!({"Id": "42"}).as_object().cloned().expect("object")
@@ -207,11 +210,11 @@ fn a_record_over_input_bytes_is_dropped_with_reason_regex_limit() {
             ("reason", "regex_limit"),
         ];
         assert_eq!(
-            h.counter(Metric::RecordsDropped, &dropped),
+            h.counter(CounterMetric::RecordsDropped, &dropped),
             1,
             "workers={workers}"
         );
-        assert_eq!(h.counter(Metric::RecordsErrored, &dropped[..3]), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsErrored, &dropped[..3]), 0);
         h.finish();
     });
 }
@@ -248,7 +251,7 @@ fn a_tripped_match_limit_drops_the_record_and_the_stage_keeps_serving() {
         ("engine", "backtracking"),
         ("reason", "regex_limit"),
     ];
-    assert_eq!(h.counter(Metric::RecordsDropped, &dropped), 1);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &dropped), 1);
     h.finish();
 }
 
@@ -297,7 +300,7 @@ fn redact_replaces_every_match_in_each_listed_field_and_nothing_else() {
             ("stage", "mask_phones"),
             ("engine", "linear"),
         ];
-        assert_eq!(h.counter(Metric::RegexNonmatch, &labels), 0);
+        assert_eq!(h.counter(CounterMetric::RegexNonmatch, &labels), 0);
         h.finish();
     });
 }
@@ -318,7 +321,7 @@ fn redact_counts_a_record_where_no_listed_field_matched_once_and_skips_non_strin
         ("stage", "mask_phones"),
         ("engine", "linear"),
     ];
-    assert_eq!(h.counter(Metric::RegexNonmatch, &labels), 1);
+    assert_eq!(h.counter(CounterMetric::RegexNonmatch, &labels), 1);
     h.finish();
 }
 
@@ -341,7 +344,7 @@ fn redact_over_input_bytes_drops_with_reason_regex_limit_and_nothing_reaches_the
         ("engine", "linear"),
         ("reason", "regex_limit"),
     ];
-    assert_eq!(h.counter(Metric::RecordsDropped, &dropped), 1);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &dropped), 1);
     h.finish();
 }
 

@@ -6,7 +6,7 @@ mod common;
 
 use common::{WAIT, for_each_worker_count, start};
 use fusion_core::memory::AckOutcome;
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::CounterMetric;
 use fusion_core::record::Record;
 use fusion_core::state::StateStore as _;
 use serde_json::{Value, json};
@@ -119,9 +119,9 @@ fn filter_then_edit_then_sink_acks_every_record_and_the_sink_sees_the_edits() {
             assert_eq!(r.attributes.get("user.email"), Some(&json!(ALICE_SHA256)));
             assert_eq!(r.attributes.get("debug"), None);
         }
-        assert_eq!(h.counter(Metric::RecordsIn, &STAGE), 50);
-        assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 50);
-        assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsIn, &STAGE), 50);
+        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 50);
+        assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
         h.finish();
     });
 }
@@ -158,7 +158,7 @@ fn each_op_produces_the_expected_record() {
     for (ops, before, after) in cases {
         let (out, h) = run(&config("", ops), 1, vec![record(1, before)]);
         assert_eq!(out, vec![record(1, after)], "{ops}");
-        assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
         h.finish();
     }
 }
@@ -203,7 +203,7 @@ fn ops_run_in_order_on_the_same_record() {
     assert_eq!(out[0].attributes.get("b"), Some(&json!("set")));
     assert_eq!(
         h.counter(
-            Metric::EditUnapplied,
+            CounterMetric::EditUnapplied,
             &unapplied("rename", "attributes.a", "absent")
         ),
         1
@@ -254,27 +254,27 @@ fn an_absent_source_leaves_the_record_and_counts_absent_for_that_op_and_field() 
         );
         assert_eq!(
             h.counter(
-                Metric::EditUnapplied,
+                CounterMetric::EditUnapplied,
                 &unapplied("rename", "attributes.http.path", "absent")
             ),
             1
         );
         assert_eq!(
             h.counter(
-                Metric::EditUnapplied,
+                CounterMetric::EditUnapplied,
                 &unapplied("copy", "attributes.nothing", "absent")
             ),
             1
         );
         assert_eq!(
             h.counter(
-                Metric::EditUnapplied,
+                CounterMetric::EditUnapplied,
                 &unapplied("hash", "attributes.nil", "absent")
             ),
             1
         );
-        assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 1);
-        assert_eq!(h.counter(Metric::RecordsDropped, &STAGE), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsDropped, &STAGE), 0);
         h.finish();
     });
 }
@@ -289,18 +289,21 @@ fn a_target_that_refuses_the_value_leaves_the_record_and_counts_type() {
     let (out, h) = run(&yaml, 1, vec![record(1, before.clone())]);
     assert_eq!(out, vec![record(1, before)], "record unchanged");
     assert_eq!(
-        h.counter(Metric::EditUnapplied, &unapplied("copy", "body", "type")),
+        h.counter(
+            CounterMetric::EditUnapplied,
+            &unapplied("copy", "body", "type")
+        ),
         1,
         "a composite cannot go into severity_number"
     );
     assert_eq!(
         h.counter(
-            Metric::EditUnapplied,
+            CounterMetric::EditUnapplied,
             &unapplied("hash", "attributes.list", "type")
         ),
         1
     );
-    assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
+    assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
     h.finish();
 }
 
@@ -311,7 +314,10 @@ fn a_composite_body_renames_under_a_map_key_since_core_takes_any_value_there() {
     assert_eq!(out[0].body, None);
     assert_eq!(out[0].attributes.get("raw"), Some(&json!({"nested": true})));
     assert_eq!(
-        h.counter(Metric::EditUnapplied, &unapplied("rename", "body", "type")),
+        h.counter(
+            CounterMetric::EditUnapplied,
+            &unapplied("rename", "body", "type")
+        ),
         0
     );
     h.finish();
@@ -359,7 +365,7 @@ fn on_unapplied_drop_drops_with_reason_edit_unapplied_and_acks() {
         assert_eq!(out[0].attributes.get("after"), Some(&json!("ran")));
         assert_eq!(
             h.counter(
-                Metric::RecordsDropped,
+                CounterMetric::RecordsDropped,
                 &[
                     ("tenant", "acme"),
                     ("stage", "normalise"),
@@ -370,13 +376,13 @@ fn on_unapplied_drop_drops_with_reason_edit_unapplied_and_acks() {
         );
         assert_eq!(
             h.counter(
-                Metric::EditUnapplied,
+                CounterMetric::EditUnapplied,
                 &unapplied("rename", "attributes.a", "absent")
             ),
             1
         );
-        assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 1);
-        assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
         h.finish();
     });
 }
@@ -405,9 +411,9 @@ fn edit_never_errors_whatever_the_record_holds() {
     );
     let (out, h) = run(&yaml, 4, mixed);
     assert_eq!(out.len(), 5);
-    assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
-    assert_eq!(h.counter(Metric::RecordsDropped, &STAGE), 0);
-    assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 5);
+    assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &STAGE), 0);
+    assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 5);
     h.finish();
 }
 
@@ -438,12 +444,15 @@ fn a_tenant_rewritten_by_edit_is_payload_and_labels_and_state_keys_keep_the_meta
         );
         assert_eq!(out[0].resource.get("tenant.id"), Some(&json!("other")));
         assert_eq!(
-            h.counter(Metric::RecordsOut, &STAGE),
+            h.counter(CounterMetric::RecordsOut, &STAGE),
             1,
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::RecordsOut, &[("tenant", "acme"), ("stage", "out")]),
+            h.counter(
+                CounterMetric::RecordsOut,
+                &[("tenant", "acme"), ("stage", "out")]
+            ),
             1,
             "workers={workers}"
         );

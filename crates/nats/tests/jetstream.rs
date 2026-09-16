@@ -15,7 +15,7 @@ use fusion_core::engine::Engine;
 use fusion_core::io::Outgoing;
 use fusion_core::memory::{MemorySinks, MemoryStateStore};
 use fusion_core::meta::{IngestionTime, Meta, unix_nanos_now};
-use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
+use fusion_core::metrics::{CounterMetric, InMemoryRecorder, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::{Record, RecordId};
 use fusion_core::registry::Registry;
@@ -591,12 +591,12 @@ fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
     );
     assert!(
         wait_until(SETTLE_TIMEOUT, || {
-            recorder.counter(Metric::SourceRedeliveries, &[("tenant", "acme")]) > 0
+            recorder.counter(CounterMetric::SourceRedeliveries, &[("tenant", "acme")]) > 0
         }),
         "the source counted the redelivery for tenant acme"
     );
     assert!(
-        recorder.counter(Metric::SourceNaks, &[("tenant", "acme")]) > 0,
+        recorder.counter(CounterMetric::SourceNaks, &[("tenant", "acme")]) > 0,
         "the engine counted the nak"
     );
 
@@ -779,7 +779,7 @@ fn the_subject_beats_a_spoofed_tenant_header_and_a_bad_header_is_counted_not_nak
         written.meta.ingestion_time
     );
     assert_eq!(
-        recorder.counter(Metric::SourceInvalidHeaders, &[("tenant", "acme")]),
+        recorder.counter(CounterMetric::SourceInvalidHeaders, &[("tenant", "acme")]),
         1
     );
     assert!(

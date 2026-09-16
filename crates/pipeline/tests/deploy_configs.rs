@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 use common::{WAIT, acme_host_record, for_each_worker_count, start_with};
 use fusion_core::config::Config;
 use fusion_core::memory::{AckOutcome, MemorySinks};
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::CounterMetric;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_nats::config::SinkParams;
@@ -169,7 +169,7 @@ fn the_compose_pipeline_delivers_every_record_and_keeps_only_parsed_lines_on_the
         );
         assert_eq!(
             h.counter(
-                Metric::RecordsDropped,
+                CounterMetric::RecordsDropped,
                 &[
                     ("tenant", "acme"),
                     ("stage", "only_parsed"),
@@ -181,7 +181,7 @@ fn the_compose_pipeline_delivers_every_record_and_keeps_only_parsed_lines_on_the
         );
         assert_eq!(
             h.counter(
-                Metric::EditUnapplied,
+                CounterMetric::EditUnapplied,
                 &[
                     ("tenant", "acme"),
                     ("stage", "tag_service"),

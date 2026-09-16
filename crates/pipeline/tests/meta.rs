@@ -8,7 +8,7 @@ use common::{WAIT, registry, start_with};
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::meta::{Arrival, IngestionTime, unix_nanos_now};
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::{CounterMetric, HistogramMetric};
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, Stage, StageOutput};
 use serde_json::{Value, json};
@@ -127,14 +127,14 @@ fn the_transports_tenant_and_time_come_before_the_records() {
     );
     assert_eq!(
         h.counter(
-            Metric::RecordsOut,
+            CounterMetric::RecordsOut,
             &[("tenant", "acme"), ("stage", "reveal")]
         ),
         1
     );
     assert_eq!(
         h.counter(
-            Metric::RecordsOut,
+            CounterMetric::RecordsOut,
             &[("tenant", "beta"), ("stage", "reveal")]
         ),
         0
@@ -208,7 +208,7 @@ fn a_clock_time_an_upstream_pipeline_passed_on_stays_a_clock_time() {
         "not replaced by the record's time, and not marked reported"
     );
     assert!(
-        h.samples(Metric::EndToEnd, &[("tenant", "unknown")])
+        h.samples(HistogramMetric::EndToEnd, &[("tenant", "unknown")])
             .is_empty(),
         "end to end is not measured from a clock reading"
     );
@@ -241,11 +241,11 @@ fn a_redelivery_is_counted_under_the_tenant_every_other_metric_of_the_record_car
         },
     );
     assert_eq!(
-        h.counter(Metric::SourceRedeliveries, &[("tenant", "acme")]),
+        h.counter(CounterMetric::SourceRedeliveries, &[("tenant", "acme")]),
         1
     );
     assert_eq!(
-        h.counter(Metric::SourceRedeliveries, &[("tenant", "beta")]),
+        h.counter(CounterMetric::SourceRedeliveries, &[("tenant", "beta")]),
         0
     );
     h.finish();
@@ -255,7 +255,7 @@ fn a_redelivery_is_counted_under_the_tenant_every_other_metric_of_the_record_car
 fn a_first_delivery_is_not_a_redelivery() {
     let (_, h) = reveal(REVEAL, record(&json!({"id": 7})), Arrival::default());
     assert_eq!(
-        h.counter(Metric::SourceRedeliveries, &[("tenant", "unknown")]),
+        h.counter(CounterMetric::SourceRedeliveries, &[("tenant", "unknown")]),
         0
     );
     h.finish();
@@ -318,7 +318,10 @@ fn every_record_a_split_emits_continues_under_its_parents_meta() {
     }
     assert_eq!(out[1].resource.get("tenant.id"), Some(&json!("minted")));
     assert_eq!(
-        h.counter(Metric::RecordsOut, &[("tenant", "acme"), ("stage", "out")]),
+        h.counter(
+            CounterMetric::RecordsOut,
+            &[("tenant", "acme"), ("stage", "out")]
+        ),
         2
     );
     h.finish();
@@ -479,7 +482,7 @@ nodes:
     let h = push_through(yaml, record(&json!({"id": 7})), acme_arrival());
     assert_eq!(
         h.counter(
-            Metric::LuaErrors,
+            CounterMetric::LuaErrors,
             &[("tenant", "acme"), ("stage", "script"), ("kind", "runtime")]
         ),
         1

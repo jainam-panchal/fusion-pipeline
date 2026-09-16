@@ -11,7 +11,7 @@ use common::{
 };
 use fusion_core::engine::{Engine, EngineError};
 use fusion_core::memory::{AckOutcome, MemorySinks, MemorySource};
-use fusion_core::metrics::{Metric, Metrics};
+use fusion_core::metrics::{CounterMetric, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_state::Dragonfly;
 
@@ -60,9 +60,9 @@ fn on_dragonfly_a_repeat_drops_a_redelivery_passes_and_workers_share_the_window(
 
     assert_eq!(h.ids("out"), vec![101, 101, 103]);
     let stage = [("tenant", "acme"), ("stage", "dedupe_body")];
-    assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
-    assert_eq!(h.counter(Metric::StateOps, &stage), 4);
-    assert_eq!(h.counter(Metric::StateErrors, &stage), 0);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 1);
+    assert_eq!(h.counter(CounterMetric::StateOps, &stage), 4);
+    assert_eq!(h.counter(CounterMetric::StateErrors, &stage), 0);
     h.finish();
 }
 

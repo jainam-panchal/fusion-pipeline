@@ -4,7 +4,7 @@
 mod common;
 
 use fusion_core::memory::AckOutcome;
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::HistogramMetric;
 use fusion_core::record::Record;
 
 use common::{WAIT, start};
@@ -45,7 +45,7 @@ fn every_stage_run_leaves_one_non_negative_duration_sample() {
     }
 
     let samples = h.samples(
-        Metric::StageDuration,
+        HistogramMetric::StageDuration,
         &[("tenant", "acme"), ("stage", "keep_errors")],
     );
     assert_eq!(samples.len(), 3);
@@ -64,7 +64,7 @@ fn every_sink_write_leaves_one_publish_duration_sample() {
 
     assert_eq!(
         h.samples(
-            Metric::SinkPublishDuration,
+            HistogramMetric::SinkPublishDuration,
             &[("tenant", "acme"), ("stage", "out")]
         )
         .len(),
@@ -83,7 +83,7 @@ fn a_settled_record_leaves_one_end_to_end_sample_measured_from_its_observed_time
         Some(AckOutcome::Ack)
     );
 
-    let samples = h.samples(Metric::EndToEnd, &[("tenant", "acme")]);
+    let samples = h.samples(HistogramMetric::EndToEnd, &[("tenant", "acme")]);
     assert_eq!(samples.len(), 1);
     assert!(samples[0] >= 1.0, "{samples:?}");
     h.finish();
@@ -100,7 +100,7 @@ fn a_record_without_an_observed_time_leaves_no_end_to_end_sample() {
     assert_eq!(h.source.push(bare).wait(WAIT), Some(AckOutcome::Ack));
 
     assert!(
-        h.samples(Metric::EndToEnd, &[("tenant", "acme")])
+        h.samples(HistogramMetric::EndToEnd, &[("tenant", "acme")])
             .is_empty()
     );
     h.finish();
@@ -117,7 +117,7 @@ fn a_nakked_record_leaves_no_end_to_end_sample() {
     );
 
     assert!(
-        h.samples(Metric::EndToEnd, &[("tenant", "acme")])
+        h.samples(HistogramMetric::EndToEnd, &[("tenant", "acme")])
             .is_empty()
     );
     h.finish();

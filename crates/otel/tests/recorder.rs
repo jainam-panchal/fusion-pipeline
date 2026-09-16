@@ -2,7 +2,9 @@
 //! out of a meter provider as instruments named as the spec spells them, with the labels as
 //! attributes and durations in seconds. The in-memory exporter stands in for the collector.
 
-use fusion_core::metrics::{Labels, Metric, MetricKind, Metrics, Recorder};
+use fusion_core::metrics::{
+    CounterMetric, HistogramMetric, Labels, Metric, MetricKind, Metrics, Recorder,
+};
 use fusion_core::stage::DropReason;
 use fusion_otel::OtlpRecorder;
 use opentelemetry::metrics::MeterProvider as _;
@@ -51,12 +53,12 @@ fn exported_names(exported: &[ResourceMetrics]) -> Vec<(String, String)> {
 #[test]
 fn every_spec_metric_exports_under_the_spec_name_with_seconds_on_histograms() {
     let exported = export(|recorder| {
-        for metric in Metric::ALL {
-            let labels = Labels::new("acme", "keep_errors");
-            match metric.kind() {
-                MetricKind::Counter => recorder.count(metric, &labels, 1),
-                MetricKind::Histogram => recorder.observe(metric, &labels, 0.5),
-            }
+        let labels = Labels::new("acme", "keep_errors");
+        for metric in CounterMetric::ALL {
+            recorder.count(metric, &labels, 1);
+        }
+        for metric in HistogramMetric::ALL {
+            recorder.observe(metric, &labels, 0.5);
         }
     });
 

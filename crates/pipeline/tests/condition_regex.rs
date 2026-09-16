@@ -5,7 +5,7 @@
 mod common;
 
 use fusion_core::memory::{AckOutcome, MemorySinks};
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::CounterMetric;
 use fusion_core::pipeline::Pipeline;
 
 use common::{WAIT, acme_record, for_each_worker_count, start};
@@ -47,13 +47,13 @@ fn filter_keeps_records_whose_field_matches_and_drops_the_rest() {
             ("engine", "linear"),
         ];
         assert_eq!(
-            h.counter(Metric::RecordsIn, &labels),
+            h.counter(CounterMetric::RecordsIn, &labels),
             3,
             "workers={workers}"
         );
         assert_eq!(
             h.counter(
-                Metric::RecordsDropped,
+                CounterMetric::RecordsDropped,
                 &[
                     ("tenant", "acme"),
                     ("stage", "keep_disk"),
@@ -116,7 +116,7 @@ fn a_field_over_input_bytes_is_dropped_with_reason_regex_limit_by_the_filter() {
         ("engine", "linear"),
         ("reason", "regex_limit"),
     ];
-    assert_eq!(h.counter(Metric::RecordsDropped, &dropped), 1);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &dropped), 1);
     h.finish();
 }
 
@@ -159,7 +159,7 @@ nodes:
         ("stage", "by_body"),
         ("engine", "backtracking"),
     ];
-    assert_eq!(h.counter(Metric::RecordsIn, &labels), 3);
+    assert_eq!(h.counter(CounterMetric::RecordsIn, &labels), 3);
     h.finish();
 }
 
@@ -203,7 +203,7 @@ nodes:
         ("reason", "regex_limit"),
     ];
     assert_eq!(
-        h.counter(Metric::RecordsDropped, &dropped),
+        h.counter(CounterMetric::RecordsDropped, &dropped),
         1,
         "record 2 reached the pattern"
     );
@@ -220,7 +220,7 @@ fn a_condition_without_regex_operators_carries_no_engine_label() {
     );
     assert_eq!(
         h.counter(
-            Metric::RecordsIn,
+            CounterMetric::RecordsIn,
             &[("tenant", "acme"), ("stage", "keep_disk")]
         ),
         1

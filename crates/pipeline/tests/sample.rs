@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use common::{WAIT, acme_host_record as host_record, acme_record as record, start};
 use fusion_core::memory::{AckOutcome, AckProbe};
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::CounterMetric;
 use fusion_core::record::Record;
 use fusion_core::state::StateStore as _;
 
@@ -49,11 +49,11 @@ fn random_at_ten_percent_keeps_between_nine_and_eleven_percent_of_100k_records()
     let kept = h.ids("out").len() as u64;
     assert!((9_000..=11_000).contains(&kept), "kept {kept}");
     assert_eq!(
-        h.counter(Metric::RecordsDropped, &SAMPLE_DROP),
+        h.counter(CounterMetric::RecordsDropped, &SAMPLE_DROP),
         100_000 - kept
     );
     assert_eq!(
-        h.counter(Metric::StateOps, &STAGE),
+        h.counter(CounterMetric::StateOps, &STAGE),
         0,
         "random needs no state"
     );
@@ -114,7 +114,10 @@ fn every_nth_at_ten_keeps_exactly_one_thousand_of_ten_thousand_records_across_fo
     assert_all(&probes, AckOutcome::Ack);
 
     assert_eq!(h.ids("out").len(), 1_000);
-    assert_eq!(h.counter(Metric::RecordsDropped, &SAMPLE_DROP), 9_000);
+    assert_eq!(
+        h.counter(CounterMetric::RecordsDropped, &SAMPLE_DROP),
+        9_000
+    );
     h.finish();
 }
 
@@ -240,8 +243,8 @@ fn every_nth_with_the_store_down_passes_by_default_and_counts_the_error() {
     }
 
     assert_eq!(h.ids("out"), vec![1, 2, 3, 4, 5], "uncounted, forwarded");
-    assert_eq!(h.counter(Metric::StateErrors, &STAGE), 5);
-    assert_eq!(h.counter(Metric::RecordsDropped, &SAMPLE_DROP), 0);
+    assert_eq!(h.counter(CounterMetric::StateErrors, &STAGE), 5);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &SAMPLE_DROP), 0);
     h.finish();
 }
 
@@ -256,7 +259,7 @@ fn every_nth_with_the_store_down_and_nak_policy_naks() {
         Some(AckOutcome::Nak(_))
     ));
     assert!(h.ids("out").is_empty());
-    assert_eq!(h.counter(Metric::StateErrors, &STAGE), 1);
+    assert_eq!(h.counter(CounterMetric::StateErrors, &STAGE), 1);
     h.finish();
 }
 
@@ -303,11 +306,11 @@ fn consistent_at_fifty_percent_keeps_or_drops_every_record_of_a_host_together() 
         kept_hosts.len()
     );
     assert_eq!(
-        h.counter(Metric::RecordsDropped, &SAMPLE_DROP),
+        h.counter(CounterMetric::RecordsDropped, &SAMPLE_DROP),
         3_000 - kept.len() as u64
     );
     assert_eq!(
-        h.counter(Metric::StateOps, &STAGE),
+        h.counter(CounterMetric::StateOps, &STAGE),
         0,
         "consistent needs no state"
     );
@@ -358,7 +361,7 @@ fn random_at_one_hundred_percent_keeps_everything() {
     assert_all(&probes, AckOutcome::Ack);
 
     assert_eq!(h.ids("out").len(), 1_000);
-    assert_eq!(h.counter(Metric::RecordsDropped, &SAMPLE_DROP), 0);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &SAMPLE_DROP), 0);
     h.finish();
 }
 

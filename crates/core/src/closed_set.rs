@@ -7,7 +7,8 @@
 //! per metric, a name lookup) silently misses it. Declared through [`closed_set!`], all of
 //! them come from one list, so a variant cannot be left out of any.
 
-/// Declares a closed set: the enum, and on it `ALL` (every value, in declaration order),
+/// Declares a closed set: the enum, and on it `ALL` (every value, in declaration order, each
+/// at the index its discriminant says),
 /// `as_str` (the value's name), `parse` (the value with a name, case-sensitive), `ONE_OF`
 /// (every name as a message lists them, "`a`, `b` or `c`") and `Display` (the name). The
 /// generated items take the enum's visibility. Two values with one name fail to compile.
@@ -82,6 +83,16 @@ macro_rules! closed_set {
         }
 
         const _: () = $crate::closed_set::assert_unique(&[$($wire),+]);
+
+        // Every value is its own index into `ALL`, so a table built from `ALL` can be indexed
+        // by the value.
+        const _: () = {
+            let mut i = 0;
+            while i < $name::ALL.len() {
+                assert!($name::ALL[i] as usize == i, "a closed set's ALL is in declaration order");
+                i += 1;
+            }
+        };
     };
     (
         $(#[$meta:meta])*

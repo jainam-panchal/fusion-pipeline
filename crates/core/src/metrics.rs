@@ -3,7 +3,8 @@
 //! The spec's Telemetry section names every metric the pipeline exports; [`Metric`] is that
 //! list as a closed set, so a name that is not in the spec cannot be emitted. The engine
 //! emits through [`Metrics`], whose typed methods fix the label set of each metric, and a
-//! [`Recorder`] is the seam an exporter implements: two methods, one per instrument kind.
+//! [`Recorder`] is the seam an exporter implements: two methods, one per instrument kind,
+//! each taking only the metrics of its kind.
 //! [`InMemoryRecorder`] is the fake for tests, next to the in-memory source and sinks in
 //! [`crate::memory`]; the OTLP recorder lives in the telemetry crate.
 //!
@@ -20,53 +21,133 @@ use crate::closed_set::closed_set;
 use crate::memory::lock_unpoisoned;
 use crate::stage::DropReason;
 
-closed_set! {
-    /// Every metric the pipeline exports. Closed set: adding one is a spec amendment, and
-    /// [`Metric::ALL`] lists them all; an exporter creates its instruments from it up front.
-    /// The spelling is [`Metric::as_str`].
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub enum Metric {
-        /// `records_in_total{tenant, stage}`: records handed to a node.
-        RecordsIn = "records_in_total",
-        /// `records_out_total{tenant, stage}`: records a node passed on, or a sink accepted.
-        RecordsOut = "records_out_total",
-        /// `records_dropped_total{tenant, stage, reason}`: intentional drops. The spine metric.
-        RecordsDropped = "records_dropped_total",
-        /// `records_errored_total{tenant, stage}`: stage errors and sink failures.
-        RecordsErrored = "records_errored_total",
-        /// `stage_duration_seconds{tenant, stage}`: one stage run.
-        StageDuration = "stage_duration_seconds",
-        /// `state_ops_total{tenant, stage}`: state store operations. Emitted by stateful stages.
-        StateOps = "state_ops_total",
-        /// `state_op_duration_seconds{tenant, stage}`: one state store operation.
-        StateOpDuration = "state_op_duration_seconds",
-        /// `state_errors_total{tenant, stage}`: state store failures.
-        StateErrors = "state_errors_total",
-        /// `lua_errors_total{tenant, stage, kind}`: Lua stage errors by kind.
-        LuaErrors = "lua_errors_total",
-        /// `regex_nonmatch_total{tenant, stage, engine}`: records a regex stage's pattern did not
-        /// match, passed on unchanged. Emitted by the regex stages.
-        RegexNonmatch = "regex_nonmatch_total",
-        /// `edit_unapplied_total{tenant, stage, op, field, cause}`: `edit` ops that could not
-        /// apply to a record. Emitted by the edit stage.
-        EditUnapplied = "edit_unapplied_total",
-        /// `source_naks_total{tenant}`: messages the engine negatively acknowledged.
-        SourceNaks = "source_naks_total",
-        /// `source_redeliveries_total{tenant}`: messages the source saw more than once.
-        SourceRedeliveries = "source_redeliveries_total",
-        /// `source_invalid_headers_total{tenant}`: pipeline headers a source ignored because
-        /// they did not parse.
-        SourceInvalidHeaders = "source_invalid_headers_total",
-        /// `dlq_total{tenant}`: messages sent to the dead-letter queue.
-        Dlq = "dlq_total",
-        /// `sink_publish_duration_seconds{tenant, stage}`: one sink write, until durable
-        /// acceptance.
-        SinkPublishDuration = "sink_publish_duration_seconds",
-        /// `sink_publish_errors_total{tenant, stage}`: sink writes without durable acceptance.
-        SinkPublishErrors = "sink_publish_errors_total",
-        /// `pipeline_end_to_end_seconds{tenant}`: ingestion time to settlement.
-        EndToEnd = "pipeline_end_to_end_seconds",
-    }
+/// Declares [`Metric`] from one list in which every metric names its instrument, and from the
+/// same list the two typed subsets, [`CounterMetric`] and [`HistogramMetric`]. All three are
+/// closed sets, so none can miss a metric, and [`Recorder::count`] takes only a counter and
+/// [`Recorder::observe`] only a histogram, so a metric recorded through the wrong instrument
+/// does not compile.
+macro_rules! metrics {
+    ($($(#[doc = $doc:literal])* $kind:ident $variant:ident = $wire:literal,)+) => {
+        closed_set! {
+            /// Every metric the pipeline exports. Closed set: adding one is a spec amendment,
+            /// and [`Metric::ALL`] lists them all. The spelling is [`Metric::as_str`].
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+            pub enum Metric {
+                $($(#[doc = $doc])* $variant = $wire,)+
+            }
+        }
+
+        impl Metric {
+            /// Counter or histogram.
+            #[must_use]
+            pub const fn kind(self) -> MetricKind {
+                match self {
+                    $(Self::$variant => metrics!(@kind $kind),)+
+                }
+            }
+        }
+
+        metrics!(@counters [] $($kind $variant = $wire,)+);
+        metrics!(@histograms [] $($kind $variant = $wire,)+);
+    };
+    (@kind counter) => { MetricKind::Counter };
+    (@kind histogram) => { MetricKind::Histogram };
+    (@counters [$($v:ident = $w:literal,)*]) => {
+        closed_set! {
+            /// The metrics that are counters, recorded with [`Recorder::count`]. An exporter
+            /// creates one counter per value of [`CounterMetric::ALL`].
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+            pub enum CounterMetric {
+                $(#[doc = $w] $v = $w,)*
+            }
+        }
+
+        impl CounterMetric {
+            /// The metric this counter is.
+            #[must_use]
+            pub const fn metric(self) -> Metric {
+                match self {
+                    $(Self::$v => Metric::$v,)*
+                }
+            }
+        }
+    };
+    (@counters [$($acc:tt)*] counter $v:ident = $w:literal, $($rest:tt)*) => {
+        metrics!(@counters [$($acc)* $v = $w,] $($rest)*);
+    };
+    (@counters [$($acc:tt)*] histogram $v:ident = $w:literal, $($rest:tt)*) => {
+        metrics!(@counters [$($acc)*] $($rest)*);
+    };
+    (@histograms [$($v:ident = $w:literal,)*]) => {
+        closed_set! {
+            /// The metrics that are histograms of durations in seconds, recorded with
+            /// [`Recorder::observe`]. An exporter creates one histogram per value of
+            /// [`HistogramMetric::ALL`].
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+            pub enum HistogramMetric {
+                $(#[doc = $w] $v = $w,)*
+            }
+        }
+
+        impl HistogramMetric {
+            /// The metric this histogram is.
+            #[must_use]
+            pub const fn metric(self) -> Metric {
+                match self {
+                    $(Self::$v => Metric::$v,)*
+                }
+            }
+        }
+    };
+    (@histograms [$($acc:tt)*] histogram $v:ident = $w:literal, $($rest:tt)*) => {
+        metrics!(@histograms [$($acc)* $v = $w,] $($rest)*);
+    };
+    (@histograms [$($acc:tt)*] counter $v:ident = $w:literal, $($rest:tt)*) => {
+        metrics!(@histograms [$($acc)*] $($rest)*);
+    };
+}
+
+metrics! {
+    /// `records_in_total{tenant, stage}`: records handed to a node.
+    counter RecordsIn = "records_in_total",
+    /// `records_out_total{tenant, stage}`: records a node passed on, or a sink accepted.
+    counter RecordsOut = "records_out_total",
+    /// `records_dropped_total{tenant, stage, reason}`: intentional drops. The spine metric.
+    counter RecordsDropped = "records_dropped_total",
+    /// `records_errored_total{tenant, stage}`: stage errors and sink failures.
+    counter RecordsErrored = "records_errored_total",
+    /// `stage_duration_seconds{tenant, stage}`: one stage run.
+    histogram StageDuration = "stage_duration_seconds",
+    /// `state_ops_total{tenant, stage}`: state store operations. Emitted by stateful stages.
+    counter StateOps = "state_ops_total",
+    /// `state_op_duration_seconds{tenant, stage}`: one state store operation.
+    histogram StateOpDuration = "state_op_duration_seconds",
+    /// `state_errors_total{tenant, stage}`: state store failures.
+    counter StateErrors = "state_errors_total",
+    /// `lua_errors_total{tenant, stage, kind}`: Lua stage errors by kind.
+    counter LuaErrors = "lua_errors_total",
+    /// `regex_nonmatch_total{tenant, stage, engine}`: records a regex stage's pattern did not
+    /// match, passed on unchanged. Emitted by the regex stages.
+    counter RegexNonmatch = "regex_nonmatch_total",
+    /// `edit_unapplied_total{tenant, stage, op, field, cause}`: `edit` ops that could not
+    /// apply to a record. Emitted by the edit stage.
+    counter EditUnapplied = "edit_unapplied_total",
+    /// `source_naks_total{tenant}`: messages the engine negatively acknowledged.
+    counter SourceNaks = "source_naks_total",
+    /// `source_redeliveries_total{tenant}`: messages the source saw more than once.
+    counter SourceRedeliveries = "source_redeliveries_total",
+    /// `source_invalid_headers_total{tenant}`: pipeline headers a source ignored because
+    /// they did not parse.
+    counter SourceInvalidHeaders = "source_invalid_headers_total",
+    /// `dlq_total{tenant}`: messages sent to the dead-letter queue.
+    counter Dlq = "dlq_total",
+    /// `sink_publish_duration_seconds{tenant, stage}`: one sink write, until durable
+    /// acceptance.
+    histogram SinkPublishDuration = "sink_publish_duration_seconds",
+    /// `sink_publish_errors_total{tenant, stage}`: sink writes without durable acceptance.
+    counter SinkPublishErrors = "sink_publish_errors_total",
+    /// `pipeline_end_to_end_seconds{tenant}`: ingestion time to settlement.
+    histogram EndToEnd = "pipeline_end_to_end_seconds",
 }
 
 /// Which instrument a metric is.
@@ -78,58 +159,16 @@ pub enum MetricKind {
     Histogram,
 }
 
-impl Metric {
-    /// Counter or histogram.
-    #[must_use]
-    pub const fn kind(self) -> MetricKind {
-        match self {
-            Self::RecordsIn
-            | Self::RecordsOut
-            | Self::RecordsDropped
-            | Self::RecordsErrored
-            | Self::StateOps
-            | Self::StateErrors
-            | Self::LuaErrors
-            | Self::RegexNonmatch
-            | Self::EditUnapplied
-            | Self::SourceNaks
-            | Self::SourceRedeliveries
-            | Self::SourceInvalidHeaders
-            | Self::Dlq
-            | Self::SinkPublishErrors => MetricKind::Counter,
-            Self::StageDuration
-            | Self::StateOpDuration
-            | Self::SinkPublishDuration
-            | Self::EndToEnd => MetricKind::Histogram,
-        }
-    }
-}
-
-/// The `engine` label: the facade's classification of a node's pattern. A closed set, so
-/// the label value cannot drift from the two engines the facade is defined as; core does
-/// not depend on the regex crate, so the stages crate maps the facade's engine onto it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EngineLabel {
-    /// The Rust `regex` crate: linear time, cannot backtrack.
-    Linear,
-    /// PCRE2 under the runtime limits.
-    Backtracking,
-}
-
-impl EngineLabel {
-    /// The label value.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Linear => "linear",
-            Self::Backtracking => "backtracking",
-        }
-    }
-}
-
-impl std::fmt::Display for EngineLabel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+closed_set! {
+    /// The `engine` label: the facade's classification of a node's pattern. A closed set, so
+    /// the label value cannot drift from the two engines the facade is defined as; core does
+    /// not depend on the regex crate, so the stages crate maps the facade's engine onto it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum EngineLabel {
+        /// The Rust `regex` crate: linear time, cannot backtrack.
+        Linear = "linear",
+        /// PCRE2 under the runtime limits.
+        Backtracking = "backtracking",
     }
 }
 
@@ -285,12 +324,13 @@ impl<'a> Labels<'a> {
     }
 }
 
-/// Where measurements go. Implemented by exporters; shared across worker threads.
+/// Where measurements go. Implemented by exporters; shared across worker threads. Each call
+/// takes only metrics of its instrument.
 pub trait Recorder: Send + Sync {
     /// Add `by` to a counter.
-    fn count(&self, metric: Metric, labels: &Labels<'_>, by: u64);
-    /// Record one histogram sample.
-    fn observe(&self, metric: Metric, labels: &Labels<'_>, value: f64);
+    fn count(&self, metric: CounterMetric, labels: &Labels<'_>, by: u64);
+    /// Record one histogram sample, in seconds.
+    fn observe(&self, metric: HistogramMetric, labels: &Labels<'_>, value: f64);
 }
 
 /// The engine's handle on a recorder. Each method is one spec metric with its label set.
@@ -322,91 +362,112 @@ impl Metrics {
     /// `records_in_total`. `labels` is the node's [`Labels::new`], with the engine label
     /// when its stage declares one.
     pub fn records_in(&self, labels: &Labels<'_>) {
-        self.recorder.count(Metric::RecordsIn, labels, 1);
+        self.recorder.count(CounterMetric::RecordsIn, labels, 1);
     }
 
     /// `records_out_total`, by `count` records.
     pub fn records_out(&self, labels: &Labels<'_>, count: u64) {
-        self.recorder.count(Metric::RecordsOut, labels, count);
+        self.recorder
+            .count(CounterMetric::RecordsOut, labels, count);
     }
 
     /// `records_dropped_total`.
     pub fn dropped(&self, labels: &Labels<'_>, reason: DropReason) {
-        self.recorder
-            .count(Metric::RecordsDropped, &labels.with_reason(reason), 1);
+        self.recorder.count(
+            CounterMetric::RecordsDropped,
+            &labels.with_reason(reason),
+            1,
+        );
     }
 
     /// `records_errored_total`.
     pub fn errored(&self, labels: &Labels<'_>) {
-        self.recorder.count(Metric::RecordsErrored, labels, 1);
+        self.recorder
+            .count(CounterMetric::RecordsErrored, labels, 1);
     }
 
     /// `stage_duration_seconds`.
     pub fn stage_duration(&self, labels: &Labels<'_>, elapsed: Duration) {
-        self.recorder
-            .observe(Metric::StageDuration, labels, elapsed.as_secs_f64());
+        self.recorder.observe(
+            HistogramMetric::StageDuration,
+            labels,
+            elapsed.as_secs_f64(),
+        );
     }
 
     /// `sink_publish_duration_seconds`.
     pub fn sink_publish_duration(&self, labels: &Labels<'_>, elapsed: Duration) {
-        self.recorder
-            .observe(Metric::SinkPublishDuration, labels, elapsed.as_secs_f64());
+        self.recorder.observe(
+            HistogramMetric::SinkPublishDuration,
+            labels,
+            elapsed.as_secs_f64(),
+        );
     }
 
     /// `sink_publish_errors_total`.
     pub fn sink_publish_error(&self, labels: &Labels<'_>) {
-        self.recorder.count(Metric::SinkPublishErrors, labels, 1);
+        self.recorder
+            .count(CounterMetric::SinkPublishErrors, labels, 1);
     }
 
     /// `state_ops_total` and `state_op_duration_seconds`: one state store operation.
     pub fn state_op(&self, labels: &Labels<'_>, elapsed: Duration) {
-        self.recorder.count(Metric::StateOps, labels, 1);
-        self.recorder
-            .observe(Metric::StateOpDuration, labels, elapsed.as_secs_f64());
+        self.recorder.count(CounterMetric::StateOps, labels, 1);
+        self.recorder.observe(
+            HistogramMetric::StateOpDuration,
+            labels,
+            elapsed.as_secs_f64(),
+        );
     }
 
     /// `state_errors_total`.
     pub fn state_error(&self, labels: &Labels<'_>) {
-        self.recorder.count(Metric::StateErrors, labels, 1);
+        self.recorder.count(CounterMetric::StateErrors, labels, 1);
     }
 
     /// `regex_nonmatch_total`.
     pub fn regex_nonmatch(&self, labels: &Labels<'_>) {
-        self.recorder.count(Metric::RegexNonmatch, labels, 1);
+        self.recorder.count(CounterMetric::RegexNonmatch, labels, 1);
     }
 
     /// `edit_unapplied_total`. `labels` carries the node's labels plus [`Labels::with_edit`].
     pub fn edit_unapplied(&self, labels: &Labels<'_>) {
-        self.recorder.count(Metric::EditUnapplied, labels, 1);
+        self.recorder.count(CounterMetric::EditUnapplied, labels, 1);
     }
 
     /// `lua_errors_total`. `labels` carries the node's labels plus [`Labels::with_kind`].
     pub fn lua_error(&self, labels: &Labels<'_>) {
-        self.recorder.count(Metric::LuaErrors, labels, 1);
+        self.recorder.count(CounterMetric::LuaErrors, labels, 1);
     }
 
     /// `source_naks_total`.
     pub fn source_nak(&self, tenant: &str) {
         self.recorder
-            .count(Metric::SourceNaks, &Labels::for_tenant(tenant), 1);
+            .count(CounterMetric::SourceNaks, &Labels::for_tenant(tenant), 1);
     }
 
     /// `source_redeliveries_total`.
     pub fn source_redelivery(&self, tenant: &str) {
-        self.recorder
-            .count(Metric::SourceRedeliveries, &Labels::for_tenant(tenant), 1);
+        self.recorder.count(
+            CounterMetric::SourceRedeliveries,
+            &Labels::for_tenant(tenant),
+            1,
+        );
     }
 
     /// `source_invalid_headers_total`.
     pub fn source_invalid_header(&self, tenant: &str) {
-        self.recorder
-            .count(Metric::SourceInvalidHeaders, &Labels::for_tenant(tenant), 1);
+        self.recorder.count(
+            CounterMetric::SourceInvalidHeaders,
+            &Labels::for_tenant(tenant),
+            1,
+        );
     }
 
     /// `pipeline_end_to_end_seconds`.
     pub fn end_to_end(&self, tenant: &str, elapsed: Duration) {
         self.recorder.observe(
-            Metric::EndToEnd,
+            HistogramMetric::EndToEnd,
             &Labels::for_tenant(tenant),
             elapsed.as_secs_f64(),
         );
@@ -416,8 +477,8 @@ impl Metrics {
 struct Noop;
 
 impl Recorder for Noop {
-    fn count(&self, _: Metric, _: &Labels<'_>, _: u64) {}
-    fn observe(&self, _: Metric, _: &Labels<'_>, _: f64) {}
+    fn count(&self, _: CounterMetric, _: &Labels<'_>, _: u64) {}
+    fn observe(&self, _: HistogramMetric, _: &Labels<'_>, _: f64) {}
 }
 
 type Series = (Metric, Vec<(&'static str, String)>);
@@ -443,20 +504,20 @@ impl InMemoryRecorder {
 
     /// The value of the counter `metric` under exactly `labels`, zero if never counted.
     #[must_use]
-    pub fn counter(&self, metric: Metric, labels: &[(&str, &str)]) -> u64 {
+    pub fn counter(&self, metric: CounterMetric, labels: &[(&str, &str)]) -> u64 {
         lock_unpoisoned(&self.observed)
             .counters
-            .get(&series(metric, labels))
+            .get(&series(metric.metric(), labels))
             .copied()
             .unwrap_or(0)
     }
 
     /// Every sample of the histogram `metric` under exactly `labels`, in recording order.
     #[must_use]
-    pub fn samples(&self, metric: Metric, labels: &[(&str, &str)]) -> Vec<f64> {
+    pub fn samples(&self, metric: HistogramMetric, labels: &[(&str, &str)]) -> Vec<f64> {
         lock_unpoisoned(&self.observed)
             .samples
-            .get(&series(metric, labels))
+            .get(&series(metric.metric(), labels))
             .cloned()
             .unwrap_or_default()
     }
@@ -494,17 +555,17 @@ fn key(metric: Metric, labels: &Labels<'_>) -> Series {
 }
 
 impl Recorder for InMemoryRecorder {
-    fn count(&self, metric: Metric, labels: &Labels<'_>, by: u64) {
+    fn count(&self, metric: CounterMetric, labels: &Labels<'_>, by: u64) {
         *lock_unpoisoned(&self.observed)
             .counters
-            .entry(key(metric, labels))
+            .entry(key(metric.metric(), labels))
             .or_insert(0) += by;
     }
 
-    fn observe(&self, metric: Metric, labels: &Labels<'_>, value: f64) {
+    fn observe(&self, metric: HistogramMetric, labels: &Labels<'_>, value: f64) {
         lock_unpoisoned(&self.observed)
             .samples
-            .entry(key(metric, labels))
+            .entry(key(metric.metric(), labels))
             .or_default()
             .push(value);
     }

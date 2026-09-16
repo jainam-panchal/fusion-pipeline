@@ -7,7 +7,7 @@ mod common;
 use common::{WAIT, for_each_worker_count, start};
 use fusion_core::memory::AckOutcome;
 use fusion_core::meta::{Arrival, unix_nanos_now};
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::CounterMetric;
 use fusion_core::record::Record;
 use serde_json::{Value, json};
 
@@ -97,7 +97,7 @@ end"#,
         );
         assert_eq!(
             h.counter(
-                Metric::RecordsDropped,
+                CounterMetric::RecordsDropped,
                 &[
                     ("tenant", "acme"),
                     ("stage", "script"),
@@ -107,7 +107,7 @@ end"#,
             1,
             "workers {workers}"
         );
-        assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
         h.finish();
     });
 }
@@ -142,10 +142,13 @@ end"#,
             vec![(Some(9), Some(json!("a"))), (Some(9), Some(json!("b")))],
             "workers {workers}"
         );
-        assert_eq!(h.counter(Metric::RecordsIn, &STAGE), 1);
-        assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 2);
+        assert_eq!(h.counter(CounterMetric::RecordsIn, &STAGE), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 2);
         assert_eq!(
-            h.counter(Metric::RecordsOut, &[("tenant", "acme"), ("stage", "out")]),
+            h.counter(
+                CounterMetric::RecordsOut,
+                &[("tenant", "acme"), ("stage", "out")]
+            ),
             2
         );
         h.finish();
@@ -170,9 +173,12 @@ fn an_infinite_loop_is_stopped_by_the_instruction_budget_and_passes_by_default()
             "workers {workers}: `pass` forwards the record unchanged"
         );
         assert_eq!(out[0].body, Some(json!("x")));
-        assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
-        assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
-        assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 1);
+        assert_eq!(
+            h.counter(CounterMetric::LuaErrors, &lua_error("instructions")),
+            1
+        );
+        assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 1);
         h.finish();
     });
 }
@@ -187,7 +193,7 @@ fn on_error_drop_drops_with_reason_lua_error_and_acks() {
     assert!(out.is_empty());
     assert_eq!(
         h.counter(
-            Metric::RecordsDropped,
+            CounterMetric::RecordsDropped,
             &[
                 ("tenant", "acme"),
                 ("stage", "script"),
@@ -196,7 +202,10 @@ fn on_error_drop_drops_with_reason_lua_error_and_acks() {
         ),
         1
     );
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
+    assert_eq!(
+        h.counter(CounterMetric::LuaErrors, &lua_error("instructions")),
+        1
+    );
     h.finish();
 }
 
@@ -210,9 +219,15 @@ fn on_error_nak_fails_the_record_so_the_source_message_is_nakked() {
     let probe = h.source.push(record(1, json!({"body": "x"})));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Nak(None)));
     assert!(h.sinks.records("out").is_empty());
-    assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 1);
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
-    assert_eq!(h.counter(Metric::SourceNaks, &[("tenant", "acme")]), 1);
+    assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 1);
+    assert_eq!(
+        h.counter(CounterMetric::LuaErrors, &lua_error("instructions")),
+        1
+    );
+    assert_eq!(
+        h.counter(CounterMetric::SourceNaks, &[("tenant", "acme")]),
+        1
+    );
     h.finish();
 }
 
@@ -235,7 +250,10 @@ fn the_budget_is_per_record_so_a_worker_keeps_serving_after_a_trip() {
         out.iter().map(|r| r.id.map(|i| i.0)).collect::<Vec<_>>(),
         vec![Some(2), Some(3)]
     );
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
+    assert_eq!(
+        h.counter(CounterMetric::LuaErrors, &lua_error("instructions")),
+        1
+    );
     h.finish();
 }
 
@@ -255,8 +273,11 @@ fn unbounded_table_growth_is_stopped_by_the_memory_cap() {
             ],
         );
         assert!(out.is_empty(), "workers {workers}");
-        assert_eq!(h.counter(Metric::LuaErrors, &lua_error("memory")), 2);
-        assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 0);
+        assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("memory")), 2);
+        assert_eq!(
+            h.counter(CounterMetric::LuaErrors, &lua_error("instructions")),
+            0
+        );
         h.finish();
     });
 }
@@ -269,7 +290,10 @@ fn a_script_that_raises_counts_as_a_runtime_error() {
     );
     let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
     assert!(out.is_empty());
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("runtime")), 1);
+    assert_eq!(
+        h.counter(CounterMetric::LuaErrors, &lua_error("runtime")),
+        1
+    );
     h.finish();
 }
 
@@ -296,7 +320,7 @@ fn a_returned_record_the_stage_refuses_counts_as_an_output_error() {
         let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
         assert!(out.is_empty(), "{name}: refused");
         assert_eq!(
-            h.counter(Metric::LuaErrors, &lua_error("output")),
+            h.counter(CounterMetric::LuaErrors, &lua_error("output")),
             1,
             "{name}"
         );
@@ -331,7 +355,7 @@ end"#,
         h.state.keys(),
         vec!["ingest:acme:script:seen:disk full".to_owned()]
     );
-    assert_eq!(h.counter(Metric::StateOps, &STAGE), 2);
+    assert_eq!(h.counter(CounterMetric::StateOps, &STAGE), 2);
     h.finish();
 }
 
@@ -362,11 +386,14 @@ fn a_state_error_is_handled_by_on_state_error_not_by_on_error() {
     h.state.fail_all(true);
     let probe = h.source.push(record(1, json!({})));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Nak(None)));
-    assert_eq!(h.counter(Metric::StateErrors, &STAGE), 1);
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("runtime")), 0);
+    assert_eq!(h.counter(CounterMetric::StateErrors, &STAGE), 1);
+    assert_eq!(
+        h.counter(CounterMetric::LuaErrors, &lua_error("runtime")),
+        0
+    );
     assert_eq!(
         h.counter(
-            Metric::RecordsDropped,
+            CounterMetric::RecordsDropped,
             &[
                 ("tenant", "acme"),
                 ("stage", "script"),
@@ -458,7 +485,7 @@ end"#,
         "now_ns() is the wall clock: {stamped} outside {before}..={after}"
     );
     assert_eq!(
-        h.counter(Metric::LuaErrors, &lua_error("runtime")),
+        h.counter(CounterMetric::LuaErrors, &lua_error("runtime")),
         0,
         "log.* do not raise"
     );
@@ -482,9 +509,12 @@ end"#,
     assert_eq!(out[0].kind, fusion_core::record::Kind::Metric);
     assert_eq!(out[1].id.map(|id| id.0), Some(99));
     assert_eq!(out[1].kind, fusion_core::record::Kind::Span);
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
     assert_eq!(
-        h.counter(Metric::RecordsOut, &[("tenant", "acme"), ("stage", "out")]),
+        h.counter(
+            CounterMetric::RecordsOut,
+            &[("tenant", "acme"), ("stage", "out")]
+        ),
         2
     );
     h.finish();
@@ -499,9 +529,12 @@ fn a_script_may_rewrite_the_tenant_and_labels_keep_the_meta_tenant() {
     let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].resource.get("tenant.id"), Some(&json!("other")));
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
     assert_eq!(
-        h.counter(Metric::RecordsOut, &[("tenant", "acme"), ("stage", "out")]),
+        h.counter(
+            CounterMetric::RecordsOut,
+            &[("tenant", "acme"), ("stage", "out")]
+        ),
         1
     );
     h.finish();
@@ -653,8 +686,8 @@ fn the_demo_script_splits_lines_and_derives_the_status_class() {
             .find(|r| r.id == Some(fusion_core::record::RecordId(3)))
             .expect("record 3");
         assert_eq!(none.attributes.get("http.status_class"), None);
-        assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 5);
-        assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 5);
+        assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
         h.finish();
     });
 }
@@ -667,7 +700,10 @@ fn pcall_cannot_swallow_the_instruction_budget() {
     );
     let (out, h) = run(&yaml, 1, vec![record(1, json!({}))]);
     assert!(out.is_empty());
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
+    assert_eq!(
+        h.counter(CounterMetric::LuaErrors, &lua_error("instructions")),
+        1
+    );
     h.finish();
 }
 
@@ -679,7 +715,7 @@ fn pcall_cannot_swallow_the_memory_cap() {
     );
     let (out, h) = run(&yaml, 1, vec![record(1, json!({}))]);
     assert!(out.is_empty());
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("memory")), 1);
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("memory")), 1);
     h.finish();
 }
 
@@ -725,7 +761,10 @@ end"#,
         Some(&json!("false:handled"))
     );
     assert_eq!(out[0].attributes.get("values"), Some(&json!("true:12")));
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("runtime")), 0);
+    assert_eq!(
+        h.counter(CounterMetric::LuaErrors, &lua_error("runtime")),
+        0
+    );
     h.finish();
 }
 
@@ -752,7 +791,7 @@ fn a_memory_error_rebuilds_the_worker_vm_so_a_leaky_upvalue_does_not_poison_ever
             "upvalues start over after a rebuild"
         );
     }
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("memory")), 2);
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("memory")), 2);
     h.finish();
 }
 
@@ -769,7 +808,7 @@ end"#,
     assert_eq!(out[0].kind, fusion_core::record::Kind::Log);
     assert_eq!(out[0].severity_number, Some(9));
     assert_eq!(out[0].time_unix_nano, Some(2));
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
     h.finish();
 }
 
@@ -787,7 +826,7 @@ fn a_map_value_that_arrived_composite_round_trips_through_an_untouched_script() 
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].attributes.get("tags"), Some(&json!(["a", "b"])));
     assert_eq!(out[0].attributes.get("meta"), Some(&json!({"k": 1})));
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
     h.finish();
 }
 
@@ -805,7 +844,7 @@ end"#,
     let (out, h) = run(&yaml, 1, vec![record(big, json!({"body": "x"}))]);
     let ids: Vec<_> = out.iter().map(|r| r.id.map(|i| i.0)).collect();
     assert_eq!(ids, vec![Some(7), Some(big)]);
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
     h.finish();
 }
 
@@ -834,7 +873,7 @@ fn only_the_id_is_read_from_decimal_text_and_meta_is_not_a_record_field() {
         let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
         assert!(out.is_empty(), "{name}: refused");
         assert_eq!(
-            h.counter(Metric::LuaErrors, &lua_error("output")),
+            h.counter(CounterMetric::LuaErrors, &lua_error("output")),
             1,
             "{name}"
         );
@@ -883,7 +922,7 @@ end"#,
         assert_eq!(r.trace_id.as_deref(), Some("ab"));
         assert_eq!(r.resource.get("tenant.id"), Some(&json!("acme")));
     }
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 0);
     h.finish();
 }
 
@@ -900,7 +939,7 @@ end"#,
     );
     let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
     assert!(out.is_empty());
-    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 1);
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error("output")), 1);
     // The worker is still serving.
     let probe = h.source.push(record(2, json!({"body": "x"})));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));

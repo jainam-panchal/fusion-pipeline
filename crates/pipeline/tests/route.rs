@@ -6,7 +6,7 @@ mod common;
 
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::memory::{AckOutcome, MemorySinks};
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::CounterMetric;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_core::stage::{Context, Stage, StageOutput};
@@ -105,7 +105,7 @@ fn default_drop_drops_unmatched_records_and_still_acks() {
     assert!(h.ids("apache_out").is_empty());
     assert_eq!(
         h.counter(
-            Metric::RecordsDropped,
+            CounterMetric::RecordsDropped,
             &[
                 ("tenant", "acme"),
                 ("stage", "by_format"),

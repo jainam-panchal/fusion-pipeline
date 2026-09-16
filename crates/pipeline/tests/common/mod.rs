@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use fusion_core::engine::Engine;
 use fusion_core::memory::{MemoryInput, MemorySinks, MemorySource, MemoryStateStore};
-use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
+use fusion_core::metrics::{CounterMetric, HistogramMetric, InMemoryRecorder, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
@@ -141,12 +141,12 @@ impl Harness {
     }
 
     /// The counter `metric` under exactly `labels`, zero if never counted.
-    pub fn counter(&self, metric: Metric, labels: &[(&str, &str)]) -> u64 {
+    pub fn counter(&self, metric: CounterMetric, labels: &[(&str, &str)]) -> u64 {
         self.recorder.counter(metric, labels)
     }
 
     /// Every sample of the histogram `metric` under exactly `labels`.
-    pub fn samples(&self, metric: Metric, labels: &[(&str, &str)]) -> Vec<f64> {
+    pub fn samples(&self, metric: HistogramMetric, labels: &[(&str, &str)]) -> Vec<f64> {
         self.recorder.samples(metric, labels)
     }
 

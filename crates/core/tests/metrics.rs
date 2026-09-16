@@ -1,10 +1,13 @@
 //! The closed sets the spec fixes: the metric names, the drop reasons that label
-//! `records_dropped_total`, and the `edit` and `lua` label values. Each set's `ALL` is
+//! `records_dropped_total`, and the `edit`, `lua` and `engine` label values. Each set's `ALL` is
 //! complete by construction (`closed_set!`), so these pin its names to the spec. Nothing else
 //! is observable below the trait boundary; what the engine emits is tested through it in the
 //! pipeline crate.
 
-use fusion_core::metrics::{EditCause, EditOp, LuaErrorKind, Metric, MetricKind};
+use fusion_core::metrics::{
+    CounterMetric, EditCause, EditOp, EngineLabel, HistogramMetric, LuaErrorKind, Metric,
+    MetricKind,
+};
 use fusion_core::stage::DropReason;
 
 /// Spec, Telemetry: the drop reasons are exactly this set, in this spelling.
@@ -88,4 +91,39 @@ fn edit_label_values_are_exactly_the_spec_sets() {
 fn lua_error_kinds_are_exactly_the_spec_set() {
     let kinds: Vec<&str> = LuaErrorKind::ALL.iter().map(|k| k.as_str()).collect();
     assert_eq!(kinds, ["instructions", "memory", "runtime", "output"]);
+}
+
+/// Spec, regex facade: the `engine` label is `linear` or `backtracking`.
+#[test]
+fn engine_label_values_are_exactly_the_spec_set() {
+    let engines: Vec<&str> = EngineLabel::ALL.iter().map(|e| e.as_str()).collect();
+    assert_eq!(engines, ["linear", "backtracking"]);
+    assert_eq!(EngineLabel::Backtracking.to_string(), "backtracking");
+}
+
+/// The counters and the histograms together are every metric, each once, and each subset
+/// holds only its own instrument.
+#[test]
+fn the_typed_subsets_partition_the_metrics_by_instrument() {
+    let mut split: Vec<Metric> = CounterMetric::ALL
+        .iter()
+        .map(|c| c.metric())
+        .chain(HistogramMetric::ALL.iter().map(|h| h.metric()))
+        .collect();
+    let mut all = Metric::ALL.to_vec();
+    split.sort_unstable();
+    all.sort_unstable();
+    assert_eq!(split, all);
+    for counter in CounterMetric::ALL {
+        assert_eq!(counter.metric().kind(), MetricKind::Counter, "{counter}");
+        assert_eq!(counter.as_str(), counter.metric().as_str());
+    }
+    for histogram in HistogramMetric::ALL {
+        assert_eq!(
+            histogram.metric().kind(),
+            MetricKind::Histogram,
+            "{histogram}"
+        );
+        assert_eq!(histogram.as_str(), histogram.metric().as_str());
+    }
 }

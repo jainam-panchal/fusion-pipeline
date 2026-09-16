@@ -7,7 +7,7 @@ mod common;
 use std::time::Duration;
 
 use fusion_core::memory::AckOutcome;
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::{CounterMetric, HistogramMetric};
 use fusion_core::record::Record;
 use fusion_core::state::StateStore as _;
 use fusion_stages::dedupe as dedupe_stage;
@@ -43,7 +43,7 @@ fn two_different_records_with_the_same_key_inside_the_window_pass_once_and_drop_
 
         assert_eq!(h.ids("out"), vec![101], "workers={workers}");
         assert_eq!(
-            h.counter(Metric::RecordsDropped, &DEDUPE_DROP),
+            h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP),
             1,
             "workers={workers}"
         );
@@ -68,7 +68,7 @@ fn the_same_record_pushed_twice_passes_twice_because_redelivery_is_not_a_duplica
 
         assert_eq!(h.ids("out"), vec![101, 101], "workers={workers}");
         assert_eq!(
-            h.counter(Metric::RecordsDropped, &DEDUPE_DROP),
+            h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP),
             0,
             "workers={workers}"
         );
@@ -124,7 +124,7 @@ fn a_record_redelivered_after_its_window_expired_and_a_newer_duplicate_took_the_
     );
 
     assert_eq!(h.ids("out"), vec![101, 101, 102]);
-    assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 1);
     h.finish();
 }
 
@@ -151,7 +151,7 @@ fn a_record_past_the_window_opens_a_new_one_so_the_burst_behind_it_still_dedupes
     // 101 opens [0, 10); 102 at 10 opens [10, 20) and 103, 104 drop; 105 at 20 opens
     // [20, 30) and 106 drops.
     assert_eq!(h.ids("out"), vec![101, 102, 105]);
-    assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 3);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 3);
     h.finish();
 }
 
@@ -210,7 +210,7 @@ fn two_records_past_the_window_racing_on_two_workers_pass_exactly_once() {
         );
 
         assert_eq!(h.ids("out"), vec![101], "103 is a repeat of 102");
-        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 1);
         assert_eq!(stored_holder(&h), holder(102, 10), "102 keeps the key");
         h.finish();
     });
@@ -245,7 +245,7 @@ fn a_stale_takeover_against_a_newer_holder_does_not_move_the_window_back() {
         );
 
         assert_eq!(h.ids("out"), vec![101, 102]);
-        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 1);
         assert_eq!(
             stored_holder(&h),
             holder(105, 20),
@@ -279,7 +279,7 @@ fn a_takeover_of_a_key_that_expired_since_the_claim_still_claims_it() {
         );
 
         assert_eq!(h.ids("out"), vec![101, 102]);
-        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 1);
         h.finish();
     });
 }
@@ -313,7 +313,7 @@ fn a_takeover_refused_by_a_holder_that_is_also_past_the_window_is_retried_once()
         );
 
         assert_eq!(h.ids("out"), vec![101, 102], "workers={workers}");
-        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 1);
         assert_eq!(stored_holder(&h), holder(102, 10), "102 took the key over");
         h.finish();
     });
@@ -349,7 +349,7 @@ fn a_takeover_refused_twice_passes_without_a_third_attempt() {
         assert_eq!(stored_holder(&h), holder(98, 0), "102 gave up the takeover");
         let stage = [("tenant", "acme"), ("stage", "dedupe_body")];
         assert_eq!(
-            h.counter(Metric::StateOps, &stage),
+            h.counter(CounterMetric::StateOps, &stage),
             1 + 3,
             "101's claim, then 102's claim and two takeovers"
         );
@@ -369,17 +369,17 @@ fn with_on_state_error_pass_a_failing_store_forwards_the_record_and_counts_the_e
         assert_eq!(h.ids("out"), vec![101], "workers={workers}");
         let stage = [("tenant", "acme"), ("stage", "dedupe_body")];
         assert_eq!(
-            h.counter(Metric::StateErrors, &stage),
+            h.counter(CounterMetric::StateErrors, &stage),
             1,
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::RecordsErrored, &stage),
+            h.counter(CounterMetric::RecordsErrored, &stage),
             0,
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::RecordsOut, &stage),
+            h.counter(CounterMetric::RecordsOut, &stage),
             1,
             "workers={workers}"
         );
@@ -403,16 +403,19 @@ fn with_on_state_error_nak_a_failing_store_naks_the_record_and_counts_the_error(
         assert!(h.ids("out").is_empty(), "workers={workers}");
         let stage = [("tenant", "acme"), ("stage", "dedupe_body")];
         assert_eq!(
-            h.counter(Metric::StateErrors, &stage),
+            h.counter(CounterMetric::StateErrors, &stage),
             1,
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::RecordsErrored, &stage),
+            h.counter(CounterMetric::RecordsErrored, &stage),
             1,
             "workers={workers}"
         );
-        assert_eq!(h.counter(Metric::SourceNaks, &[("tenant", "acme")]), 1);
+        assert_eq!(
+            h.counter(CounterMetric::SourceNaks, &[("tenant", "acme")]),
+            1
+        );
         h.finish();
     });
 }
@@ -483,12 +486,12 @@ fn every_store_operation_is_counted_and_timed_for_the_tenant_and_node() {
 
     let stage = [("tenant", "acme"), ("stage", "dedupe_body")];
     assert_eq!(
-        h.counter(Metric::StateOps, &stage),
+        h.counter(CounterMetric::StateOps, &stage),
         2,
         "one set_nx per record"
     );
-    assert_eq!(h.samples(Metric::StateOpDuration, &stage).len(), 2);
-    assert_eq!(h.counter(Metric::StateErrors, &stage), 0);
+    assert_eq!(h.samples(HistogramMetric::StateOpDuration, &stage).len(), 2);
+    assert_eq!(h.counter(CounterMetric::StateErrors, &stage), 0);
     h.finish();
 }
 
@@ -587,17 +590,17 @@ fn a_stage_that_uses_state_without_declaring_it_gets_an_error_naming_the_node_an
     assert!(matches!(outcome, Some(AckOutcome::Nak(_))), "{outcome:?}");
     let stage = [("tenant", "acme"), ("stage", "liar")];
     assert_eq!(
-        h.counter(Metric::StateOps, &stage),
+        h.counter(CounterMetric::StateOps, &stage),
         0,
         "no store was contacted"
     );
     assert_eq!(
-        h.counter(Metric::StateErrors, &stage),
+        h.counter(CounterMetric::StateErrors, &stage),
         0,
         "not a store error"
     );
     assert_eq!(
-        h.counter(Metric::RecordsErrored, &stage),
+        h.counter(CounterMetric::RecordsErrored, &stage),
         1,
         "policy still applied"
     );
@@ -622,7 +625,10 @@ fn an_undeclared_stage_under_pass_forwards_the_record() {
 
     assert_eq!(h.ids("out"), vec![1]);
     assert_eq!(
-        h.counter(Metric::StateOps, &[("tenant", "acme"), ("stage", "liar")]),
+        h.counter(
+            CounterMetric::StateOps,
+            &[("tenant", "acme"), ("stage", "liar")]
+        ),
         0
     );
     h.finish();
