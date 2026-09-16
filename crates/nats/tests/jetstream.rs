@@ -1354,8 +1354,8 @@ fn a_failed_dlq_publish_naks_without_delay_and_is_not_terminated() {
     engine.join().expect("clean shutdown");
 }
 
-/// A message dead-lettered twice (a crash between the dead letter and the terminate) is
-/// stored once: the dead letter's id is the message's stream and sequence.
+/// A message dead-lettered twice (a retry of a publish the server stored but whose `PubAck`
+/// was lost) is stored once: the dead letter's id is the message's stream and sequence.
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
 fn a_duplicate_dead_letter_is_stored_once() {

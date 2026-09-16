@@ -387,9 +387,11 @@ async fn get_stream(
         })
 }
 
-/// Check that one stream captures `{prefix}.<tenant>` for every tenant. JetStream refuses
-/// two streams with overlapping subjects, so the stream that overlaps `{prefix}.*`, if any,
-/// is the only candidate.
+/// Check that one stream captures `{prefix}.<tenant>` for every tenant. Several streams can
+/// overlap `{prefix}.*` (`dlq.acme` and `dlq.beta` do, without overlapping each other), but
+/// a stream that covers every tenant overlaps any stream that does, and JetStream refuses
+/// two streams with overlapping subjects. So when a covering stream exists it is the only
+/// one overlapping `{prefix}.*`, and it is the one asked about here.
 async fn check_dead_letter_stream(
     context: &jetstream::Context,
     prefix: &str,

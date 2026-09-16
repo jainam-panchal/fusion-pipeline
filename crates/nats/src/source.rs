@@ -157,9 +157,11 @@ impl DeadLetters {
             .dlq_publish_duration(&delivery.tenant, started.elapsed());
         match published {
             Ok(()) => {
-                self.terminate(delivery, acker, &failure).await;
+                // Counted on the `PubAck`, before the terminate: the dead letter is stored,
+                // whatever becomes of the terminate.
                 self.metrics
                     .dead_lettered(&delivery.tenant, &failure.node, failure.kind);
+                self.terminate(delivery, acker, &failure).await;
             }
             Err(err) => {
                 eprintln!(
@@ -220,8 +222,9 @@ impl DeadLetters {
         };
         let body = format!("+TERM dlq {}: {}", failure.node, failure.kind);
         if let Err(err) = self.context.client().publish(reply, body.into()).await {
-            // The dead letter is stored; a lost terminate runs out `ack_wait` and the
-            // message's deliveries, and a second dead letter of it is a duplicate.
+            // The dead letter is stored. A lost terminate leaves the message unsettled on
+            // its final delivery, so JetStream does not deliver it again: once `ack_wait`
+            // runs out it gives up on the message with a `MAX_DELIVERIES` advisory.
             eprintln!("nats source: could not terminate a dead-lettered message: {err}");
         }
     }
