@@ -11,12 +11,11 @@
 //!
 //! Each message is decoded as one JSON record and handed to the engine, untouched, with an
 //! ack handle that acks or naks the JetStream message. What the transport says about the
-//! message goes beside the record as its [`Arrival`] (see [`crate::headers::arrival`]): the
-//! subject's tenant (`{tenant_prefix}.{tenant}.>`), else an upstream pipeline's
-//! `Fusion-Tenant`; an upstream pipeline's
-//! `Fusion-Ingestion-Time`, else the JetStream publish time; and the delivery count. The
-//! engine resolves the record's `Meta` from it (ADR 0005). Nothing is written into the
-//! record. The publish time is the server's and does not change on redelivery, so stateful
+//! message goes beside the record as its [`fusion_core::meta::Arrival`], built by
+//! [`crate::headers::arrival`]: the subject's tenant (`{tenant_prefix}.{tenant}.>`), else an
+//! upstream pipeline's `Fusion-Tenant`; an upstream pipeline's `Fusion-Ingestion-Time`, else
+//! the JetStream publish time; and the delivery count. The engine resolves the record's
+//! `Meta` from it alone (ADR 0005). Nothing is read from or written into the record. The publish time is the server's and does not change on redelivery, so stateful
 //! stages that measure windows in ingestion time see the same value every time the record
 //! comes back.
 //!

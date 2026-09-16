@@ -26,20 +26,14 @@ fn map(pairs: &[(&str, &str)]) -> HeaderMap {
     headers
 }
 
-/// What [`headers::arrival`] gave for one message.
-struct Arrived {
-    arrival: Arrival,
-    invalid: Vec<InvalidHeader>,
-}
-
 /// The arrival of a message on `subject` under the default `logs` prefix.
-fn arrival(
+fn arrival_of(
     subject: &str,
     headers: Option<&HeaderMap>,
     published: Option<u64>,
     delivered: u64,
-) -> Arrived {
-    let (arrival, invalid) = headers::arrival(
+) -> (Arrival, Vec<InvalidHeader>) {
+    headers::arrival(
         "logs",
         Received {
             subject,
@@ -47,8 +41,7 @@ fn arrival(
             published,
             delivered,
         },
-    );
-    Arrived { arrival, invalid }
+    )
 }
 
 fn value<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
@@ -78,55 +71,55 @@ fn what_the_sink_writes_a_downstream_source_reads_back() {
         IngestionTime::Clock(5),
     ] {
         let written = headers::for_meta(&meta(time));
-        let arrived = arrival("processed.logs", Some(&written), Some(1), 1);
+        let (arrival, invalid) = arrival_of("processed.logs", Some(&written), Some(1), 1);
         assert_eq!(
-            arrived.arrival,
+            arrival,
             Arrival {
                 tenant: Some("acme".to_owned()),
                 ingestion_time: Some(time),
                 delivery_count: 1,
             }
         );
-        assert!(arrived.invalid.is_empty());
+        assert!(invalid.is_empty());
     }
 }
 
 #[test]
 fn a_message_with_no_headers_takes_the_subjects_tenant_and_the_publish_time() {
-    let arrived = arrival("logs.acme.syslog", None, Some(9_000_000_000), 2);
+    let (arrival, invalid) = arrival_of("logs.acme.syslog", None, Some(9_000_000_000), 2);
     assert_eq!(
-        arrived.arrival,
+        arrival,
         Arrival {
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
             delivery_count: 2,
         }
     );
-    assert!(arrived.invalid.is_empty());
+    assert!(invalid.is_empty());
 }
 
 #[test]
 fn the_subjects_tenant_wins_over_the_header() {
     let headers = map(&[(TENANT, "beta")]);
-    let arrived = arrival("logs.acme.syslog", Some(&headers), None, 1);
-    assert_eq!(arrived.arrival.tenant.as_deref(), Some("acme"));
+    let (arrival, invalid) = arrival_of("logs.acme.syslog", Some(&headers), None, 1);
+    assert!(invalid.is_empty());
+    assert_eq!(arrival.tenant.as_deref(), Some("acme"));
 }
 
 #[test]
 fn the_header_tenant_is_used_when_the_subject_names_none() {
     let headers = map(&[(TENANT, "beta")]);
-    let arrived = arrival("processed", Some(&headers), None, 1);
-    assert_eq!(arrived.arrival.tenant.as_deref(), Some("beta"));
+    let (arrival, invalid) = arrival_of("processed", Some(&headers), None, 1);
+    assert!(invalid.is_empty());
+    assert_eq!(arrival.tenant.as_deref(), Some("beta"));
 }
 
 #[test]
 fn the_header_time_wins_over_the_publish_time() {
     let headers = map(&[(INGESTION_TIME, "5"), (INGESTION_TIME_KIND, "reported")]);
-    let arrived = arrival("logs.acme.syslog", Some(&headers), Some(9), 1);
-    assert_eq!(
-        arrived.arrival.ingestion_time,
-        Some(IngestionTime::Reported(5))
-    );
+    let (arrival, invalid) = arrival_of("logs.acme.syslog", Some(&headers), Some(9), 1);
+    assert!(invalid.is_empty());
+    assert_eq!(arrival.ingestion_time, Some(IngestionTime::Reported(5)));
 }
 
 #[test]
@@ -157,11 +150,11 @@ fn a_header_that_does_not_parse_is_left_out_and_reported() {
     ];
     for (pairs, problem) in cases {
         let headers = map(pairs);
-        let arrived = arrival("processed", Some(&headers), Some(9), 1);
-        assert_eq!(arrived.invalid, vec![problem.clone()], "{pairs:?}");
-        assert_eq!(arrived.arrival.tenant, None, "{pairs:?}");
+        let (arrival, invalid) = arrival_of("processed", Some(&headers), Some(9), 1);
+        assert_eq!(invalid, vec![problem.clone()], "{pairs:?}");
+        assert_eq!(arrival.tenant, None, "{pairs:?}");
         assert_eq!(
-            arrived.arrival.ingestion_time,
+            arrival.ingestion_time,
             Some(IngestionTime::Reported(9)),
             "{pairs:?}: the publish time stands"
         );
@@ -171,24 +164,24 @@ fn a_header_that_does_not_parse_is_left_out_and_reported() {
 #[test]
 fn a_bad_time_and_a_bad_kind_are_both_reported() {
     let headers = map(&[(INGESTION_TIME, "x"), (INGESTION_TIME_KIND, "y")]);
-    let arrived = arrival("processed", Some(&headers), None, 1);
+    let (arrival, invalid) = arrival_of("processed", Some(&headers), None, 1);
     assert_eq!(
-        arrived.invalid,
+        invalid,
         vec![
             InvalidHeader::Time("x".to_owned()),
             InvalidHeader::Kind("y".to_owned())
         ]
     );
-    assert_eq!(arrived.arrival.ingestion_time, None);
+    assert_eq!(arrival.ingestion_time, None);
 }
 
 #[test]
 fn a_header_given_twice_is_refused() {
     let mut headers = map(&[(TENANT, "acme")]);
     headers.append(TENANT, "beta");
-    let arrived = arrival("processed", Some(&headers), None, 1);
-    assert_eq!(arrived.invalid, vec![InvalidHeader::Repeated(TENANT)]);
-    assert_eq!(arrived.arrival.tenant, None);
+    let (arrival, invalid) = arrival_of("processed", Some(&headers), None, 1);
+    assert_eq!(invalid, vec![InvalidHeader::Repeated(TENANT)]);
+    assert_eq!(arrival.tenant, None);
 }
 
 #[test]
