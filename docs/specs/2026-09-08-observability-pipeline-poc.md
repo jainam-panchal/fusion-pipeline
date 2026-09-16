@@ -312,7 +312,7 @@ The events are:
 - `dead_letter` (warn): the NATS source, on the dead letter's `PubAck`.
 - `dead_letter_failed` (error): the NATS source, when every dead-letter publish failed.
 
-Drops are not logged. A non-final nak of an undecodable payload is not an event either: it stays on stderr and its counters. A `nak` line does not mean the message is dead: the NATS source decides that, and says so with its own line.
+Drops are not logged. A non-final nak of an undecodable payload is not an event either: it stays on stderr and its counters. A `lua` script's `log.*` lines are not events either; they stay on stderr, and shipping them is a follow-up. A `nak` line does not mean the message is dead: the NATS source decides that, and says so with its own line.
 
 **Traces.** Head sampling is replaced by a decision taken when the record settles. The trace of a delivery is kept when any branch failed, when the delivery count is above one, or when the record's trace key falls in the share `OTEL_TRACES_SAMPLER_ARG` gives (default `0.01`; there is still no telemetry block in the YAML). The trace key is `mix(record id ^ fnv1a(tenant) ^ salt)`, and the trace id is `key << 64 | record id`. So every delivery of one record lands in one trace, and a log line and its trace share the trace id. A kept trace has:
 

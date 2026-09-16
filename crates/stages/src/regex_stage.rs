@@ -106,8 +106,7 @@ impl RegexParams {
     ) -> Result<Regex, ConfigError> {
         let regex = Regex::with_options(pattern, &self.options())
             .map_err(|e| node.invalid_params(format!("{what} `{pattern}`: {e}")))?;
-        // Structured logging over OTLP lands with the logs ticket; until then the load-time
-        // classification is at least visible on stderr.
+        // Load-time lines go to stderr: the event log carries per-record events only.
         eprintln!("pipeline: node `{}` {what}={pattern:?}", node.id);
         for risk in regex.redos_warnings() {
             eprintln!(

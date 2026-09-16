@@ -41,7 +41,9 @@
 //! tried [`DEAD_LETTER_RETRIES`] more times; when every try fails the message is nakked
 //! with no delay, so JetStream gives up on it at once with a `MAX_DELIVERIES` advisory, and
 //! `dlq_publish_errors_total` counts it. The message is then only in its stream, which the
-//! stream sequence on stderr finds. Either way `dlq_publish_duration_seconds` times every
+//! stream sequence on the `dead_letter_failed` event finds. A stored dead letter is logged as
+//! a `dead_letter` event, with the record id the engine's failure names and the record's
+//! trace. Either way `dlq_publish_duration_seconds` times every
 //! try together. A delivery whose message info the source could not read is never taken
 //! for the final one. An undecodable payload takes the same path from the receive loop,
 //! which it holds up while the tries last.
@@ -49,7 +51,7 @@
 //! The engine counts a redelivered record on `source_redeliveries_total` under its `Meta`
 //! tenant. A payload that does not decode has no record, so the source counts it itself,
 //! the redelivery and the nak it issues (`source_naks_total`), under the tenant its arrival
-//! gives, which is the tenant `Meta` would have had.
+//! gives, which is the tenant `Meta` would have had, and its bytes on `bytes_in_total`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -57,10 +59,13 @@ use std::time::{Duration, Instant};
 use async_nats::Subject;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{self, AckKind, message::Acker};
+use fusion_core::events::{Event, EventKind};
 use fusion_core::io::{AckHandle, Envelope, Failure, FailureKind, Intake, Source, SourceError};
 use fusion_core::meta::{IngestionTime, Meta};
 use fusion_core::metrics::Metrics;
 use fusion_core::record::Record;
+use fusion_core::signals::Signals;
+use fusion_core::trace::TraceKey;
 use futures::StreamExt;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
@@ -114,7 +119,7 @@ pub(crate) struct DeadLetters {
     prefix: String,
     /// The consumer's `max_deliver`.
     limit: u64,
-    metrics: Metrics,
+    signals: Signals,
 }
 
 impl DeadLetters {
@@ -122,14 +127,39 @@ impl DeadLetters {
         context: jetstream::Context,
         prefix: String,
         limit: u64,
-        metrics: Metrics,
+        signals: Signals,
     ) -> Self {
         Self {
             context,
             prefix,
             limit,
-            metrics,
+            signals,
         }
+    }
+
+    /// Log `kind` about the dead letter of `delivery` for `failure`.
+    fn log(
+        &self,
+        kind: EventKind,
+        delivery: &Delivery,
+        position: &Position,
+        failure: &Failure,
+        message: String,
+    ) {
+        self.signals.emit(Event {
+            kind,
+            record_id: failure.record_id,
+            tenant: delivery.tenant.as_str().into(),
+            node: failure.node.clone(),
+            reason: Some(failure.kind),
+            delivery_count: position.delivered,
+            stream_sequence: Some(position.stream_sequence),
+            message,
+            // The engine kept this delivery's trace: it failed.
+            trace: failure
+                .record_id
+                .map(|id| TraceKey::new(id, &delivery.tenant).delivery_context(position.delivered)),
+        });
     }
 
     /// Settle a failed `delivery`: dead-letter and terminate it on its final delivery,
@@ -153,23 +183,38 @@ impl DeadLetters {
         };
         let started = Instant::now();
         let published = self.publish(delivery, position, &failure).await;
-        self.metrics
-            .dlq_publish_duration(&delivery.tenant, started.elapsed());
+        let metrics = self.signals.metrics();
+        metrics.dlq_publish_duration(&delivery.tenant, started.elapsed());
         match published {
             Ok(()) => {
                 // Counted on the `PubAck`, before the terminate: the dead letter is stored,
                 // whatever becomes of the terminate.
-                self.metrics
-                    .dead_lettered(&delivery.tenant, &failure.node, failure.kind);
+                metrics.dead_lettered(&delivery.tenant, &failure.node, failure.kind);
+                self.log(
+                    EventKind::DeadLetter,
+                    delivery,
+                    position,
+                    &failure,
+                    failure.error.clone(),
+                );
                 self.terminate(delivery, acker, &failure).await;
             }
             Err(err) => {
-                eprintln!(
-                    "nats source: could not dead-letter message {} of stream `{}` (`{}`), \
-                     left in the stream: {err}",
-                    position.stream_sequence, position.stream, delivery.message.subject
+                self.log(
+                    EventKind::DeadLetterFailed,
+                    delivery,
+                    position,
+                    &failure,
+                    format!(
+                        "could not dead-letter message {} of stream `{}` (`{}`), left in the \
+                         stream: {err}; it failed with: {}",
+                        position.stream_sequence,
+                        position.stream,
+                        delivery.message.subject,
+                        failure.error
+                    ),
                 );
-                self.metrics.dlq_publish_error(&delivery.tenant);
+                metrics.dlq_publish_error(&delivery.tenant);
                 // No delay: JetStream gives up on the message now rather than after one.
                 settle(acker, AckKind::Nak(None)).await;
             }
@@ -364,6 +409,9 @@ impl NatsSource {
             let record = match decoded {
                 Ok(record) => record,
                 Err(err) => {
+                    if let Some(bytes) = arrival.bytes {
+                        self.metrics.bytes_in(&tenant, bytes);
+                    }
                     if delivered > 1 {
                         self.metrics.source_redelivery(&tenant);
                     }
