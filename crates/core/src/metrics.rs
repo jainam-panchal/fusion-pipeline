@@ -54,6 +54,9 @@ closed_set! {
         SourceNaks = "source_naks_total",
         /// `source_redeliveries_total{tenant}`: messages the source saw more than once.
         SourceRedeliveries = "source_redeliveries_total",
+        /// `source_invalid_headers_total{tenant}`: pipeline headers a source ignored because
+        /// they did not parse.
+        SourceInvalidHeaders = "source_invalid_headers_total",
         /// `dlq_total{tenant}`: messages sent to the dead-letter queue.
         Dlq = "dlq_total",
         /// `sink_publish_duration_seconds{tenant, stage}`: one sink write, until durable
@@ -91,6 +94,7 @@ impl Metric {
             | Self::EditUnapplied
             | Self::SourceNaks
             | Self::SourceRedeliveries
+            | Self::SourceInvalidHeaders
             | Self::Dlq
             | Self::SinkPublishErrors => MetricKind::Counter,
             Self::StageDuration
@@ -391,6 +395,12 @@ impl Metrics {
     pub fn source_redelivery(&self, tenant: &str) {
         self.recorder
             .count(Metric::SourceRedeliveries, &Labels::for_tenant(tenant), 1);
+    }
+
+    /// `source_invalid_headers_total`.
+    pub fn source_invalid_header(&self, tenant: &str) {
+        self.recorder
+            .count(Metric::SourceInvalidHeaders, &Labels::for_tenant(tenant), 1);
     }
 
     /// `pipeline_end_to_end_seconds`.
