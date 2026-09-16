@@ -1,9 +1,11 @@
-//! The record as a plain Lua table with OTLP field names, and the way back with the
-//! checks the spec asks for: types right, strings under the size cap. Every field is
-//! payload (ADR 0005), so a script may change or drop any of them.
+//! The record as a plain Lua table with OTLP field names, and the way back: Lua values
+//! converted to JSON, strings under the size cap, and every field written through core's
+//! write rules, so no field's type is spelled here (issue #43). Every field is payload
+//! (ADR 0005), so a script may change or drop any of them.
 
 use fusion_core::meta::Meta;
-use fusion_core::record::{Kind, Record, RecordId};
+use fusion_core::path::FieldPath;
+use fusion_core::record::{Record, RecordId};
 use mlua::{Integer, Table, Value as LuaValue};
 use serde_json::{Map, Value};
 
@@ -139,36 +141,6 @@ impl Reader {
         Ok(())
     }
 
-    /// A string field, `None` for `nil`.
-    fn string(&mut self, value: &LuaValue, field: &str) -> Result<Option<String>, OutputError> {
-        match value {
-            LuaValue::Nil => Ok(None),
-            LuaValue::String(s) => {
-                self.take(s.as_bytes().len(), field)?;
-                s.to_str()
-                    .map(|s| Some(s.to_owned()))
-                    .map_err(|_| OutputError(format!("`{field}` is not valid UTF-8")))
-            }
-            other => refuse(format!(
-                "`{field}` must be a string, not {}",
-                type_name(other)
-            )),
-        }
-    }
-
-    /// One of the record's maps: `nil` is the empty map, a table is its entries, anything
-    /// else is refused.
-    fn map(&mut self, value: &LuaValue, field: &str) -> Result<Map<String, Value>, OutputError> {
-        match value {
-            LuaValue::Nil => Ok(Map::new()),
-            LuaValue::Table(t) => self.entries(t, field),
-            other => refuse(format!(
-                "`{field}` must be a table, not {}",
-                type_name(other)
-            )),
-        }
-    }
-
     /// A table's string-keyed entries as a JSON object. A value that is itself a table is
     /// taken as the JSON it is: the flat-map rule is the source's contract, so a value that
     /// arrived composite must leave an untouched script the way it came in.
@@ -235,8 +207,9 @@ impl Reader {
 }
 
 /// The table the script returned as a record, its strings together under `output_bytes`.
-/// Every field is optional and typed as core types it (`kind` is `log` when left out), and
-/// a key that is not a record field is refused, so a typo cannot silently drop data.
+/// A key must be a record field, so a typo cannot silently drop data; a map field must be a
+/// table (or `nil`, the empty map); every value goes through core's write rules. Every field
+/// is optional (`kind` is `log` when left out).
 pub(crate) fn from_table(table: &Table, output_bytes: usize) -> Result<Record, OutputError> {
     let mut record = Record::default();
     let mut reader = Reader {
@@ -251,94 +224,64 @@ pub(crate) fn from_table(table: &Table, output_bytes: usize) -> Result<Record, O
         };
         let key = key
             .to_str()
-            .map_err(|_| OutputError("a key is not valid UTF-8".into()))?;
-        match &*key {
-            "id" => record.id = id(&value)?,
-            "kind" => record.kind = kind(&value)?,
-            "time_unix_nano" => record.time_unix_nano = time(&value, "time_unix_nano")?,
-            "observed_time_unix_nano" => {
-                record.observed_time_unix_nano = time(&value, "observed_time_unix_nano")?;
+            .map_err(|_| OutputError("a key is not valid UTF-8".into()))?
+            .to_owned();
+        if FieldPath::is_map(&key) {
+            let entries = match &value {
+                LuaValue::Nil => continue,
+                LuaValue::Table(t) => reader.entries(t, &key)?,
+                other => {
+                    return refuse(format!("`{key}` must be a table, not {}", type_name(other)));
+                }
+            };
+            for (name, value) in entries {
+                let path = FieldPath::under(&key, &name)
+                    .ok_or_else(|| OutputError(format!("`{key}` is not a record map")))?;
+                write(&path, &mut record, value, false)?;
             }
-            "severity_text" => record.severity_text = reader.string(&value, "severity_text")?,
-            "severity_number" => {
-                record.severity_number = integer(&value, "severity_number")?
-                    .map(|i| {
-                        i32::try_from(i).map_err(|_| {
-                            OutputError("`severity_number` must be an integer in i32".into())
-                        })
-                    })
-                    .transpose()?;
-            }
-            "body" => record.body = reader.json(&value, "body")?,
-            "attributes" => record.attributes = reader.map(&value, "attributes")?,
-            "resource" => record.resource = reader.map(&value, "resource")?,
-            "scope" => record.scope = reader.map(&value, "scope")?,
-            "trace_id" => record.trace_id = reader.string(&value, "trace_id")?,
-            "span_id" => record.span_id = reader.string(&value, "span_id")?,
-            other => return refuse(format!("`{other}` is not a record field")),
+            continue;
         }
+        let Some(path) = FieldPath::top_level(&key) else {
+            return refuse(format!("`{key}` is not a record field"));
+        };
+        let Some(value) = reader.json(&value, &key)? else {
+            continue;
+        };
+        write(&path, &mut record, value, key == "id")?;
     }
     Ok(record)
 }
 
-/// An `id` as [`to_table`] hands it over: a non-negative integer, or its decimal text when
-/// it does not fit Lua's signed 64 bits.
-fn id(value: &LuaValue) -> Result<Option<RecordId>, OutputError> {
-    const EXPECTED: &str = "`id` must be a non-negative integer or its decimal text";
-    match value {
-        LuaValue::String(s) => s
-            .to_str()
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .map(|n| Some(RecordId(n)))
-            .ok_or_else(|| OutputError(EXPECTED.into())),
-        LuaValue::Integer(_) | LuaValue::Number(_) | LuaValue::Nil => integer(value, "id")?
-            .map(|i| {
-                u64::try_from(i)
-                    .map(RecordId)
-                    .map_err(|_| OutputError(EXPECTED.into()))
-            })
-            .transpose(),
-        other => refuse(format!("{EXPECTED}, not {}", type_name(other))),
+/// Write `value` through core's write rules. When the rules refuse it as given, the value
+/// is tried once more in the form a Lua author means: an integral float as the integer
+/// (`18 / 2` is a float in Lua 5.4), and for the record id, decimal text as the integer (the
+/// form [`to_table`] hands over an id above 2^63 in). The refusal reported is core's.
+fn write(path: &FieldPath, record: &mut Record, value: Value, id: bool) -> Result<(), OutputError> {
+    let meant = as_meant(&value, id);
+    let Err(refused) = path.write(record, value) else {
+        return Ok(());
+    };
+    match meant.map(|meant| path.write(record, meant)) {
+        Some(Ok(())) => Ok(()),
+        _ => refuse(refused.to_string()),
     }
 }
 
-/// A `kind`: one of [`Kind::ONE_OF`]; `log` when absent, the wire default.
-fn kind(value: &LuaValue) -> Result<Kind, OutputError> {
-    let expected = || format!("`kind` must be {}", Kind::ONE_OF);
+/// The integer a Lua value stands for when it is not written as one: an integral float
+/// within the range a float holds exactly, or, for the record id, decimal digits.
+fn as_meant(value: &Value, id: bool) -> Option<Value> {
     match value {
-        LuaValue::Nil => Ok(Kind::Log),
-        LuaValue::String(s) => s
-            .to_str()
-            .ok()
-            .and_then(|s| Kind::parse(&s))
-            .ok_or_else(|| OutputError(expected())),
-        other => refuse(format!("{}, not {}", expected(), type_name(other))),
-    }
-}
-
-/// An integer field: a Lua integer, or a float with no fraction, since `/` always yields a
-/// float in Lua 5.4 and `18 / 2` is the integer 9 to any author.
-fn integer(value: &LuaValue, field: &str) -> Result<Option<i64>, OutputError> {
-    match value {
-        LuaValue::Nil => Ok(None),
-        LuaValue::Integer(i) => Ok(Some(*i)),
-        LuaValue::Number(f) if f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0 => {
-            Ok(Some(*f as i64))
+        Value::Number(n) if n.is_f64() => {
+            let f = n.as_f64()?;
+            (f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0).then(|| Value::from(f as i64))
         }
-        other => refuse(format!(
-            "`{field}` must be an integer, not {}",
-            type_name(other)
-        )),
+        Value::String(text)
+            if id && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            text.parse::<u64>().ok().map(Value::from)
+        }
+        _ => None,
     }
-}
-
-fn time(value: &LuaValue, field: &str) -> Result<Option<u64>, OutputError> {
-    integer(value, field)?
-        .map(|i| {
-            u64::try_from(i).map_err(|_| OutputError(format!("`{field}` must not be negative")))
-        })
-        .transpose()
 }
 
 /// A Lua value's type as an error message names it.

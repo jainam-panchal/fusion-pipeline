@@ -796,3 +796,54 @@ fn a_map_value_that_arrived_composite_round_trips_through_an_untouched_script() 
     assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
     h.finish();
 }
+
+#[test]
+fn an_id_above_two_to_the_63_crosses_as_text_and_comes_back_as_the_integer() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  assert(type(record.id) == "string", "an id above 2^63 is its decimal text")
+  local copy = { id = "7", body = "set as text", resource = record.resource }
+  return { record, copy }
+end"#,
+    );
+    let big = u64::MAX - 1;
+    let (out, h) = run(&yaml, 1, vec![record(big, json!({"body": "x"}))]);
+    let ids: Vec<_> = out.iter().map(|r| r.id.map(|i| i.0)).collect();
+    assert_eq!(ids, vec![Some(7), Some(big)]);
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    h.finish();
+}
+
+#[test]
+fn only_the_id_is_read_from_decimal_text_and_meta_is_not_a_record_field() {
+    for (name, body) in [
+        (
+            "severity_number as text",
+            "record.severity_number = \"7\"\n  return record",
+        ),
+        (
+            "a time as text",
+            "record.time_unix_nano = \"7\"\n  return record",
+        ),
+        ("a fractional id", "record.id = 7.5\n  return record"),
+        ("a meta key", "record.meta = {}\n  return record"),
+        (
+            "a map that is not a table",
+            "record.attributes = 3\n  return record",
+        ),
+    ] {
+        let yaml = config(
+            "    on_error: drop\n",
+            &format!("function process(record)\n  {body}\nend"),
+        );
+        let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+        assert!(out.is_empty(), "{name}: refused");
+        assert_eq!(
+            h.counter(Metric::LuaErrors, &lua_error("output")),
+            1,
+            "{name}"
+        );
+        h.finish();
+    }
+}
