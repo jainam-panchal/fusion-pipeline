@@ -1,8 +1,9 @@
 # Loki for the pipeline's logs (issue #12): one process, filesystem storage, OTLP ingestion at
-# /otlp. The collector sends OTLP logs there. `service_name` is the only index label; every
-# log attribute (`event`, `record.id` as `record_id`, `tenant`, `node`, `reason`, ...) and the
-# trace context (`trace_id`, `span_id`) are structured metadata, so a record id adds no
-# stream. Structured metadata needs schema v13 on tsdb, and is switched on here explicitly so
+# /otlp. The collector sends OTLP logs there. `service_name` is the only index label: Loki's
+# default list would also index `service.instance.id`, so `otlp_config` replaces it. Every
+# other resource attribute, every log attribute (`event`, `record.id` as `record_id`,
+# `tenant`, `node`, `reason`, ...) and the trace context (`trace_id`, `span_id`) are
+# structured metadata, so neither a replica nor a record id adds a stream. Structured metadata needs schema v13 on tsdb, and is switched on here explicitly so
 # an image bump that changes the default does not break ingestion.
 auth_enabled: false
 
@@ -34,6 +35,12 @@ schema_config:
 
 limits_config:
   allow_structured_metadata: true
+  otlp_config:
+    resource_attributes:
+      ignore_defaults: true
+      attributes_config:
+        - action: index_label
+          attributes: [service.name]
   retention_period: 24h
 
 compactor:

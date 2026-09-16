@@ -115,6 +115,22 @@ fn loki_keeps_structured_metadata_and_tempo_listens_beyond_localhost() {
         at(&loki, &["limits_config", "allow_structured_metadata"]).as_bool(),
         Some(true)
     );
+    // Loki's default index labels include `service.instance.id`; only the service name is
+    // an index label here, so a replica adds no stream.
+    let resource = at(
+        &loki,
+        &["limits_config", "otlp_config", "resource_attributes"],
+    );
+    assert_eq!(at(resource, &["ignore_defaults"]).as_bool(), Some(true));
+    let rules = at(resource, &["attributes_config"])
+        .as_sequence()
+        .expect("attribute rules");
+    let indexed: Vec<String> = rules
+        .iter()
+        .filter(|rule| rule.get("action").and_then(Yaml::as_str) == Some("index_label"))
+        .flat_map(|rule| texts(at(rule, &["attributes"])))
+        .collect();
+    assert_eq!(indexed, ["service.name"]);
     let tempo = yaml("tempo.yaml");
     assert_eq!(
         text(
@@ -219,26 +235,97 @@ fn exprs(panel: &Json) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Every metric name in a PromQL expression: the identifiers followed by a selector.
+/// Every metric name in a PromQL expression, each with its selector (empty when it has
+/// none): the identifiers that end in `_total`, `_bucket`, `_count` or `_sum`, outside
+/// quoted strings, `{...}` selectors and the label lists of `by`, `without`, `on`,
+/// `ignoring`, `group_left` and `group_right`.
 fn metric_names(expr: &str) -> Vec<(String, String)> {
+    const SUFFIXES: [&str; 4] = ["_total", "_bucket", "_count", "_sum"];
+    const GROUPINGS: [&str; 6] = [
+        "by",
+        "without",
+        "on",
+        "ignoring",
+        "group_left",
+        "group_right",
+    ];
+    let chars: Vec<char> = expr.chars().collect();
     let mut names = Vec::new();
-    let mut rest = expr;
-    while let Some(open) = rest.find('{') {
-        let name: String = rest[..open]
-            .chars()
-            .rev()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        let close = rest[open..].find('}').expect("a closed selector") + open;
-        if !name.is_empty() {
-            names.push((name, rest[open + 1..close].to_owned()));
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '"' => {
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    i += if chars[i] == '\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            '{' => {
+                while i < chars.len() && chars[i] != '}' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            c if c.is_ascii_alphabetic() || c == '_' => {
+                let start = i;
+                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let name: String = chars[start..i].iter().collect();
+                if GROUPINGS.contains(&name.as_str()) {
+                    let mut j = i;
+                    while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+                        j += 1;
+                    }
+                    if chars.get(j) == Some(&'(') {
+                        i = chars[j..]
+                            .iter()
+                            .position(|c| *c == ')')
+                            .map_or(chars.len(), |p| j + p + 1);
+                    }
+                } else if SUFFIXES.iter().any(|suffix| name.ends_with(suffix)) {
+                    let selector = if chars.get(i) == Some(&'{') {
+                        let close = chars[i..]
+                            .iter()
+                            .position(|c| *c == '}')
+                            .map_or(chars.len(), |p| i + p);
+                        chars[i + 1..close].iter().collect()
+                    } else {
+                        String::new()
+                    };
+                    names.push((name, selector));
+                }
+            }
+            _ => i += 1,
         }
-        rest = &rest[close + 1..];
     }
     names
+}
+
+#[test]
+fn metric_names_finds_bare_metrics_and_skips_labels_and_strings() {
+    let names = |expr: &str| -> Vec<(String, String)> { metric_names(expr) };
+    assert_eq!(
+        names(
+            r#"sum by (stage) (rate(records_out_total{tenant="$tenant"}[1m]) and on (tenant, stage) bytes_out_total)"#
+        ),
+        [
+            (
+                "records_out_total".to_owned(),
+                r#"tenant="$tenant""#.to_owned()
+            ),
+            ("bytes_out_total".to_owned(), String::new()),
+        ]
+    );
+    assert_eq!(
+        names(r#"sum by (reason_count) (dlq_total{tenant="$tenant", stage="x_total"})"#),
+        [(
+            "dlq_total".to_owned(),
+            r#"tenant="$tenant", stage="x_total""#.to_owned()
+        )]
+    );
+    assert_eq!(names(r#"label_replace(up, "x", "y_total", "", "")"#), []);
 }
 
 #[test]

@@ -78,9 +78,10 @@ target_up() { [[ "$(prom_value "up{job=\"$1\"}")" == 1 ]]; }
 
 step "compose up (full stack, pipeline built)"
 "${COMPOSE[@]}" up -d --build --wait --wait-timeout 300 2>&1 | tail -3
-# The collector reads its config and Grafana its provisioning only at start, and `up` leaves
-# a running container alone when only a mounted file changed.
-"${COMPOSE[@]}" restart otel-collector grafana >/dev/null 2>&1
+# The collector, Loki and Tempo read their config and Grafana its provisioning only at start,
+# and `up` leaves a running container alone when only a mounted file changed.
+RESTARTED_NS=$(date +%s%N)
+"${COMPOSE[@]}" restart otel-collector loki tempo grafana >/dev/null 2>&1
 wait_for 30 "the LOGS/pipeline consumer" nats consumer info LOGS pipeline
 
 step "1. scrape targets up"
@@ -241,6 +242,9 @@ wait_for 30 "the failed sink's span in trace $trace_id" bash -c "$(declare -f te
 spans=$(tempo_spans "$trace_id" | sort | uniq -c | tr -s ' ' | paste -sd, -)
 [[ "$spans" == *delivery* ]] || fail "trace $trace_id has no delivery span: $spans"
 echo "trace $trace_id: $spans"
+labels=$(curl -sf --get "$LOKI/loki/api/v1/labels" --data-urlencode "start=$RESTARTED_NS" | jq -c '.data')
+[[ "$labels" == '["service_name"]' ]] || fail "Loki index labels are $labels, not only service_name"
+echo "Loki index labels: $labels"
 
 echo
 echo "OK: all telemetry checks passed"
