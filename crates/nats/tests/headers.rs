@@ -185,6 +185,74 @@ fn a_header_given_twice_is_refused() {
 }
 
 #[test]
+fn a_time_header_given_twice_is_counted_once_and_its_partner_only_if_malformed() {
+    let twice = |name, pairs: &[(&str, &str)]| {
+        let mut headers = map(pairs);
+        headers.append(name, "6");
+        headers
+    };
+    let cases = [
+        (
+            twice(INGESTION_TIME, &[(INGESTION_TIME, "5")]),
+            vec![InvalidHeader::Repeated(INGESTION_TIME)],
+        ),
+        (
+            twice(
+                INGESTION_TIME,
+                &[(INGESTION_TIME, "5"), (INGESTION_TIME_KIND, "reported")],
+            ),
+            vec![InvalidHeader::Repeated(INGESTION_TIME)],
+        ),
+        (
+            twice(
+                INGESTION_TIME_KIND,
+                &[(INGESTION_TIME, "5"), (INGESTION_TIME_KIND, "reported")],
+            ),
+            vec![InvalidHeader::Repeated(INGESTION_TIME_KIND)],
+        ),
+        (
+            twice(
+                INGESTION_TIME,
+                &[(INGESTION_TIME, "5"), (INGESTION_TIME_KIND, "bogus")],
+            ),
+            vec![
+                InvalidHeader::Repeated(INGESTION_TIME),
+                InvalidHeader::Kind("bogus".to_owned()),
+            ],
+        ),
+        (
+            twice(
+                INGESTION_TIME_KIND,
+                &[(INGESTION_TIME, "soon"), (INGESTION_TIME_KIND, "clock")],
+            ),
+            vec![
+                InvalidHeader::Time("soon".to_owned()),
+                InvalidHeader::Repeated(INGESTION_TIME_KIND),
+            ],
+        ),
+    ];
+    for (headers, expected) in cases {
+        let (arrival, invalid) = arrival_of("processed", Some(&headers), Some(9), 1);
+        assert_eq!(invalid, expected, "{headers:?}");
+        assert_eq!(arrival.ingestion_time, Some(IngestionTime::Reported(9)));
+    }
+}
+
+#[test]
+fn a_header_tenant_the_subject_overrides_is_not_read() {
+    let mut repeated = map(&[(TENANT, "acme")]);
+    repeated.append(TENANT, "beta");
+    for headers in [map(&[(TENANT, "")]), repeated] {
+        let (arrival, invalid) = arrival_of("logs.acme.syslog", Some(&headers), None, 1);
+        assert!(
+            invalid.is_empty(),
+            "{headers:?}: ignored regardless, so not counted"
+        );
+        assert_eq!(arrival.tenant.as_deref(), Some("acme"));
+    }
+}
+
+#[test]
 fn a_tenant_that_cannot_be_a_header_is_never_written() {
     let mut meta = meta(IngestionTime::Reported(5));
     meta.tenant = "a\nb".into();

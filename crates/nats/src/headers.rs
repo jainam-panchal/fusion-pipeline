@@ -47,7 +47,7 @@ pub fn for_meta(meta: &Meta) -> HeaderMap {
     headers
 }
 
-/// A pipeline header the source left out of the arrival.
+/// A pipeline header the source ignored because it did not parse.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum InvalidHeader {
@@ -82,14 +82,18 @@ pub struct Received<'m> {
 }
 
 /// The arrival of `received` by a source whose tenant subjects are
-/// `{tenant_prefix}.{tenant}.>`, and the pipeline headers left out of it because they did
-/// not parse:
+/// `{tenant_prefix}.{tenant}.>`, and the pipeline headers ignored because they did not
+/// parse:
 ///
 /// - tenant: the subject's tenant token, else `Fusion-Tenant`, each only when it passes
-///   [`is_valid_tenant`];
+///   [`is_valid_tenant`]; the header is not read when the subject names a valid tenant;
 /// - ingestion time: `Fusion-Ingestion-Time` with its kind, else the publish time as
 ///   reported;
 /// - delivery count: the delivery count.
+///
+/// Each header is ignored and reported at most once: a time header given twice is not
+/// reported again as unpaired, and its partner is reported only if its own value does not
+/// parse.
 #[must_use]
 pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<InvalidHeader>) {
     let Received {
@@ -99,30 +103,15 @@ pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<Inv
         delivered,
     } = received;
     let mut invalid = Vec::new();
-    let mut read = |name| {
-        header(headers, name).unwrap_or_else(|problem| {
-            invalid.push(problem);
-            None
-        })
-    };
-    let header_tenant = read(TENANT);
-    let time = read(INGESTION_TIME);
-    let kind = read(INGESTION_TIME_KIND);
-    let header_tenant = header_tenant.filter(|tenant| {
-        let valid = is_valid_tenant(tenant);
-        if !valid {
-            invalid.push(InvalidHeader::Tenant);
-        }
-        valid
-    });
     let tenant = tenant_from_subject(subject, tenant_prefix)
         .filter(|tenant| is_valid_tenant(tenant))
-        .or(header_tenant)
+        .or_else(|| header_tenant(headers, &mut invalid))
         .map(str::to_owned);
-    let header_time = ingestion_time(time, kind).unwrap_or_else(|problems| {
-        invalid.extend(problems);
-        None
-    });
+    let header_time = ingestion_time(
+        header(headers, INGESTION_TIME),
+        header(headers, INGESTION_TIME_KIND),
+        &mut invalid,
+    );
     let arrival = Arrival {
         tenant,
         ingestion_time: header_time.or(published.map(IngestionTime::Reported)),
@@ -131,32 +120,65 @@ pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<Inv
     (arrival, invalid)
 }
 
-/// The ingestion time the two time headers give, `None` when neither is present.
-fn ingestion_time(
-    time: Option<&str>,
-    kind: Option<&str>,
-) -> Result<Option<IngestionTime>, Vec<InvalidHeader>> {
-    match (time, kind) {
-        (None, None) => Ok(None),
-        (Some(_), None) => Err(vec![InvalidHeader::Unpaired(INGESTION_TIME)]),
-        (None, Some(_)) => Err(vec![InvalidHeader::Unpaired(INGESTION_TIME_KIND)]),
-        (Some(time), Some(kind)) => {
-            let nanos = time.parse::<u64>().ok().filter(|_| is_decimal(time));
-            match (nanos, TimeKind::parse(kind)) {
-                (Some(nanos), Some(kind)) => Ok(Some(IngestionTime::new(kind, nanos))),
-                (nanos, parsed_kind) => {
-                    let mut problems = Vec::new();
-                    if nanos.is_none() {
-                        problems.push(InvalidHeader::Time(time.to_owned()));
-                    }
-                    if parsed_kind.is_none() {
-                        problems.push(InvalidHeader::Kind(kind.to_owned()));
-                    }
-                    Err(problems)
-                }
-            }
+/// The `Fusion-Tenant` header when it is given once and passes [`is_valid_tenant`];
+/// otherwise `None`, with the reason pushed onto `invalid` when the header was present.
+fn header_tenant<'h>(
+    headers: Option<&'h HeaderMap>,
+    invalid: &mut Vec<InvalidHeader>,
+) -> Option<&'h str> {
+    match header(headers, TENANT) {
+        Ok(Some(tenant)) if is_valid_tenant(tenant) => Some(tenant),
+        Ok(None) => None,
+        Ok(Some(_)) => {
+            invalid.push(InvalidHeader::Tenant);
+            None
+        }
+        Err(problem) => {
+            invalid.push(problem);
+            None
         }
     }
+}
+
+/// The ingestion time the two time headers give, `None` when either is missing or ignored.
+/// Each present value is parsed on its own, so a header is pushed onto `invalid` once, for
+/// its own problem; a well-formed header is reported as unpaired only when its partner is
+/// absent.
+fn ingestion_time(
+    time: Result<Option<&str>, InvalidHeader>,
+    kind: Result<Option<&str>, InvalidHeader>,
+    invalid: &mut Vec<InvalidHeader>,
+) -> Option<IngestionTime> {
+    let time = time.and_then(|time| {
+        time.map(|text| parse_nanos(text).ok_or_else(|| InvalidHeader::Time(text.to_owned())))
+            .transpose()
+    });
+    let kind = kind.and_then(|kind| {
+        kind.map(|text| TimeKind::parse(text).ok_or_else(|| InvalidHeader::Kind(text.to_owned())))
+            .transpose()
+    });
+    match (time, kind) {
+        (Ok(Some(nanos)), Ok(Some(kind))) => Some(IngestionTime::new(kind, nanos)),
+        (Ok(None), Ok(None)) => None,
+        (Ok(Some(_)), Ok(None)) => {
+            invalid.push(InvalidHeader::Unpaired(INGESTION_TIME));
+            None
+        }
+        (Ok(None), Ok(Some(_))) => {
+            invalid.push(InvalidHeader::Unpaired(INGESTION_TIME_KIND));
+            None
+        }
+        (time, kind) => {
+            invalid.extend(time.err());
+            invalid.extend(kind.err());
+            None
+        }
+    }
+}
+
+/// Nanoseconds written as a decimal `u64`.
+fn parse_nanos(text: &str) -> Option<u64> {
+    text.parse().ok().filter(|_| is_decimal(text))
 }
 
 /// Only ASCII digits: `u64::from_str` also takes a leading `+`.

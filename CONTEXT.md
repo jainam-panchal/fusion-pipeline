@@ -18,7 +18,7 @@ _Avoid_: using "message" for the decoded record
 A record paired with its arrival and the ack handle that settles its message.
 
 **Arrival**:
-What a source's transport says about a message, apart from the record: the tenant it names, when the message entered it (with whether a transport or a clock said so), and the delivery count. The NATS source takes the tenant from the subject, else the `Fusion-Tenant` pipeline header, and the time from the `Fusion-Ingestion-Time` pipeline header, else the JetStream publish time. Everything but the count is optional; the meta's tenant and time come from it alone, `unknown` and the worker clock when it names none.
+What a source's transport says about a message, apart from the record: the tenant it names, when the message entered it (with whether a transport or a clock said so), and the delivery count. The NATS source takes the tenant from the subject, else the `Fusion-Tenant` pipeline header, and the time from the `Fusion-Ingestion-Time` pipeline header, else the JetStream publish time. Everything but the count is optional; the meta's tenant and time come from it alone, `unknown` and the worker clock when it names none. The NATS source builds it from what JetStream handed over for the message (`headers::Received`: subject, headers, publish time, delivery count), which is the raw input, not the arrival.
 _Avoid_: headers (the pipeline headers are one input to it), envelope metadata
 
 **Meta**:
@@ -30,7 +30,7 @@ The record itself, as the customer's data: every field, `id`, `kind`, `resource.
 _Avoid_: body (one field of it), content
 
 **Pipeline header**:
-One of the NATS message headers that carry a record's meta on the wire: `Fusion-Tenant`, `Fusion-Ingestion-Time` (nanoseconds, decimal) and `Fusion-Ingestion-Time-Kind` (`reported` or `clock`). The sink writes them; the source reads them back into the arrival, the subject still winning for the tenant. One that does not parse, or is given twice, is ignored and counted.
+One of the NATS message headers that carry a record's meta on the wire: `Fusion-Tenant`, `Fusion-Ingestion-Time` (nanoseconds, decimal) and `Fusion-Ingestion-Time-Kind` (`reported` or `clock`). The sink writes them; the source reads them back into the arrival, the subject still winning for the tenant. One that does not parse, is given twice, or is one time header without the other is ignored and counted, once per header; a `Fusion-Tenant` the subject overrides is not read, so not counted.
 _Avoid_: stamp, envelope header, metadata header
 
 **Delivery count**:

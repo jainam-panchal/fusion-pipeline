@@ -15,13 +15,14 @@
 //! [`crate::headers::arrival`]: the subject's tenant (`{tenant_prefix}.{tenant}.>`), else an
 //! upstream pipeline's `Fusion-Tenant`; an upstream pipeline's `Fusion-Ingestion-Time`, else
 //! the JetStream publish time; and the delivery count. The engine resolves the record's
-//! `Meta` from it alone (ADR 0005). Nothing is read from or written into the record. The publish time is the server's and does not change on redelivery, so stateful
-//! stages that measure windows in ingestion time see the same value every time the record
-//! comes back.
+//! `Meta` from it alone (ADR 0005). Nothing is read from or written into the record. The
+//! publish time is the server's and does not change on redelivery, so stateful stages that
+//! measure windows in ingestion time see the same value every time the record comes back.
 //!
-//! A pipeline header that does not parse is left out of the arrival, reported on stderr and
-//! counted on `source_invalid_headers_total` under the tenant the record's `Meta` gets; the
-//! message is walked as if the header were absent.
+//! A pipeline header that does not parse is ignored, reported on stderr and counted once on
+//! `source_invalid_headers_total` under the tenant the record's `Meta` gets; the message is
+//! walked as if the header were absent. A `Fusion-Tenant` is not read when the subject
+//! names a valid tenant, so a header the subject overrides is never counted.
 //!
 //! A payload that is not a record is nak'd like any other failure and reported on stderr; it
 //! runs out `max_deliver` the same way a record without an id does, which is where the
