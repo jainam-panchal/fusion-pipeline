@@ -394,12 +394,105 @@ fn an_upvalue_counter_persists_across_records_on_one_worker() {
         "",
         "local seen = 0\nfunction process(record)\n  seen = seen + 1\n  record.attributes[\"seen\"] = seen\n  return record\nend",
     );
-    let (out, _h) = run(&yaml, 1, (1..=3).map(|id| record(id, json!({}))).collect());
+    let (out, h) = run(&yaml, 1, (1..=3).map(|id| record(id, json!({}))).collect());
     let seen: Vec<_> = out
         .iter()
         .map(|r| r.attributes.get("seen").cloned())
         .collect();
     assert_eq!(seen, vec![Some(json!(1)), Some(json!(2)), Some(json!(3))]);
+    h.finish();
+}
+
+#[test]
+fn each_worker_counts_in_its_own_vm() {
+    const RECORDS: u64 = 200;
+    // The busy loop is what makes the split happen rather than be hoped for: a record costs
+    // enough that the pushes outrun one worker, the intake backs up, and the idle workers
+    // are woken. It is far under the default budget.
+    let yaml = config(
+        "",
+        "local seen = 0\nfunction process(record)\n  local n = 0\n  for i = 1, 20000 do n = n + 1 end\n  seen = seen + 1\n  record.attributes[\"seen\"] = seen\n  return record\nend",
+    );
+    let (out, h) = run(
+        &yaml,
+        4,
+        (1..=RECORDS).map(|id| record(id, json!({}))).collect(),
+    );
+    let mut counts: Vec<u64> = out
+        .iter()
+        .map(|r| r.attributes["seen"].as_u64().expect("a count"))
+        .collect();
+    counts.sort_unstable();
+    // One VM per worker means the counters are independent, so no worker sees every record
+    // and the counts repeat: four ones, four twos, and so on. Which worker takes which
+    // record is the channel's business, so only the shape is asserted, not the split.
+    assert_eq!(counts.len() as u64, RECORDS);
+    assert!(
+        *counts.last().expect("a count") < RECORDS,
+        "no worker counted every record: highest was {:?}",
+        counts.last()
+    );
+    assert!(
+        counts.iter().filter(|&&c| c == 1).count() > 1,
+        "several workers started their own counter at 1"
+    );
+    h.finish();
+}
+
+#[test]
+fn now_ns_reads_the_clock_and_log_info_and_warn_are_callable() {
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_nanos() as u64;
+    let yaml = config(
+        "",
+        r#"function process(record)
+  log.info("handling " .. record.body)
+  log.warn("nearly done")
+  record.observed_time_unix_nano = now_ns()
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_nanos() as u64;
+    let stamped = out[0]
+        .observed_time_unix_nano
+        .expect("now_ns() was written");
+    assert!(
+        (before..=after).contains(&stamped),
+        "now_ns() is the wall clock: {stamped} outside {before}..={after}"
+    );
+    assert_eq!(
+        h.counter(Metric::LuaErrors, &lua_error("runtime")),
+        0,
+        "log.* do not raise"
+    );
+    h.finish();
+}
+
+#[test]
+fn a_script_read_from_a_file_runs_over_records() {
+    let dir = std::env::temp_dir().join(format!("fusion-lua-harness-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("stamp.lua");
+    std::fs::write(
+        &path,
+        "function process(record)\n  record.attributes[\"from\"] = \"file\"\n  return record\nend",
+    )
+    .expect("write the script");
+    let yaml = format!(
+        "name: ingest\nnodes:\n  - id: script\n    type: lua\n    script: {}\n  - id: out\n    type: sink.memory\n",
+        path.display()
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].attributes.get("from"), Some(&json!("file")));
+    h.finish();
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The issue's demo: what `edit` cannot do. Split a multi-line body into one record per
