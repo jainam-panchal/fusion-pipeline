@@ -96,8 +96,10 @@ pub enum OnError {
 
 /// The `lua` stage.
 pub struct Lua {
-    /// Distinguishes this node's VMs from another node's in the worker's cache; a new
-    /// compiled pipeline gets new ids, so its VMs are rebuilt.
+    /// Distinguishes this node's VMs from another node's in the worker's cache. A new
+    /// compiled pipeline takes new ids, so its records build their own VMs; the ones the
+    /// replaced pipeline left behind are not removed (#40), which is why nothing may read
+    /// this as a swap releasing them.
     key: u64,
     script: Arc<Script>,
     on_error: OnError,
