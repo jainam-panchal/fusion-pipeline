@@ -1,6 +1,6 @@
 //! The record as a plain Lua table with OTLP field names, and the way back with the
-//! checks the spec asks for: required fields present, types right, `id` unchanged, strings
-//! under the size cap.
+//! checks the spec asks for: types right, strings under the size cap. Every field is
+//! payload (ADR 0005), so a script may change or drop any of them.
 
 use fusion_core::record::{Kind, Record, RecordId};
 use mlua::{Integer, Table, Value as LuaValue};
@@ -100,13 +100,6 @@ fn json_to_lua(lua: &mlua::Lua, v: &Value) -> mlua::Result<LuaValue> {
         }
         Value::Object(map) => LuaValue::Table(map_to_table(lua, map)?),
     })
-}
-
-/// What the script must leave alone: the id (every returned record keeps it; a script
-/// cannot mint ids), plus the size cap on the strings it returns.
-pub(crate) struct Expected {
-    pub(crate) id: RecordId,
-    pub(crate) output_bytes: usize,
 }
 
 /// The way back: Lua values read as JSON, with the bytes of every string counted against
@@ -224,17 +217,15 @@ impl Reader {
     }
 }
 
-/// The table the script returned as a record, checked against `expected`. The table must
-/// carry `id` (unchanged); `kind` is `log` when present and filled in when not; every other
-/// field is optional, and a key that is not a record field is refused, so a typo cannot
-/// silently drop data.
-pub(crate) fn from_table(table: &Table, expected: &Expected) -> Result<Record, OutputError> {
+/// The table the script returned as a record, its strings together under `output_bytes`.
+/// Every field is optional and typed as core types it (`kind` is `log` when left out), and
+/// a key that is not a record field is refused, so a typo cannot silently drop data.
+pub(crate) fn from_table(table: &Table, output_bytes: usize) -> Result<Record, OutputError> {
     let mut record = Record::default();
     let mut reader = Reader {
         used: 0,
-        cap: expected.output_bytes,
+        cap: output_bytes,
     };
-    let mut saw_id = false;
     for pair in table.pairs::<LuaValue, LuaValue>() {
         let (key, value) =
             pair.map_err(|e| OutputError(format!("cannot read the returned table: {e}")))?;
@@ -245,19 +236,8 @@ pub(crate) fn from_table(table: &Table, expected: &Expected) -> Result<Record, O
             .to_str()
             .map_err(|_| OutputError("a key is not valid UTF-8".into()))?;
         match &*key {
-            "id" => {
-                if !id_matches(&value, expected.id) {
-                    return refuse("`id` must be returned unchanged");
-                }
-                saw_id = true;
-                record.id = Some(expected.id);
-            }
-            "kind" => {
-                if reader.string(&value, "kind")?.as_deref() != Some(Kind::Log.as_str()) {
-                    return refuse("`kind` must be `log` when returned");
-                }
-                record.kind = Kind::Log;
-            }
+            "id" => record.id = id(&value)?,
+            "kind" => record.kind = kind(&value)?,
             "time_unix_nano" => record.time_unix_nano = time(&value, "time_unix_nano")?,
             "observed_time_unix_nano" => {
                 record.observed_time_unix_nano = time(&value, "observed_time_unix_nano")?;
@@ -281,17 +261,43 @@ pub(crate) fn from_table(table: &Table, expected: &Expected) -> Result<Record, O
             other => return refuse(format!("`{other}` is not a record field")),
         }
     }
-    if !saw_id {
-        return refuse("`id` is missing from the returned record");
-    }
     Ok(record)
 }
 
-fn id_matches(value: &LuaValue, id: RecordId) -> bool {
+/// An `id` as [`to_table`] hands it over: a non-negative integer, or its decimal text when
+/// it does not fit Lua's signed 64 bits.
+fn id(value: &LuaValue) -> Result<Option<RecordId>, OutputError> {
+    const EXPECTED: &str = "`id` must be a non-negative integer or its decimal text";
     match value {
-        LuaValue::Integer(i) => u64::try_from(*i) == Ok(id.0),
-        LuaValue::String(s) => s.to_str().is_ok_and(|s| s.parse() == Ok(id.0)),
-        _ => false,
+        LuaValue::String(s) => s
+            .to_str()
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map(|n| Some(RecordId(n)))
+            .ok_or_else(|| OutputError(EXPECTED.into())),
+        LuaValue::Integer(_) | LuaValue::Number(_) | LuaValue::Nil => integer(value, "id")?
+            .map(|i| {
+                u64::try_from(i)
+                    .map(RecordId)
+                    .map_err(|_| OutputError(EXPECTED.into()))
+            })
+            .transpose(),
+        other => refuse(format!("{EXPECTED}, not {}", type_name(other))),
+    }
+}
+
+/// A `kind`: `log`, `metric` or `span`; `log` when absent, the wire default.
+fn kind(value: &LuaValue) -> Result<Kind, OutputError> {
+    const EXPECTED: &str = "`kind` must be `log`, `metric` or `span`";
+    match value {
+        LuaValue::Nil => Ok(Kind::Log),
+        LuaValue::String(s) => match s.to_str().as_deref() {
+            Ok("log") => Ok(Kind::Log),
+            Ok("metric") => Ok(Kind::Metric),
+            Ok("span") => Ok(Kind::Span),
+            _ => refuse(EXPECTED),
+        },
+        other => refuse(format!("{EXPECTED}, not {}", type_name(other))),
     }
 }
 

@@ -276,8 +276,8 @@ fn a_script_that_raises_counts_as_a_runtime_error() {
 #[test]
 fn a_returned_record_the_stage_refuses_counts_as_an_output_error() {
     let cases: [(&str, &str); 5] = [
-        ("missing id", "record.id = nil\n  return record"),
-        ("changed id", "record.id = record.id + 1\n  return record"),
+        ("negative id", "record.id = -1\n  return record"),
+        ("unknown kind", "record.kind = \"trace\"\n  return record"),
         (
             "wrong type",
             "record.severity_number = \"high\"\n  return record",
@@ -472,7 +472,32 @@ end"#,
 }
 
 #[test]
-fn a_script_may_rewrite_the_tenant_and_labels_keep_the_arrival_tenant() {
+fn a_script_may_drop_or_change_the_id_and_the_kind_and_split_records_keep_the_records_meta() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  local other = {body = "second", id = 99, kind = "span"}
+  record.id = nil
+  record.kind = "metric"
+  return {record, other}
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].id, None);
+    assert_eq!(out[0].kind, fusion_core::record::Kind::Metric);
+    assert_eq!(out[1].id.map(|id| id.0), Some(99));
+    assert_eq!(out[1].kind, fusion_core::record::Kind::Span);
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+    assert_eq!(
+        h.counter(Metric::RecordsOut, &[("tenant", "acme"), ("stage", "out")]),
+        2
+    );
+    h.finish();
+}
+
+#[test]
+fn a_script_may_rewrite_the_tenant_and_labels_keep_the_meta_tenant() {
     let yaml = config(
         "",
         "function process(record)\n  record.resource[\"tenant.id\"] = \"other\"\n  return record\nend",

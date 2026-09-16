@@ -4,8 +4,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use fusion_core::meta::unix_nanos_now;
 use fusion_core::metrics::LuaErrorKind;
 use fusion_core::record::{Record, RecordId};
 use fusion_core::stage::{Context, State};
@@ -14,7 +15,7 @@ use mlua::{
     Function, HookTriggers, LuaOptions, LuaString, MultiValue, StdLib, Value as LuaValue, VmState,
 };
 
-use crate::convert::{self, Expected, OutputError, type_name};
+use crate::convert::{self, OutputError, type_name};
 
 /// The globals a script may not name, and the names the sandbox leaves undefined. `load`
 /// and its siblings come with the base library and are removed; `os`, `io`, `package`
@@ -243,16 +244,17 @@ impl Vm {
             // swallowed the trip is still refused.
             return Err(Stopped::Lua(LuaError::Instructions));
         }
-        let expected = Expected {
-            id: record_id,
-            output_bytes: self.script.output_bytes,
-        };
+        let output_bytes = self.script.output_bytes;
         match returned {
             LuaValue::Nil => Ok(Returned::Drop),
             LuaValue::Table(t) => {
                 if t.raw_len() == 0 {
-                    // A record, or an empty table, which is neither a record nor a list.
-                    return convert::from_table(&t, &expected)
+                    if t.is_empty() {
+                        return Err(output(OutputError(
+                            "an empty table is neither a record nor a list".to_owned(),
+                        )));
+                    }
+                    return convert::from_table(&t, output_bytes)
                         .map(|record| Returned::Record(Box::new(record)))
                         .map_err(output);
                 }
@@ -264,7 +266,7 @@ impl Vm {
                             "every entry of a returned list must be a record table".to_owned(),
                         )));
                     };
-                    records.push(convert::from_table(&item, &expected).map_err(output)?);
+                    records.push(convert::from_table(&item, output_bytes).map_err(output)?);
                 }
                 Ok(Returned::Split(records))
             }
@@ -454,13 +456,7 @@ fn install_api(lua: &mlua::Lua, node: &str) -> mlua::Result<()> {
 
     globals.raw_set(
         "now_ns",
-        lua.create_function(|_, ()| {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            Ok(i64::try_from(nanos).unwrap_or(i64::MAX))
-        })?,
+        lua.create_function(|_, ()| Ok(i64::try_from(unix_nanos_now()).unwrap_or(i64::MAX)))?,
     )?;
     Ok(())
 }
