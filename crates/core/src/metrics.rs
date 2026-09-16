@@ -324,8 +324,8 @@ impl<'a> Labels<'a> {
     }
 
     /// Add the `op`, `field` and `cause` labels of `edit_unapplied_total`, as one, so a
-    /// series with an `op` and no `cause` cannot be built. `field` is the op's source path
-    /// in canonical form.
+    /// series with an `op` and no `cause` cannot be built. `field` is the path the op read
+    /// (for `set`, the field it writes), in canonical form.
     #[must_use]
     pub const fn with_edit(mut self, op: EditOp, field: &'a str, cause: EditCause) -> Self {
         self.edit = Some(EditLabels { op, field, cause });
