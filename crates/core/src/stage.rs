@@ -9,8 +9,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::meta::Meta;
 use crate::metrics::{EditCause, EditOp, EngineLabel, Labels, LuaErrorKind, Metrics};
-use crate::record::{Record, RecordId};
+use crate::record::Record;
 use crate::state::{StateError, StateErrorPolicy, StateStore};
 
 /// Why a record was intentionally dropped. Closed set: adding one is a spec amendment, and
@@ -141,7 +142,7 @@ pub struct State {
     store: Arc<dyn StateStore>,
     metrics: Metrics,
     prefix: String,
-    tenant: String,
+    tenant: Arc<str>,
     node: String,
     /// The node's `engine` label, so its state-store series carry it like every other
     /// per-node metric.
@@ -172,7 +173,7 @@ impl State {
         store: Arc<dyn StateStore>,
         metrics: Metrics,
         pipeline: &str,
-        tenant: &str,
+        tenant: Arc<str>,
         node: &str,
         engine: Option<EngineLabel>,
         declared: bool,
@@ -180,8 +181,8 @@ impl State {
         Self {
             store,
             metrics,
-            prefix: format!("{pipeline}:{}:{node}:", escape_segment(tenant)),
-            tenant: tenant.to_owned(),
+            prefix: format!("{pipeline}:{}:{node}:", escape_segment(&tenant)),
+            tenant,
             node: node.to_owned(),
             engine,
             declared,
@@ -347,8 +348,9 @@ impl<'a> StageMetrics<'a> {
 pub struct Context<'a> {
     /// Id of the node being run.
     pub node_id: &'a str,
-    /// Id of the record being processed.
-    pub record_id: RecordId,
+    /// The pipeline's view of the record being processed: its id, tenant, ingestion time
+    /// and delivery count. Read-only; every decision reads these, never the payload.
+    pub meta: &'a Meta,
     /// The state handle: the worker's store connection, scoped to this pipeline, tenant
     /// and node.
     pub state: State,

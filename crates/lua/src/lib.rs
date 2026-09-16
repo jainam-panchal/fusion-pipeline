@@ -232,7 +232,7 @@ impl Lua {
 impl Stage for Lua {
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
         let run = match self.vm() {
-            Ok(vm) => vm.run(&record, &ctx.state),
+            Ok(vm) => vm.run(&record, ctx),
             Err(error) => Err(Stopped::Lua(error)),
         };
         let error = match run {
@@ -251,7 +251,7 @@ impl Stage for Lua {
         let message = error.describe();
         eprintln!(
             "pipeline: lua `{}` record {}: {message}",
-            ctx.node_id, ctx.record_id
+            ctx.node_id, ctx.meta.record_id
         );
         match self.on_error {
             OnError::Pass => StageOutput::Pass(record),

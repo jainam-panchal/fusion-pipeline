@@ -627,3 +627,53 @@ fn an_undeclared_stage_under_pass_forwards_the_record() {
     );
     h.finish();
 }
+
+const REWRITE_THEN_DEDUPE: &str = r#"
+name: ingest
+nodes:
+  - id: restamp
+    type: edit
+    ops:
+      - set: { field: observed_time_unix_nano, value: 5000000000 }
+  - id: dedupe_body
+    type: dedupe
+    from: restamp
+    key: [body]
+    window: 10s
+  - id: out
+    type: sink.memory
+    from: dedupe_body
+"#;
+
+#[test]
+fn a_time_field_rewritten_upstream_does_not_move_the_window_the_record_arrived_with() {
+    for_each_worker_count(|workers| {
+        let h = start(REWRITE_THEN_DEDUPE, workers);
+
+        // Arrived 20 s apart, past the 10 s window, then stamped with one time by `restamp`.
+        // The window is the arrival's, so both pass; the third arrived 5 s after the second
+        // and is its repeat.
+        for (id, arrived_s) in [(101, 1_000), (102, 1_020), (103, 1_025)] {
+            let pushed = h.source.push(record_at(id, "disk full", arrived_s));
+            assert_eq!(
+                pushed.wait(WAIT),
+                Some(AckOutcome::Ack),
+                "workers={workers}"
+            );
+        }
+
+        assert_eq!(h.ids("out"), vec![101, 102], "workers={workers}");
+        let written: Vec<_> = h
+            .sinks
+            .records("out")
+            .iter()
+            .map(|r| r.observed_time_unix_nano)
+            .collect();
+        assert_eq!(
+            written,
+            vec![Some(5_000_000_000); 2],
+            "the sink writes the payload"
+        );
+        h.finish();
+    });
+}

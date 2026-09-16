@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::memory::lock_unpoisoned;
-use crate::record::Record;
 use crate::stage::DropReason;
 
 /// Every metric the pipeline exports. Closed set: adding one is a spec amendment, and
@@ -427,13 +426,6 @@ impl Metrics {
     #[must_use]
     pub fn noop() -> Self {
         Self::new(Noop)
-    }
-
-    /// The `tenant` label for `record`: its `resource.tenant.id`, or
-    /// [`Metrics::UNKNOWN_TENANT`].
-    #[must_use]
-    pub fn tenant_of(record: &Record) -> &str {
-        record.tenant().unwrap_or(Self::UNKNOWN_TENANT)
     }
 
     /// `records_in_total`. `labels` is the node's [`Labels::new`], with the engine label

@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock};
 
 use fusion_core::config::{Config, DEFAULT_NAME};
 use fusion_core::memory::MemoryStateStore;
+use fusion_core::meta::Meta;
 use fusion_core::metrics::{Labels, Metrics};
 use fusion_core::record::{Record, RecordId};
 use fusion_core::stage::{Context, DropReason, Stage, StageMetrics, StageOutput, State};
@@ -27,18 +28,25 @@ fn record(format: &str) -> Record {
 
 static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::noop);
 
+static META: LazyLock<Meta> = LazyLock::new(|| Meta {
+    record_id: RecordId(1),
+    tenant: Metrics::UNKNOWN_TENANT.into(),
+    ingestion_time: 0,
+    delivery_count: 1,
+});
+
 /// The context the engine would build for node `by_format`, over an in-memory store and a
 /// no-op recorder.
 fn ctx() -> Context<'static> {
     let labels = Labels::new(Metrics::UNKNOWN_TENANT, "by_format");
     Context {
         node_id: "by_format",
-        record_id: RecordId(1),
+        meta: &META,
         state: State::new(
             Arc::new(MemoryStateStore::new()),
             METRICS.clone(),
             DEFAULT_NAME,
-            Metrics::UNKNOWN_TENANT,
+            Arc::clone(&META.tenant),
             "by_format",
             None,
             false,

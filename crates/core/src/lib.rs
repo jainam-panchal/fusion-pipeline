@@ -7,6 +7,7 @@ pub mod dag;
 pub mod engine;
 pub mod io;
 pub mod memory;
+pub mod meta;
 pub mod metrics;
 pub mod path;
 pub mod pipeline;

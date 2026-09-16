@@ -236,7 +236,7 @@ impl Stage for Sample {
         let keep = match &self.mode {
             // The coin is the record id: a redelivered record lands on the same side, as
             // every verdict in this pipeline is meant to.
-            Mode::Random { share, salt } => share.keeps(mix(ctx.record_id.0 ^ salt)),
+            Mode::Random { share, salt } => share.keeps(mix(ctx.meta.record_id.0 ^ salt)),
             Mode::EveryNth { n, .. } => {
                 let count = match ctx.state.incr(COUNT_KEY, 1, COUNT_TTL) {
                     Ok(count) => count,

@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use crate::meta::Arrival;
 use crate::record::Record;
 
 /// Settles the source message behind a record. Exactly one of `ack` or `nak` is called.
@@ -16,10 +17,13 @@ pub trait AckHandle: Send {
     fn nak(self: Box<Self>, delay: Option<Duration>);
 }
 
-/// A record together with the handle that settles its source message.
+/// A record together with what the source knows about its message and the handle that
+/// settles it.
 pub struct Envelope {
     /// The record as decoded by the source.
     pub record: Record,
+    /// What the source knows about how the message arrived.
+    pub arrival: Arrival,
     /// Settles the source message.
     pub ack: Box<dyn AckHandle>,
 }
@@ -28,6 +32,7 @@ impl std::fmt::Debug for Envelope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Envelope")
             .field("record", &self.record)
+            .field("arrival", &self.arrival)
             .finish_non_exhaustive()
     }
 }
@@ -70,12 +75,12 @@ pub enum SourceError {
 
 /// Produces envelopes until it is exhausted or the engine closes.
 ///
-/// A source must stamp a record's ingestion time at decode (`observed_time_unix_nano`,
-/// from the transport's own timestamp) when the record carries neither
-/// `observed_time_unix_nano` nor `time_unix_nano`. Stateful stages measure windows in
-/// ingestion time, and a redelivered record must carry the same value it had the first
-/// time; a stage's fallback to the worker clock exists for records pushed in tests, not for
-/// sources.
+/// A source must give every envelope an [`Arrival`] with an ingestion time, from the
+/// transport's own timestamp when the record carries neither `observed_time_unix_nano` nor
+/// `time_unix_nano`, and the message's delivery count. Stateful stages measure windows in
+/// the ingestion time on the record's `Meta`, and a redelivered record must get the value
+/// it had the first time; the engine's fallback to the worker clock exists for records
+/// pushed in tests, not for sources.
 pub trait Source: Send {
     /// Run to completion, delivering every envelope into `intake`.
     ///

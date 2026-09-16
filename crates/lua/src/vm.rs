@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fusion_core::metrics::LuaErrorKind;
 use fusion_core::record::{Record, RecordId};
-use fusion_core::stage::State;
+use fusion_core::stage::{Context, State};
 use fusion_core::state::StateError;
 use mlua::{
     Function, HookTriggers, LuaOptions, LuaString, MultiValue, StdLib, Value as LuaValue, VmState,
@@ -228,15 +228,11 @@ impl Vm {
         })
     }
 
-    /// Run `process` over `record` with `state` as the record's handle.
-    pub(crate) fn run(&self, record: &Record, state: &State) -> Result<Returned, Stopped> {
-        let Some(record_id) = record.id else {
-            return Err(Stopped::Lua(LuaError::Runtime(
-                "record has no id".to_owned(),
-            )));
-        };
+    /// Run `process` over `record` with `ctx`'s state handle and record id.
+    pub(crate) fn run(&self, record: &Record, ctx: &Context<'_>) -> Result<Returned, Stopped> {
+        let record_id = ctx.meta.record_id;
         self.lua.set_app_data(Current {
-            state: state.clone(),
+            state: ctx.state.clone(),
             record_id,
         });
         self.used.set(0);

@@ -10,12 +10,12 @@
 //!
 //! One state key per distinct content, `dedupe:{hash}` under the handle's prefix, holding
 //! `"{record id} {ingestion time}"` with the window as its TTL. The window is measured in
-//! ingestion time (`observed_time_unix_nano`, then `time_unix_nano`, then the worker clock),
-//! which a redelivered record carries unchanged, so the decision for a record is the same
-//! whenever it reaches the stage: a crash between a state write and the ack never turns a
-//! real record into a duplicate.
+//! the ingestion time on the record's [`Meta`](fusion_core::meta::Meta), fixed at intake
+//! and unchanged by redelivery or by any stage rewriting the record's time fields, so the
+//! decision for a record is the same whenever it reaches the stage: a crash between a state
+//! write and the ack never turns a real record into a duplicate.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::path::FieldPath;
@@ -111,8 +111,8 @@ impl Dedupe {
 impl Stage for Dedupe {
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
         let incoming = Holder {
-            id: ctx.record_id,
-            ingestion_time: ingestion_time(&record),
+            id: ctx.meta.record_id,
+            ingestion_time: ctx.meta.ingestion_time,
         };
         let key = self.state_key(&record);
         let existing = match ctx.state.set_nx(&key, &incoming.to_bytes(), self.window) {
@@ -241,18 +241,6 @@ impl Holder {
             Verdict::WindowOver
         }
     }
-}
-
-/// When the record entered: `observed_time_unix_nano`, else `time_unix_nano`, else now.
-fn ingestion_time(record: &Record) -> u64 {
-    record
-        .observed_time_unix_nano
-        .or(record.time_unix_nano)
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
-        })
 }
 
 fn window_nanos(window: Duration) -> u64 {

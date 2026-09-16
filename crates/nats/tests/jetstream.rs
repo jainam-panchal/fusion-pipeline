@@ -9,12 +9,14 @@ use std::time::{Duration, Instant};
 
 use async_nats::jetstream::consumer::{AckPolicy, pull};
 use async_nats::jetstream::{self, stream};
+use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::engine::Engine;
 use fusion_core::memory::{MemorySinks, MemoryStateStore};
 use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
+use fusion_core::stage::{Context, Stage, StageError, StageOutput};
 use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
 use fusion_nats::{Nats, NatsError};
 use futures::StreamExt;
@@ -409,6 +411,91 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
     );
     assert_eq!(fixture.consumer_info().num_redelivered, 0);
 
+    nats.shutdown();
+    engine.join().expect("clean shutdown");
+}
+
+/// Fails a record's first delivery, and on a later one writes the context's `Meta` into
+/// `attributes.meta.*` so the sink shows what the source filled in.
+struct RevealOnRedelivery;
+
+impl Stage for RevealOnRedelivery {
+    fn process(&self, mut record: Record, ctx: &Context<'_>) -> StageOutput {
+        let meta = ctx.meta;
+        if meta.delivery_count == 1 {
+            return StageOutput::Error(StageError::new("first delivery"));
+        }
+        for (key, value) in [
+            ("meta.tenant", serde_json::json!(&*meta.tenant)),
+            (
+                "meta.ingestion_time",
+                serde_json::json!(meta.ingestion_time),
+            ),
+            (
+                "meta.delivery_count",
+                serde_json::json!(meta.delivery_count),
+            ),
+        ] {
+            record.attributes.insert(key.to_owned(), value);
+        }
+        StageOutput::Pass(record)
+    }
+}
+
+/// Source into the engine: the record's `Meta` carries the subject's tenant, the JetStream
+/// publish time and the delivery count, and the publish time is the same on redelivery.
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn source_fills_meta_with_the_subject_tenant_the_publish_time_and_the_delivery_count() {
+    let fixture = Fixture::new("meta");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
+    let sinks = MemorySinks::new();
+    let mut registry = Registry::new();
+    registry.register_sink("sink.memory", sinks.clone());
+    registry.register_stage(
+        "reveal",
+        |_: &NodeConfig| -> Result<Box<dyn Stage>, ConfigError> {
+            Ok(Box::new(RevealOnRedelivery))
+        },
+    );
+    let pipeline = Pipeline::from_yaml(
+        "nodes:\n  - id: reveal\n    type: reveal\n  - id: out\n    type: sink.memory\n",
+        &registry,
+    )
+    .expect("pipeline loads");
+    let source = nats
+        .source(&fixture.source_params())
+        .expect("source builds");
+    let engine = Engine::start(pipeline, Box::new(source), 1, Metrics::noop(), no_state())
+        .expect("engine starts");
+
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
+        r#"{"id": 42, "body": "no tenant, no time"}"#,
+    );
+
+    // The first delivery is nakked with a 1 s delay; the second passes.
+    assert!(
+        wait_until(SETTLE_TIMEOUT, || sinks.records("out").len() == 1),
+        "the redelivered record reaches the memory sink"
+    );
+    let record = &sinks.records("out")[0];
+    let attr = |key: &str| record.attributes[&format!("meta.{key}")].clone();
+    assert_eq!(attr("tenant"), serde_json::json!("acme"));
+    assert_eq!(attr("delivery_count"), serde_json::json!(2));
+    let stamped = record
+        .observed_time_unix_nano
+        .expect("the publish time is stamped into the payload too");
+    assert_eq!(
+        attr("ingestion_time"),
+        serde_json::json!(stamped),
+        "Meta's ingestion time is the publish time, unchanged by redelivery"
+    );
+
+    assert!(
+        wait_until(SETTLE_TIMEOUT, || fixture.consumer_settled()),
+        "consumer shows the message acknowledged"
+    );
     nats.shutdown();
     engine.join().expect("clean shutdown");
 }

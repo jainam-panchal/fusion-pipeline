@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::{ConfigError, NodeConfig};
 use crate::io::{AckHandle, Envelope, Intake, Sink, SinkError, Source, SourceError};
+use crate::meta::Arrival;
 use crate::record::Record;
 use crate::registry::SinkFactory;
 use crate::state::{StateError, StateStore, StateStoreFactory};
@@ -95,19 +96,34 @@ pub struct MemoryInput {
 }
 
 impl MemoryInput {
-    /// Queue a record for the engine and return a probe on its ack outcome.
+    /// Queue a record for the engine, as a first delivery the source knows nothing else
+    /// about, and return a probe on its ack outcome.
     ///
     /// # Panics
     ///
     /// Panics if the source has already finished, which only happens after the engine that
     /// owns it was joined.
     pub fn push(&self, record: Record) -> AckProbe {
+        self.push_arrival(record, Arrival::default())
+    }
+
+    /// As [`MemoryInput::push`], with what the source says about the message: a tenant, an
+    /// ingestion time, a delivery count.
+    ///
+    /// # Panics
+    ///
+    /// As [`MemoryInput::push`].
+    pub fn push_arrival(&self, record: Record, arrival: Arrival) -> AckProbe {
         let state = Arc::new(AckState::default());
         let ack = Box::new(MemoryAck {
             state: Arc::clone(&state),
         });
         self.tx
-            .send(Envelope { record, ack })
+            .send(Envelope {
+                record,
+                arrival,
+                ack,
+            })
             .expect("memory source is running while its input is alive");
         AckProbe { state }
     }

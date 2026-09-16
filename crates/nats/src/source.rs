@@ -11,9 +11,11 @@
 //! Each message is decoded as one JSON record, stamped with the tenant from its subject when
 //! the record carries none and with the JetStream publish time as `observed_time_unix_nano`
 //! when it carries no timestamp at all, and handed to the engine with an ack handle that acks
-//! or naks the JetStream message. The publish time is the server's and does not change on
-//! redelivery, so stateful stages that measure windows in ingestion time see the same value
-//! every time the record comes back.
+//! or naks the JetStream message. The same tenant, ingestion time and the delivery count go
+//! beside the record as its [`Arrival`], which is what the pipeline decides with (ADR 0005);
+//! the stamped fields are payload a stage may rewrite. The publish time is the server's and
+//! does not change on redelivery, so stateful stages that measure windows in ingestion time
+//! see the same value every time the record comes back.
 //!
 //! A payload that is not a record is nak'd like any other failure and reported on stderr; it
 //! runs out `max_deliver` the same way a record without an id does, which is where the
@@ -33,6 +35,7 @@ use std::time::Duration;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{AckKind, message::Acker};
 use fusion_core::io::{AckHandle, Envelope, Intake, Source, SourceError};
+use fusion_core::meta::Arrival;
 use fusion_core::metrics::Metrics;
 use fusion_core::record::Record;
 use futures::StreamExt;
@@ -133,6 +136,11 @@ impl NatsSource {
                     continue;
                 }
             };
+            let arrival = Arrival {
+                tenant: record.tenant().map(str::to_owned),
+                ingestion_time: record.observed_time_unix_nano.or(record.time_unix_nano),
+                delivery_count: delivered,
+            };
             let ack = Box::new(NatsAck {
                 runtime: Arc::clone(&self.runtime),
                 acker,
@@ -140,7 +148,11 @@ impl NatsSource {
             });
             // On a closed intake the envelope, and its ack handle, are dropped unsettled; the
             // message redelivers after `ack_wait`.
-            intake.send(Envelope { record, ack })?;
+            intake.send(Envelope {
+                record,
+                arrival,
+                ack,
+            })?;
         }
     }
 }

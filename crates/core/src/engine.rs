@@ -25,9 +25,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::config::SOURCE_ID;
 use crate::dag::NodeIndex;
 use crate::io::{Envelope, Intake, Source, SourceError};
+use crate::meta::Meta;
 use crate::metrics::{Labels, Metrics};
 use crate::pipeline::{CompiledNode, Pipeline};
-use crate::record::{Kind, Record, RecordId};
+use crate::record::{Kind, Record};
 use crate::stage::{Context, DropReason, StageMetrics, StageOutput, State};
 use crate::state::{StateError, StateErrorPolicy, StateStore, StateStoreFactory};
 
@@ -174,14 +175,13 @@ impl Engine {
     }
 }
 
-/// One record's walk through the graph: its id, its tenant, the node it is in, and whether
-/// any branch has failed. `SOURCE_ID` is the `stage` label for decisions the engine takes
-/// before any node runs.
+/// One record's walk through the graph: its [`Meta`], the node it is in, and whether any
+/// branch has failed. `SOURCE_ID` is the `stage` label for decisions the engine takes before
+/// any node runs.
 struct Walk<'p: 't, 't> {
-    record_id: RecordId,
-    /// Borrowed from the handling call, not owned, so labels built on it never borrow the
-    /// walk itself and `fail` can take them while the walk is mutated.
-    tenant: &'t str,
+    /// Borrowed from the handling call, not owned, so labels built on its tenant never
+    /// borrow the walk itself and `fail` can take them while the walk is mutated.
+    meta: &'t Meta,
     /// The labels of the node whose stage or sink is running, so a panic is charged to it.
     at: Option<Labels<'t>>,
     failed: bool,
@@ -194,7 +194,7 @@ impl Walk<'_, '_> {
         // at least visible on stderr rather than swallowed.
         eprintln!(
             "pipeline: record {} failed at node `{}`: {error}",
-            self.record_id,
+            self.meta.record_id,
             labels.stage().unwrap_or(SOURCE_ID)
         );
         self.metrics.errored(labels);
@@ -252,8 +252,17 @@ struct Walker<'p> {
 
 impl<'p> Walker<'p> {
     fn handle(&self, envelope: Envelope) {
-        let Envelope { record, ack } = envelope;
-        let tenant = Metrics::tenant_of(&record).to_owned();
+        let Envelope {
+            record,
+            arrival,
+            ack,
+        } = envelope;
+        let tenant: Arc<str> = arrival
+            .tenant
+            .as_deref()
+            .or_else(|| record.tenant())
+            .unwrap_or(Metrics::UNKNOWN_TENANT)
+            .into();
         // `source` is a node like any other on the metrics: every record the source hands
         // over counts in, every record that enters the graph counts out, and the engine's
         // own rejections are its drops. Intake is then one series whatever the first node
@@ -280,10 +289,21 @@ impl<'p> Walker<'p> {
 
         self.metrics.records_out(&source, 1);
 
-        let observed = record.observed_time_unix_nano.or(record.time_unix_nano);
-        let mut walk = Walk {
+        // The one read of the payload's time fields, before any stage can move them. The
+        // worker clock is for a source that stamps nothing; end to end is not measured
+        // against it.
+        let stamped = arrival
+            .ingestion_time
+            .or(record.observed_time_unix_nano)
+            .or(record.time_unix_nano);
+        let meta = Meta {
             record_id,
-            tenant: &tenant,
+            tenant,
+            ingestion_time: stamped.unwrap_or_else(unix_nanos_now),
+            delivery_count: arrival.delivery_count,
+        };
+        let mut walk = Walk {
+            meta: &meta,
             at: None,
             failed: false,
             metrics: self.metrics,
@@ -297,17 +317,17 @@ impl<'p> Walker<'p> {
         if outcome.is_err() {
             let labels = walk
                 .at
-                .unwrap_or_else(|| Labels::new(walk.tenant, SOURCE_ID));
+                .unwrap_or_else(|| Labels::new(&meta.tenant, SOURCE_ID));
             walk.fail(&labels, &"stage or sink panicked");
         }
         if walk.failed {
-            self.metrics.source_nak(walk.tenant);
+            self.metrics.source_nak(&meta.tenant);
             ack.nak(None);
         } else {
             // End to end is measured on the ack only: a nakked record comes back and is
             // measured when it finally settles.
-            if let Some(elapsed) = observed.and_then(since_unix_nanos) {
-                self.metrics.end_to_end(walk.tenant, elapsed);
+            if let Some(elapsed) = stamped.and_then(since_unix_nanos) {
+                self.metrics.end_to_end(&meta.tenant, elapsed);
             }
             ack.ack();
         }
@@ -340,7 +360,8 @@ impl<'p> Walker<'p> {
             CompiledNode::Sink(_) => None,
             CompiledNode::Stage(stage) => stage.engine_label(),
         };
-        let labels = Labels::new(walk.tenant, node_id).with_engine(engine);
+        let meta = walk.meta;
+        let labels = Labels::new(&meta.tenant, node_id).with_engine(engine);
         walk.at = Some(labels);
         metrics.records_in(&labels);
         match node {
@@ -359,12 +380,12 @@ impl<'p> Walker<'p> {
             CompiledNode::Stage(stage) => {
                 let ctx = Context {
                     node_id,
-                    record_id: walk.record_id,
+                    meta,
                     state: State::new(
                         Arc::clone(&self.store),
                         metrics.clone(),
                         self.pipeline.name(),
-                        walk.tenant,
+                        Arc::clone(&meta.tenant),
                         node_id,
                         engine,
                         stage.uses_state(),
@@ -415,6 +436,13 @@ impl<'p> Walker<'p> {
             }
         }
     }
+}
+
+/// The worker clock in nanoseconds since the Unix epoch; zero before the epoch.
+fn unix_nanos_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
 /// How long ago `nanos` (nanoseconds since the Unix epoch) was; `None` if it is in the future

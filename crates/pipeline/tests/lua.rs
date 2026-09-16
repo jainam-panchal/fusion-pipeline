@@ -6,6 +6,7 @@ mod common;
 
 use common::{WAIT, for_each_worker_count, start};
 use fusion_core::memory::AckOutcome;
+use fusion_core::meta::Arrival;
 use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
 use serde_json::{Value, json};
@@ -459,9 +460,6 @@ end"#,
         .duration_since(std::time::UNIX_EPOCH)
         .expect("after the epoch")
         .as_nanos() as u64;
-    // Deliberately an attribute, not `observed_time_unix_nano`: that field is ingestion
-    // time for every downstream stateful node, and a clock reading there would move a
-    // redelivered record into a different window. The spec says so beside the `edit` rule.
     let stamped = out[0].attributes["stamped_at"]
         .as_u64()
         .expect("now_ns() was written");
@@ -475,6 +473,65 @@ end"#,
         "log.* do not raise"
     );
     h.finish();
+}
+
+const STAMP_THEN_DEDUPE: &str = r#"
+name: ingest
+nodes:
+  - id: script
+    type: lua
+    source: |
+      function process(record)
+        record.observed_time_unix_nano = now_ns()
+        return record
+      end
+  - id: dedupe_body
+    type: dedupe
+    from: script
+    key: [body]
+    window: 10s
+  - id: out
+    type: sink.memory
+    from: dedupe_body
+"#;
+
+#[test]
+fn a_script_stamping_the_clock_into_a_time_field_does_not_move_a_downstream_window() {
+    for_each_worker_count(|workers| {
+        let h = start(STAMP_THEN_DEDUPE, workers);
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_nanos() as u64;
+
+        // Ingested 20 s apart, past the 10 s window, then stamped a few microseconds apart
+        // by the script. The window is the ingestion time's, so both pass; the third was
+        // ingested 5 s after the second and is its repeat. Redelivering the first, with a
+        // later clock reading this time, still passes as its own holder's record.
+        let sends = [
+            (101, 1_000, 1),
+            (102, 1_020, 1),
+            (103, 1_025, 1),
+            (101, 1_000, 2),
+        ];
+        for (id, ingested_s, delivery_count) in sends {
+            let mut r = record(id, json!({"body": "disk full"}));
+            r.observed_time_unix_nano = Some(ingested_s * 1_000_000_000);
+            let arrival = Arrival {
+                delivery_count,
+                ..Arrival::default()
+            };
+            let probe = h.source.push_arrival(r, arrival);
+            assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
+        }
+
+        assert_eq!(h.ids("out"), vec![101, 101, 102], "workers={workers}");
+        for written in h.sinks.records("out") {
+            let stamped = written.observed_time_unix_nano.expect("stamped");
+            assert!(stamped >= before, "the sink writes the script's stamp");
+        }
+        h.finish();
+    });
 }
 
 #[test]
