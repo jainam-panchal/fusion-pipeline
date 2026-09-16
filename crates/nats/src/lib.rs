@@ -3,13 +3,15 @@
 //! The source is a pull consumer with explicit ack; the engine settles each message through
 //! the envelope's ack handle. The sink publishes one record per message and returns only once
 //! JetStream has answered with a `PubAck`, so an acked source message means the record is
-//! durably stored downstream.
+//! durably stored downstream. Neither writes into the record: the record's `Meta` travels as
+//! [`headers`], out of the sink and back into a source.
 //!
 //! Both sit on one tokio runtime owned by [`Nats`]. The engine's threads are synchronous, so
 //! the source drives its receive loop with `block_on` from the source thread and the sink
 //! awaits its `PubAck`s with `block_on` from the worker that wrote.
 
 pub mod config;
+pub mod headers;
 pub mod sink;
 pub mod source;
 pub mod subject;

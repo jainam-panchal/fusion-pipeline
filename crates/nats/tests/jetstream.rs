@@ -12,8 +12,8 @@ use async_nats::jetstream::consumer::{AckPolicy, pull};
 use async_nats::jetstream::{self, stream};
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::engine::Engine;
-use fusion_core::memory::{MemorySinks, MemoryStateStore};
 use fusion_core::io::Outgoing;
+use fusion_core::memory::{MemorySinks, MemoryStateStore};
 use fusion_core::meta::{IngestionTime, Meta, unix_nanos_now};
 use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
 use fusion_core::pipeline::Pipeline;
@@ -21,6 +21,7 @@ use fusion_core::record::{Record, RecordId};
 use fusion_core::registry::Registry;
 use fusion_core::stage::{Context, Stage, StageError, StageOutput};
 use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
+use fusion_nats::headers::{INGESTION_TIME, INGESTION_TIME_KIND, TENANT};
 use fusion_nats::{Nats, NatsError};
 use futures::StreamExt;
 
@@ -85,6 +86,12 @@ impl JetStreamClient {
             .expect("consumer created");
     }
 
+    fn get_stream(&self, name: &str) -> stream::Stream {
+        self.rt
+            .block_on(self.js.get_stream(name))
+            .expect("stream exists")
+    }
+
     fn delete_stream(&self, name: &str) {
         self.rt
             .block_on(self.js.delete_stream(name))
@@ -107,8 +114,25 @@ impl JetStreamClient {
             .expect("published");
     }
 
-    /// The first message on `stream`'s `subject`, as a string, or `None` within `SETTLE_TIMEOUT`.
-    fn first_payload(&self, stream: &str, subject: &str) -> Option<String> {
+    /// Publish `payload` on `subject` with `headers`.
+    fn publish_with_headers(&self, subject: &str, headers: async_nats::HeaderMap, payload: &str) {
+        self.rt
+            .block_on(async {
+                self.js
+                    .publish_with_headers(subject.to_owned(), headers, payload.to_owned().into())
+                    .await?
+                    .await
+            })
+            .expect("published");
+    }
+
+    /// The first message on `stream`'s `subject`, its payload as a string and its headers, or
+    /// `None` within `SETTLE_TIMEOUT`.
+    fn first_message(
+        &self,
+        stream: &str,
+        subject: &str,
+    ) -> Option<(String, async_nats::HeaderMap)> {
         self.rt.block_on(async {
             let stream = self.js.get_stream(stream).await.expect("stream exists");
             let consumer = stream
@@ -123,7 +147,8 @@ impl JetStreamClient {
                 .await
                 .ok()??;
             let message = message.ok()?;
-            String::from_utf8(message.payload.to_vec()).ok()
+            let payload = String::from_utf8(message.payload.to_vec()).ok()?;
+            Some((payload, message.headers.clone().unwrap_or_default()))
         })
     }
 
@@ -246,14 +271,19 @@ fn sink_write_returns_once_the_record_is_in_the_stream() {
     )
     .expect("write acked");
 
-    let payload = fixture
+    let (payload, headers) = fixture
         .client
-        .first_payload(&fixture.out_stream, &fixture.out_subject)
+        .first_message(&fixture.out_stream, &fixture.out_subject)
         .expect("record is in the sink stream");
     assert_eq!(
         Record::from_json(&payload).expect("sink emits a record"),
-        record
+        record,
+        "the record is published exactly as written"
     );
+    let header = |name: &str| headers.get(name).map(|v| v.as_str().to_owned());
+    assert_eq!(header(TENANT).as_deref(), Some("acme"));
+    assert_eq!(header(INGESTION_TIME).as_deref(), Some("9000000000"));
+    assert_eq!(header(INGESTION_TIME_KIND).as_deref(), Some("reported"));
 }
 
 #[test]
@@ -360,13 +390,13 @@ fn connect_fails_fast_when_the_server_is_unreachable() {
     assert!(err.to_string().contains("127.0.0.1:1"), "{err}");
 }
 
-/// Source into the engine into an in-memory sink: the record arrives with the tenant stamped
-/// from the subject and the JetStream publish time as its ingestion time, a record that
-/// carries its own timestamp keeps it, and the consumer shows both acknowledged.
+/// Source into the engine into an in-memory sink: the record arrives exactly as published,
+/// its `Meta` carries the subject's tenant and the publish time, and the message is acked once
+/// the sink has it.
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
-fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
-    let fixture = Fixture::new("src");
+fn source_writes_nothing_into_the_record_and_acks_after_the_sink() {
+    let fixture = Fixture::new("ack");
     let nats = Nats::new(Metrics::noop()).expect("nats runtime");
     let sinks = MemorySinks::new();
     let mut registry = Registry::new();
@@ -379,44 +409,37 @@ fn source_stamps_tenant_from_subject_and_acks_after_the_sink() {
     let engine = Engine::start(pipeline, Box::new(source), 2, Metrics::noop(), no_state())
         .expect("engine starts");
 
-    fixture.client.publish(
-        &fixture.in_subject("acme"),
+    let published = [
         r#"{"id": 42, "body": "no tenant here"}"#,
-    );
-    fixture.client.publish(
-        &fixture.in_subject("acme"),
         r#"{"id": 43, "body": "dated", "observed_time_unix_nano": 5}"#,
-    );
-    fixture.client.publish(
-        &fixture.in_subject("acme"),
-        r#"{"id": 44, "body": "event timed", "time_unix_nano": 7}"#,
-    );
+        r#"{"id": 44, "body": "event timed", "time_unix_nano": 7, "resource": {"tenant.id": "beta"}}"#,
+    ];
+    for payload in published {
+        fixture.client.publish(&fixture.in_subject("acme"), payload);
+    }
 
     assert!(
-        wait_until(SETTLE_TIMEOUT, || sinks.records("out").len() == 3),
+        wait_until(SETTLE_TIMEOUT, || sinks.written("out").len() == 3),
         "records reach the memory sink"
     );
-    let mut records = sinks.records("out");
-    records.sort_by_key(|r| r.id);
-    assert_eq!(records[0].tenant(), Some("acme"));
-    assert_eq!(records[0].id.map(|id| id.0), Some(42));
-    let observed = records[0]
-        .observed_time_unix_nano
-        .expect("observed_time_unix_nano stamped from the JetStream publish time");
+    let mut written = sinks.written("out");
+    written.sort_by_key(|w| w.meta.record_id);
     let now = unix_nanos_now();
-    assert!(
-        observed <= now && now - observed < 60_000_000_000,
-        "publish time {observed} is recent"
-    );
-    assert_eq!(
-        records[1].observed_time_unix_nano,
-        Some(5),
-        "a record's own observed time stands"
-    );
-    assert_eq!(
-        records[2].observed_time_unix_nano, None,
-        "a record with an event time is not given an observed time"
-    );
+    for (w, payload) in written.iter().zip(published) {
+        assert_eq!(
+            w.record,
+            Record::from_json(payload).expect("record parses"),
+            "the record is exactly as published"
+        );
+        assert_eq!(&*w.meta.tenant, "acme", "the subject's tenant wins");
+        let IngestionTime::Reported(time) = w.meta.ingestion_time else {
+            panic!("the publish time is reported: {:?}", w.meta.ingestion_time);
+        };
+        assert!(
+            time <= now && now - time < 60_000_000_000,
+            "the publish time {time} is recent, not the record's own"
+        );
+    }
 
     assert!(
         wait_until(SETTLE_TIMEOUT, || fixture.consumer_settled()),
@@ -505,18 +528,17 @@ fn source_fills_meta_with_the_subject_tenant_the_publish_time_and_the_delivery_c
     let attr = |key: &str| record.attributes[&format!("meta.{key}")].clone();
     assert_eq!(attr("tenant"), serde_json::json!("acme"));
     assert_eq!(attr("delivery_count"), serde_json::json!(2));
-    let stamped = record
-        .observed_time_unix_nano
-        .expect("the publish time is stamped into the payload too");
-    assert_eq!(
-        attr("ingestion_time"),
-        serde_json::json!(stamped),
-        "Meta's ingestion time is the publish time stamped into the record"
+    assert_eq!(record.observed_time_unix_nano, None, "nothing is stamped");
+    let first = first.load(Ordering::SeqCst);
+    let now = unix_nanos_now();
+    assert!(
+        first > 0 && first <= now && now - first < 60_000_000_000,
+        "the first delivery saw the publish time: {first}"
     );
     assert_eq!(
         attr("ingestion_time"),
-        serde_json::json!(first.load(Ordering::SeqCst)),
-        "and the same on the redelivery as on the first delivery"
+        serde_json::json!(first),
+        "the redelivery sees the same publish time as the first delivery"
     );
 
     assert!(
@@ -618,6 +640,153 @@ fn undecodable_payload_is_nakd_and_the_source_keeps_going() {
             > 0),
         "the garbage is redelivered"
     );
+
+    nats.shutdown();
+    engine.join().expect("clean shutdown");
+}
+
+/// Two pipelines in a row over NATS: the first publishes to a subject that names no tenant,
+/// and the second takes the tenant and the first pipeline's ingestion time from the pipeline
+/// headers, while the record itself is never written to by either.
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn a_downstream_pipeline_takes_the_tenant_and_the_first_ingestion_time_from_the_headers() {
+    let fixture = Fixture::new("chain");
+    let upstream_nats = std::sync::Arc::new(Nats::new(Metrics::noop()).expect("nats runtime"));
+    let mut upstream_registry = Registry::new();
+    upstream_nats.register(&mut upstream_registry);
+    let upstream_yaml = format!(
+        "nodes:\n  - id: out\n    type: sink.nats\n    url: {}\n    stream: {}\n    subject: {}\n",
+        url(),
+        fixture.out_stream,
+        fixture.out_subject
+    );
+    let upstream = Engine::start(
+        Pipeline::from_yaml(&upstream_yaml, &upstream_registry).expect("upstream loads"),
+        Box::new(
+            upstream_nats
+                .source(&fixture.source_params())
+                .expect("upstream source"),
+        ),
+        1,
+        Metrics::noop(),
+        no_state(),
+    )
+    .expect("upstream starts");
+
+    let out = fixture.client.get_stream(&fixture.out_stream);
+    fixture
+        .client
+        .create_pull_consumer(&out, "downstream", AckPolicy::Explicit);
+    let downstream_nats = Nats::new(Metrics::noop()).expect("nats runtime");
+    let sinks = MemorySinks::new();
+    let mut registry = Registry::new();
+    registry.register_sink("sink.memory", sinks.clone());
+    let downstream = Engine::start(
+        Pipeline::from_yaml("nodes:\n  - id: out\n    type: sink.memory\n", &registry)
+            .expect("downstream loads"),
+        Box::new(
+            downstream_nats
+                .source(&SourceParams {
+                    url: Some(url()),
+                    stream: fixture.out_stream.clone(),
+                    consumer: "downstream".to_owned(),
+                })
+                .expect("downstream source"),
+        ),
+        1,
+        Metrics::noop(),
+        no_state(),
+    )
+    .expect("downstream starts");
+
+    let payload = r#"{"id": 42, "body": "two hops", "observed_time_unix_nano": 5}"#;
+    fixture.client.publish(&fixture.in_subject("acme"), payload);
+
+    assert!(
+        wait_until(SETTLE_TIMEOUT, || sinks.written("out").len() == 1),
+        "the record crosses both pipelines"
+    );
+    let (_, upstream_headers) = fixture
+        .client
+        .first_message(&fixture.out_stream, &fixture.out_subject)
+        .expect("upstream published");
+    let upstream_time: u64 = upstream_headers
+        .get(INGESTION_TIME)
+        .expect("time header")
+        .as_str()
+        .parse()
+        .expect("decimal");
+    let written = &sinks.written("out")[0];
+    assert_eq!(
+        written.record,
+        Record::from_json(payload).expect("record parses"),
+        "neither pipeline wrote into the record"
+    );
+    assert_eq!(&*written.meta.tenant, "acme", "from Fusion-Tenant");
+    assert_eq!(
+        written.meta.ingestion_time,
+        IngestionTime::Reported(upstream_time),
+        "the first pipeline's ingestion time, not the second publish time"
+    );
+
+    upstream_nats.shutdown();
+    upstream.join().expect("upstream shuts down");
+    downstream_nats.shutdown();
+    downstream.join().expect("downstream shuts down");
+}
+
+/// A producer cannot move its record to another tenant with a header, and a header that does
+/// not parse is counted and ignored without a nak.
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn the_subject_beats_a_spoofed_tenant_header_and_a_bad_header_is_counted_not_nakked() {
+    let fixture = Fixture::new("spoof");
+    let recorder = InMemoryRecorder::new();
+    let nats = Nats::new(Metrics::new(recorder.clone())).expect("nats runtime");
+    let sinks = MemorySinks::new();
+    let mut registry = Registry::new();
+    registry.register_sink("sink.memory", sinks.clone());
+    let engine = Engine::start(
+        Pipeline::from_yaml("nodes:\n  - id: out\n    type: sink.memory\n", &registry)
+            .expect("pipeline loads"),
+        Box::new(nats.source(&fixture.source_params()).expect("source")),
+        1,
+        Metrics::noop(),
+        no_state(),
+    )
+    .expect("engine starts");
+
+    let mut headers = async_nats::HeaderMap::new();
+    headers.insert(TENANT, "beta");
+    headers.insert(INGESTION_TIME, "soon");
+    headers.insert(INGESTION_TIME_KIND, "reported");
+    fixture.client.publish_with_headers(
+        &fixture.in_subject("acme"),
+        headers,
+        r#"{"id": 42, "body": "spoofed"}"#,
+    );
+
+    assert!(
+        wait_until(SETTLE_TIMEOUT, || sinks.written("out").len() == 1),
+        "the record is walked"
+    );
+    let written = &sinks.written("out")[0];
+    assert_eq!(&*written.meta.tenant, "acme");
+    assert!(
+        matches!(written.meta.ingestion_time, IngestionTime::Reported(t) if t > 1_000),
+        "the publish time stands: {:?}",
+        written.meta.ingestion_time
+    );
+    assert_eq!(
+        recorder.counter(Metric::SourceInvalidHeaders, &[("tenant", "acme")]),
+        1
+    );
+    assert!(
+        wait_until(SETTLE_TIMEOUT, || fixture.consumer_settled()),
+        "acked, not nakked"
+    );
+    assert_eq!(fixture.consumer_info().num_redelivered, 0);
 
     nats.shutdown();
     engine.join().expect("clean shutdown");

@@ -1,33 +1,20 @@
 //! Subject helpers: tenant derivation and wildcard matching.
 //!
-//! Records arrive on `logs.{tenant}.>`; the tenant lives at `resource.tenant.id` and is
-//! stamped from the subject when the producer left it out. [`captures`] answers whether a
-//! stream's subject filter covers a concrete subject, so a sink can fail at load instead of
-//! on its first publish.
+//! Records arrive on `logs.{tenant}.>`; the subject's tenant goes on the message's arrival,
+//! never into the record. [`captures`] answers whether a stream's subject filter covers a
+//! concrete subject, so a sink can fail at load instead of on its first publish.
 
 use async_nats::jetstream::stream::Stream;
-use fusion_core::record::Record;
-use serde_json::Value;
 
-/// Resource attribute that carries the tenant.
-pub const TENANT_KEY: &str = "tenant.id";
-
-/// The tenant token of a `logs.{tenant}.>` subject, if the subject has a non-empty second
-/// token.
+/// The tenant token of a `{prefix}.{tenant}.>` subject: the second token, when it is not
+/// empty and at least one token follows it. A two-token subject such as `processed.logs`
+/// names no tenant, so a pipeline consuming another's output takes the tenant from the
+/// `Fusion-Tenant` header instead.
 #[must_use]
 pub fn tenant_from_subject(subject: &str) -> Option<&str> {
-    subject
-        .split('.')
-        .nth(1)
-        .filter(|tenant| !tenant.is_empty())
-}
-
-/// Set `resource.tenant.id` to `tenant` unless the record already carries one.
-pub fn stamp_tenant(record: &mut Record, tenant: &str) {
-    record
-        .resource
-        .entry(TENANT_KEY)
-        .or_insert_with(|| Value::String(tenant.to_owned()));
+    let mut tokens = subject.split('.');
+    let tenant = tokens.nth(1).filter(|tenant| !tenant.is_empty())?;
+    tokens.next().is_some().then_some(tenant)
 }
 
 /// Whether the NATS subject `pattern` (`*` matches one token, a trailing `>` matches one or

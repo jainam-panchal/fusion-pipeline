@@ -8,14 +8,19 @@
 //!   consumer: pipeline           # pull, explicit ack, ack_wait 30s, max_deliver 5
 //! ```
 //!
-//! Each message is decoded as one JSON record, stamped with the tenant from its subject when
-//! the record carries none and with the JetStream publish time as `observed_time_unix_nano`
-//! when it carries no timestamp at all, and handed to the engine with an ack handle that acks
-//! or naks the JetStream message. The subject's tenant, the publish time and the delivery
-//! count also go beside the record as its [`Arrival`], from which the engine resolves the
-//! record's `Meta` (ADR 0005); the stamped fields are payload a stage may rewrite. The
-//! publish time is the server's and does not change on redelivery, so stateful stages that
-//! measure windows in ingestion time see the same value every time the record comes back.
+//! Each message is decoded as one JSON record and handed to the engine, untouched, with an
+//! ack handle that acks or naks the JetStream message. What the transport says about the
+//! message goes beside the record as its [`Arrival`] (see [`crate::headers::arrival`]): the
+//! subject's tenant, else an upstream pipeline's `Fusion-Tenant`; an upstream pipeline's
+//! `Fusion-Ingestion-Time`, else the JetStream publish time; and the delivery count. The
+//! engine resolves the record's `Meta` from it (ADR 0005). Nothing is written into the
+//! record. The publish time is the server's and does not change on redelivery, so stateful
+//! stages that measure windows in ingestion time see the same value every time the record
+//! comes back.
+//!
+//! A pipeline header that does not parse is left out of the arrival, reported on stderr and
+//! counted on `source_invalid_headers_total` under the subject's tenant; the message is
+//! walked as if the header were absent.
 //!
 //! A payload that is not a record is nak'd like any other failure and reported on stderr; it
 //! runs out `max_deliver` the same way a record without an id does, which is where the
@@ -36,14 +41,15 @@ use std::time::Duration;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{AckKind, message::Acker};
 use fusion_core::io::{AckHandle, Envelope, Intake, Source, SourceError};
-use fusion_core::meta::{Arrival, IngestionTime, UNKNOWN_TENANT};
+use fusion_core::meta::UNKNOWN_TENANT;
 use fusion_core::metrics::Metrics;
 use fusion_core::record::Record;
 use futures::StreamExt;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
-use crate::subject::{stamp_tenant, tenant_from_subject};
+use crate::headers;
+use crate::subject::tenant_from_subject;
 
 /// Longest redelivery delay [`nak_delay`] asks for. A consumer with `max_deliver` 5, as the
 /// compose stack creates, never reaches it (1s, 2s, 4s, 8s, then the final delivery); the cap
@@ -116,7 +122,7 @@ impl NatsSource {
                 .and_then(|info| u64::try_from(info.published.unix_timestamp_nanos()).ok());
             let (message, acker) = message.split();
             let subject_tenant = tenant_from_subject(&message.subject);
-            let record = match decode(subject_tenant, published, &message.payload) {
+            let record = match serde_json::from_slice::<Record>(&message.payload) {
                 Ok(record) => record,
                 Err(err) => {
                     let tenant = subject_tenant.unwrap_or(UNKNOWN_TENANT);
@@ -137,11 +143,20 @@ impl NatsSource {
                     continue;
                 }
             };
-            let arrival = Arrival {
-                tenant: subject_tenant.map(str::to_owned),
-                ingestion_time: published.map(IngestionTime::Reported),
-                delivery_count: delivered,
-            };
+            let arrived = headers::arrival(
+                &message.subject,
+                message.headers.as_ref(),
+                published,
+                delivered,
+            );
+            for invalid in &arrived.invalid {
+                eprintln!(
+                    "nats source: ignored a pipeline header on `{}`: {invalid}",
+                    message.subject
+                );
+                self.metrics
+                    .source_invalid_header(subject_tenant.unwrap_or(UNKNOWN_TENANT));
+            }
             let ack = Box::new(NatsAck {
                 runtime: Arc::clone(&self.runtime),
                 acker,
@@ -151,37 +166,10 @@ impl NatsSource {
             // message redelivers after `ack_wait`.
             intake.send(Envelope {
                 record,
-                arrival,
+                arrival: arrived.arrival,
                 ack,
             })?;
         }
-    }
-}
-
-/// Decode one record, stamping `tenant` (from the subject) when the record carries none and
-/// `published` (the JetStream publish time) when it carries no timestamp.
-fn decode(
-    tenant: Option<&str>,
-    published: Option<u64>,
-    payload: &[u8],
-) -> Result<Record, serde_json::Error> {
-    let mut record: Record = serde_json::from_slice(payload)?;
-    if let Some(tenant) = tenant {
-        stamp_tenant(&mut record, tenant);
-    }
-    if let Some(published) = published {
-        stamp_observed_time(&mut record, published);
-    }
-    Ok(record)
-}
-
-/// Set `observed_time_unix_nano` to `published_unix_nanos` when the record has neither
-/// `observed_time_unix_nano` nor `time_unix_nano`. A record that says when it was observed
-/// or when it happened keeps its own word; only a record with no notion of time gets the
-/// server's.
-fn stamp_observed_time(record: &mut Record, published_unix_nanos: u64) {
-    if record.observed_time_unix_nano.is_none() && record.time_unix_nano.is_none() {
-        record.observed_time_unix_nano = Some(published_unix_nanos);
     }
 }
 

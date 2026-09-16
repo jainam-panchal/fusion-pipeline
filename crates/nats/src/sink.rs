@@ -8,6 +8,9 @@
 //!   subject: processed.logs
 //! ```
 //!
+//! Each message carries the record as the last stage left it, and its `Meta` as the
+//! [`crate::headers`]: nothing is written into the record.
+//!
 //! A batch is all-or-nothing from the engine's point of view: if any record's `PubAck` is
 //! missing the whole write fails and the source message is nak'd, so records published
 //! earlier in that batch are delivered again. That is the at-least-once contract.
@@ -17,6 +20,8 @@ use std::sync::Arc;
 use async_nats::jetstream;
 use fusion_core::io::{Outgoing, Sink, SinkError};
 use tokio::runtime::Runtime;
+
+use crate::headers;
 
 /// A JetStream sink. Build one through [`crate::Nats::sink`].
 #[derive(Debug)]
@@ -71,7 +76,11 @@ impl NatsSink {
             let payload = outgoing.record.to_json()?;
             let ack = self
                 .context
-                .publish(self.subject.clone(), payload.into())
+                .publish_with_headers(
+                    self.subject.clone(),
+                    headers::for_meta(outgoing.meta),
+                    payload.into(),
+                )
                 .await
                 .map_err(|e| self.publish_error(e))?;
             acks.push(ack);
