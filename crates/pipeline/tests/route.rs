@@ -6,6 +6,7 @@ mod common;
 
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::memory::{AckOutcome, MemorySinks};
+use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_core::stage::{Context, Stage, StageOutput};
@@ -102,6 +103,42 @@ fn default_drop_drops_unmatched_records_and_still_acks() {
     assert_eq!(h.ids("linux_out"), [1]);
     assert_eq!(h.ids("other_out"), [1]);
     assert!(h.ids("apache_out").is_empty());
+    assert_eq!(
+        h.counter(
+            Metric::RecordsDropped,
+            &[
+                ("tenant", "acme"),
+                ("stage", "by_format"),
+                ("reason", "route_default_drop")
+            ]
+        ),
+        1
+    );
+    h.finish();
+}
+
+#[test]
+fn the_first_matching_route_wins_in_declaration_order() {
+    let yaml = r#"
+nodes:
+  - id: by_format
+    type: route
+    routes:
+      any: resource.log.format != ""
+      linux: resource.log.format == "Linux"
+    default: drop
+  - id: any_out
+    type: sink.memory
+    from: by_format.any
+  - id: linux_out
+    type: sink.memory
+    from: by_format.linux
+"#;
+    let h = start(yaml, 1);
+    let probe = h.source.push(record(1, "Linux"));
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(h.ids("any_out"), [1]);
+    assert!(h.ids("linux_out").is_empty());
     h.finish();
 }
 

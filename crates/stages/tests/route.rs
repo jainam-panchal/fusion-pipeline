@@ -1,118 +1,26 @@
-//! The `route` stage through its public contract: a record in, `Routed(label, record)` or
-//! `Drop(route_default_drop)` out.
+//! The `route` stage's load-time contract: a condition that does not parse is refused naming
+//! the node and the label. Behaviour over records (which label a record takes, the default,
+//! first match wins) goes through the engine in the pipeline crate, since only core builds a
+//! stage's context.
 
-use std::sync::{Arc, LazyLock};
-
-use fusion_core::config::{Config, DEFAULT_NAME};
-use fusion_core::memory::MemoryStateStore;
-use fusion_core::meta::{IngestionTime, Meta, UNKNOWN_TENANT};
-use fusion_core::metrics::{Labels, Metrics};
-use fusion_core::record::{Record, RecordId};
-use fusion_core::stage::{Context, DropReason, Stage, StageMetrics, StageOutput, State};
+use fusion_core::config::Config;
 use fusion_stages::Route;
 
-fn route(yaml_params: &str) -> Route {
-    let yaml = format!(
-        "nodes:\n  - id: by_format\n    type: route\n{yaml_params}  - id: out\n    type: sink.memory\n"
-    );
-    let config = Config::from_yaml(&yaml).expect("config loads");
-    Route::from_node(&config.nodes[0]).expect("route builds")
-}
-
-fn record(format: &str) -> Record {
-    Record::from_json(&format!(
-        r#"{{"id": 1, "body": "x", "resource": {{"log.format": "{format}"}}}}"#
-    ))
-    .expect("record parses")
-}
-
-static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::noop);
-
-static META: LazyLock<Meta> = LazyLock::new(|| Meta {
-    record_id: RecordId(1),
-    tenant: UNKNOWN_TENANT.into(),
-    ingestion_time: IngestionTime::Reported(0),
-    delivery_count: 1,
-});
-
-/// The context the engine would build for node `by_format`, over an in-memory store and a
-/// no-op recorder.
-fn ctx() -> Context<'static> {
-    let labels = Labels::new(UNKNOWN_TENANT, "by_format");
-    Context {
-        node_id: "by_format",
-        meta: &META,
-        state: State::new(
-            Arc::new(MemoryStateStore::new()),
-            METRICS.clone(),
-            DEFAULT_NAME,
-            Arc::clone(&META.tenant),
-            "by_format",
-            None,
-            false,
-        ),
-        metrics: StageMetrics::new(&METRICS, labels),
-    }
-}
-
-const BY_FORMAT: &str = r#"    routes:
+#[test]
+fn a_well_formed_route_builds() {
+    let yaml = r#"
+nodes:
+  - id: by_format
+    type: route
+    routes:
       linux: resource.log.format == "Linux"
-      apache: resource.log.format == "Apache"
-    default: other
-"#;
-
-#[test]
-fn record_goes_down_the_label_whose_condition_matches() {
-    let route = route(BY_FORMAT);
-
-    let out = route.process(record("Apache"), &ctx());
-
-    assert!(
-        matches!(out, StageOutput::Routed(ref label, ref r) if label == "apache" && r.id == Some(RecordId(1))),
-        "{out:?}"
-    );
-}
-
-#[test]
-fn unmatched_record_goes_down_the_default_label() {
-    let route = route(BY_FORMAT);
-
-    let out = route.process(record("Mac"), &ctx());
-
-    assert!(
-        matches!(out, StageOutput::Routed(ref label, _) if label == "other"),
-        "{out:?}"
-    );
-}
-
-#[test]
-fn default_drop_drops_unmatched_records_with_route_default_drop() {
-    let route = route(&BY_FORMAT.replace("default: other", "default: drop"));
-
-    let out = route.process(record("Mac"), &ctx());
-
-    assert!(
-        matches!(out, StageOutput::Drop(DropReason::RouteDefaultDrop)),
-        "{out:?}"
-    );
-}
-
-#[test]
-fn first_matching_route_wins_in_declaration_order() {
-    let route = route(
-        r#"    routes:
-      any: resource.log.format != ""
-      linux: resource.log.format == "Linux"
+      acme: meta.tenant == "acme"
     default: drop
-"#,
-    );
-
-    let out = route.process(record("Linux"), &ctx());
-
-    assert!(
-        matches!(out, StageOutput::Routed(ref label, _) if label == "any"),
-        "{out:?}"
-    );
+  - id: out
+    type: sink.memory
+"#;
+    let config = Config::from_yaml(yaml).expect("config loads");
+    Route::from_node(&config.nodes[0]).expect("route builds");
 }
 
 #[test]

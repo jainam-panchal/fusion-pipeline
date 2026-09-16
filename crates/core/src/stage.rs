@@ -4,6 +4,10 @@
 //! [`Context`]. The handle prefixes every key with `{pipeline}:{tenant}:{node}:` so no stage
 //! can share state across tenants or pipelines, and counts every operation on
 //! `state_ops_total`, `state_op_duration_seconds` and `state_errors_total`.
+//!
+//! Only core builds a [`Context`]: each worker holds a [`StageEnvironment`] and derives every
+//! node's context from it, the record's [`Meta`] and the node, so the handle's tenant, the
+//! metric labels and the `Meta` a stage reads are the same tenant by construction.
 
 use std::fmt;
 use std::sync::Arc;
@@ -129,9 +133,9 @@ impl State {
     /// (`engine` is the stage's [`Stage::engine_label`]), and `declared` is the node's
     /// [`Stage::uses_state`]. `tenant` and `node` are taken apart rather than as a
     /// [`Labels`] so a handle without a node id is unrepresentable: the key prefix is an
-    /// invariant, not a convention.
+    /// invariant, not a convention. Built only by [`StageEnvironment::context`].
     #[must_use]
-    pub fn new(
+    fn new(
         store: Arc<dyn StateStore>,
         metrics: Metrics,
         pipeline: &str,
@@ -280,9 +284,9 @@ pub struct StageMetrics<'a> {
 
 impl<'a> StageMetrics<'a> {
     /// A handle emitting through `metrics` under `labels`, the node's labels as the engine
-    /// built them.
+    /// built them. Built only by [`StageEnvironment::context`].
     #[must_use]
-    pub const fn new(metrics: &'a Metrics, labels: Labels<'a>) -> Self {
+    const fn new(metrics: &'a Metrics, labels: Labels<'a>) -> Self {
         Self { metrics, labels }
     }
 
@@ -305,8 +309,10 @@ impl<'a> StageMetrics<'a> {
     }
 }
 
-/// Per-record context handed to a stage alongside the record.
+/// Per-record context handed to a stage alongside the record. Built only by core, from the
+/// worker's [`StageEnvironment`], the record's [`Meta`] and the node.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Context<'a> {
     /// Id of the node being run.
     pub node_id: &'a str,
@@ -318,6 +324,56 @@ pub struct Context<'a> {
     pub state: State,
     /// The metrics a stage emits for itself, under the node's labels.
     pub metrics: StageMetrics<'a>,
+}
+
+/// What a worker holds for every stage it runs: the pipeline's name, the worker's state-store
+/// connection and the metrics handle. Built once per worker at engine start.
+pub(crate) struct StageEnvironment {
+    pipeline: String,
+    store: Arc<dyn StateStore>,
+    metrics: Metrics,
+}
+
+impl StageEnvironment {
+    pub(crate) const fn new(
+        pipeline: String,
+        store: Arc<dyn StateStore>,
+        metrics: Metrics,
+    ) -> Self {
+        Self {
+            pipeline,
+            store,
+            metrics,
+        }
+    }
+
+    /// The context for `stage`, the node `node_id`, running over the record whose `Meta` is
+    /// `meta`: the state handle and the metric labels both take the tenant from `meta`.
+    pub(crate) fn context<'a>(
+        &'a self,
+        meta: &'a Meta,
+        node_id: &'a str,
+        stage: &dyn Stage,
+    ) -> Context<'a> {
+        let engine = stage.engine_label();
+        Context {
+            node_id,
+            meta,
+            state: State::new(
+                Arc::clone(&self.store),
+                self.metrics.clone(),
+                &self.pipeline,
+                Arc::clone(&meta.tenant),
+                node_id,
+                engine,
+                stage.uses_state(),
+            ),
+            metrics: StageMetrics::new(
+                &self.metrics,
+                Labels::new(&meta.tenant, node_id).with_engine(engine),
+            ),
+        }
+    }
 }
 
 /// A pipeline stage. Shared across worker threads, so it must be `Send + Sync`; per-worker

@@ -29,7 +29,7 @@ use crate::meta::{IngestionTime, Meta, Rejection, unix_nanos_now};
 use crate::metrics::{Labels, Metrics};
 use crate::pipeline::{CompiledNode, Pipeline};
 use crate::record::Record;
-use crate::stage::{Context, DropReason, StageMetrics, StageOutput, State};
+use crate::stage::{DropReason, StageEnvironment, StageOutput};
 use crate::state::{StateError, StateErrorPolicy, StateStore, StateStoreFactory};
 
 /// Envelopes buffered between the source and the workers, per worker.
@@ -126,10 +126,12 @@ impl Engine {
             let handle = thread::Builder::new()
                 .name(format!("pipeline-worker-{i}"))
                 .spawn(move || {
+                    let environment =
+                        StageEnvironment::new(pipeline.name().to_owned(), store, metrics.clone());
                     let walker = Walker {
                         pipeline: &pipeline,
                         metrics: &metrics,
-                        store,
+                        environment: &environment,
                     };
                     for envelope in rx {
                         walker.handle(envelope);
@@ -246,8 +248,9 @@ fn no_state_store() -> StateError {
 struct Walker<'p> {
     pipeline: &'p Pipeline,
     metrics: &'p Metrics,
-    /// This worker's connection to the shared state store.
-    store: Arc<dyn StateStore>,
+    /// What every stage this worker runs is given: the pipeline name, this worker's
+    /// connection to the shared state store, the metrics.
+    environment: &'p StageEnvironment,
 }
 
 impl<'p> Walker<'p> {
@@ -376,20 +379,7 @@ impl<'p> Walker<'p> {
                 }
             }
             CompiledNode::Stage(stage) => {
-                let ctx = Context {
-                    node_id,
-                    meta,
-                    state: State::new(
-                        Arc::clone(&self.store),
-                        metrics.clone(),
-                        self.pipeline.name(),
-                        Arc::clone(&meta.tenant),
-                        node_id,
-                        engine,
-                        stage.uses_state(),
-                    ),
-                    metrics: StageMetrics::new(metrics, labels),
-                };
+                let ctx = self.environment.context(meta, node_id, stage.as_ref());
                 // Copies only if another branch still shares the record.
                 let owned = Arc::unwrap_or_clone(record);
                 let started = Instant::now();
