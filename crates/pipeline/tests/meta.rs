@@ -109,6 +109,7 @@ fn the_tenant_and_the_time_are_the_transports_and_the_records_are_never_read() {
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
             delivery_count: 3,
+            bytes: None,
         },
     );
     assert_eq!(meta_of(&out[0], "record_id"), json!(7));
@@ -151,6 +152,7 @@ fn a_record_without_a_tenant_or_a_time_leaves_without_them() {
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
             delivery_count: 1,
+            bytes: None,
         },
     );
     assert_eq!(meta_of(&out[0], "tenant"), json!("acme"));
@@ -171,6 +173,7 @@ fn the_sink_receives_the_meta_beside_the_record_it_never_entered() {
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
             delivery_count: 2,
+            bytes: None,
         },
     );
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
@@ -224,6 +227,7 @@ fn a_redelivery_is_counted_under_the_tenant_every_other_metric_of_the_record_car
             tenant: Some("acme".to_owned()),
             ingestion_time: None,
             delivery_count: 2,
+            bytes: None,
         },
     );
     assert_eq!(
@@ -303,6 +307,7 @@ fn every_record_a_split_emits_continues_under_its_parents_meta() {
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(5_000_000_000)),
             delivery_count: 2,
+            bytes: None,
         },
     );
     assert_eq!(out.len(), 2);
@@ -338,6 +343,7 @@ fn acme_arrival() -> Arrival {
         tenant: Some(common::TENANT.to_owned()),
         ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
         delivery_count: 2,
+        bytes: None,
     }
 }
 

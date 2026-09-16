@@ -21,13 +21,14 @@
 use std::time::Duration;
 
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::hash::{fnv1a64, mix};
 use fusion_core::path::FieldPath;
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use fusion_core::state::StateErrorPolicy;
 use serde::Deserialize;
 
-use crate::key_hash::{fnv1a64, hash_key_fields, parse_key_fields};
+use crate::key_hash::{hash_key_fields, parse_key_fields};
 
 /// Every parameter of every mode, so a field belonging to another mode is rejected by
 /// name rather than as "unknown".
@@ -270,13 +271,4 @@ impl Stage for Sample {
             Mode::Random { .. } | Mode::Consistent { .. } => StateErrorPolicy::Pass,
         }
     }
-}
-
-/// The splitmix64 finalizer: a bijection on `u64` that spreads nearby inputs (sequential
-/// record ids, hashes of similar keys) evenly over the whole space, so a threshold on the
-/// output keeps the configured share of any input population.
-fn mix(mut x: u64) -> u64 {
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^ (x >> 31)
 }

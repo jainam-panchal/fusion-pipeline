@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::closed_set::closed_set;
 use crate::config::SOURCE_ID;
 use crate::meta::{Arrival, Meta};
-use crate::record::Record;
+use crate::record::{Record, RecordId};
 
 /// Settles the source message behind a record. Exactly one of `ack` or `nak` is called.
 pub trait AckHandle: Send {
@@ -48,6 +48,9 @@ closed_set! {
 pub struct Failure {
     /// The node that failed, or `source` for a failure before any node ran.
     pub node: String,
+    /// The `Meta` record id of the failed record; `None` for a record without an id or a
+    /// payload that is not a record. A source names the record by it when it logs.
+    pub record_id: Option<RecordId>,
     /// What kind of failure it was.
     pub kind: FailureKind,
     /// What the node said, for people; never a metric label.
@@ -60,6 +63,7 @@ impl Failure {
     pub fn at_source(kind: FailureKind, error: impl Into<String>) -> Self {
         Self {
             node: SOURCE_ID.to_owned(),
+            record_id: None,
             kind,
             error: error.into(),
         }
@@ -165,10 +169,11 @@ pub struct Outgoing<'a> {
 
 /// Accepts outgoing records. Returns `Ok` only once they are durably accepted downstream.
 pub trait Sink: Send + Sync {
-    /// Write a batch of outgoing records.
+    /// Write a batch of outgoing records, returning how many bytes were written with durable
+    /// acceptance (the `bytes_out_total` count).
     ///
     /// # Errors
     ///
     /// Returns a [`SinkError`] when durable acceptance could not be confirmed.
-    fn write(&self, batch: &[Outgoing<'_>]) -> Result<(), SinkError>;
+    fn write(&self, batch: &[Outgoing<'_>]) -> Result<u64, SinkError>;
 }

@@ -31,7 +31,7 @@ const SPEC_DROP_REASONS: [&str; 11] = [
 ];
 
 /// Spec, Telemetry: every metric the pipeline exports, in this spelling.
-const SPEC_METRICS: [&str; 20] = [
+const SPEC_METRICS: [&str; 22] = [
     "records_in_total",
     "records_out_total",
     "records_dropped_total",
@@ -52,6 +52,8 @@ const SPEC_METRICS: [&str; 20] = [
     "sink_publish_duration_seconds",
     "sink_publish_errors_total",
     "pipeline_end_to_end_seconds",
+    "bytes_in_total",
+    "bytes_out_total",
 ];
 
 #[test]

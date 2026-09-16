@@ -1,6 +1,6 @@
 //! The engine harness the trait-boundary tests share: a YAML config compiled with the
 //! default registry plus an in-memory sink, an in-memory source to push envelopes through,
-//! an in-memory state store, and the sinks to assert on. It also owns where `deploy/` is,
+//! an in-memory state store, and the sinks, metrics, events and record traces to assert on. It also owns where `deploy/` is,
 //! so a test that drives a shipped config does not spell the path itself.
 
 #![allow(dead_code)]
@@ -9,13 +9,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fusion_core::engine::Engine;
+use fusion_core::events::{Event, EventKind, InMemoryEventLog};
 use fusion_core::memory::{AckProbe, MemoryInput, MemorySinks, MemorySource, MemoryStateStore};
 use fusion_core::meta::{Arrival, IngestionTime};
 use fusion_core::metrics::{CounterMetric, HistogramMetric, InMemoryRecorder, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
+use fusion_core::signals::Signals;
 use fusion_core::state::StateStoreFactory;
+use fusion_core::trace::{InMemoryTraceSink, RecordTrace, TraceSampling};
 use fusion_pipeline::default_registry;
 
 /// A config shipped under `deploy/`.
@@ -29,13 +32,16 @@ pub fn deploy_config(name: &str) -> String {
 /// How long a test waits for an ack handle to settle.
 pub const WAIT: Duration = Duration::from_secs(5);
 
-/// A running engine with its in-memory source, sinks, state store and metrics recorder.
+/// A running engine with its in-memory source, sinks, state store, metrics recorder, event
+/// log and trace sink. Traces keep the default share of passing records.
 pub struct Harness {
     pub engine: Engine,
     pub source: MemoryInput,
     pub sinks: MemorySinks,
     pub state: MemoryStateStore,
     pub recorder: InMemoryRecorder,
+    pub event_log: InMemoryEventLog,
+    pub trace_sink: InMemoryTraceSink,
 }
 
 /// The default registry with `sink.memory` writing to `sinks`.
@@ -88,20 +94,21 @@ fn launch(
     let pipeline = Pipeline::from_yaml(yaml, &registry).expect("pipeline loads");
     let (source, input) = MemorySource::new();
     let recorder = InMemoryRecorder::new();
-    let engine = Engine::start(
-        pipeline,
-        Box::new(source),
-        workers,
-        Metrics::new(recorder.clone()),
-        factory,
-    )
-    .expect("engine starts");
+    let event_log = InMemoryEventLog::new();
+    let trace_sink = InMemoryTraceSink::new();
+    let signals = Signals::new(Metrics::new(recorder.clone()))
+        .with_events(event_log.clone())
+        .with_traces(trace_sink.clone(), TraceSampling::default());
+    let engine = Engine::start(pipeline, Box::new(source), workers, signals, factory)
+        .expect("engine starts");
     Harness {
         engine,
         source: input,
         sinks,
         state,
         recorder,
+        event_log,
+        trace_sink,
     }
 }
 
@@ -181,6 +188,32 @@ impl Harness {
     /// Every sample of the histogram `metric` under exactly `labels`.
     pub fn samples(&self, metric: HistogramMetric, labels: &[(&str, &str)]) -> Vec<f64> {
         self.recorder.samples(metric, labels)
+    }
+
+    /// Every event logged so far, in order.
+    pub fn events(&self) -> Vec<Event> {
+        self.event_log.events()
+    }
+
+    /// The events of `kind` logged so far, in order.
+    pub fn events_of(&self, kind: EventKind) -> Vec<Event> {
+        self.event_log.of_kind(kind)
+    }
+
+    /// Every record trace kept so far, in order.
+    pub fn traces(&self) -> Vec<RecordTrace> {
+        self.trace_sink.traces()
+    }
+
+    /// Push `record` for tenant [`TENANT`] as its `delivery_count`-th delivery.
+    pub fn push_delivery(&self, record: Record, delivery_count: u64) -> AckProbe {
+        self.source.push_arrival(
+            record,
+            Arrival {
+                delivery_count,
+                ..arrival_as(TENANT)
+            },
+        )
     }
 
     /// The ids of the records `sink` received, sorted.

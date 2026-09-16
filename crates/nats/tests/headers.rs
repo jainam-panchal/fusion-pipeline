@@ -43,6 +43,7 @@ fn arrival_of(
             headers,
             published,
             delivered,
+            bytes: 0,
         },
     )
 }
@@ -81,6 +82,7 @@ fn what_the_sink_writes_a_downstream_source_reads_back() {
                 tenant: Some("acme".to_owned()),
                 ingestion_time: Some(time),
                 delivery_count: 1,
+                bytes: Some(0),
             }
         );
         assert!(invalid.is_empty());
@@ -96,6 +98,7 @@ fn a_message_with_no_headers_takes_the_subjects_tenant_and_the_publish_time() {
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
             delivery_count: 2,
+            bytes: Some(0),
         }
     );
     assert!(invalid.is_empty());
@@ -270,6 +273,7 @@ mod dead_letter {
     fn failure(error: &str) -> Failure {
         Failure {
             node: "out".to_owned(),
+            record_id: Some(RecordId(7)),
             kind: FailureKind::SinkError,
             error: error.to_owned(),
         }

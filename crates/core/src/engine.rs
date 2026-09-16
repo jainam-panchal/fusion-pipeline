@@ -24,13 +24,16 @@ use std::time::{Duration, Instant};
 
 use crate::config::SOURCE_ID;
 use crate::dag::NodeIndex;
+use crate::events::{Event, EventKind};
 use crate::io::{Envelope, Failure, FailureKind, Intake, Outgoing, Source, SourceError};
 use crate::meta::{IngestionTime, Meta, Rejection, unix_nanos_now};
 use crate::metrics::{Labels, Metrics};
 use crate::pipeline::{CompiledNode, Pipeline};
 use crate::record::Record;
+use crate::signals::Signals;
 use crate::stage::{DropReason, StageEnvironment, StageOutput};
 use crate::state::{StateError, StateErrorPolicy, StateStore, StateStoreFactory};
+use crate::trace::{Detail, Settlement, SpanOutcome, TraceBuffer, TraceContext, TraceKey};
 
 /// Envelopes buffered between the source and the workers, per worker.
 const INTAKE_DEPTH_PER_WORKER: usize = 64;
@@ -83,8 +86,9 @@ impl Engine {
     /// Start `worker_count` worker threads and the source thread.
     ///
     /// `worker_count` of zero is treated as one. Use [`Pipeline::worker_count`] to honour the
-    /// config's `workers` setting and its one-per-core default. Every measurement the engine
-    /// takes goes to `metrics`; [`Metrics::noop`] discards them. When any node uses state,
+    /// config's `workers` setting and its one-per-core default. Every measurement, event and
+    /// kept record trace goes to `signals`; a [`Metrics`] converts into signals that only
+    /// measure, and [`Signals::noop`] discards everything. When any node uses state,
     /// one connection per worker is opened from `state` before the first thread starts, so
     /// an unreachable store fails here; a pipeline with no stateful node never touches it.
     ///
@@ -96,9 +100,10 @@ impl Engine {
         pipeline: Pipeline,
         source: Box<dyn Source>,
         worker_count: usize,
-        metrics: Metrics,
+        signals: impl Into<Signals>,
         state: Arc<dyn StateStoreFactory>,
     ) -> Result<Self, EngineError> {
+        let signals = signals.into();
         let worker_count = worker_count.max(1);
         let stores = if pipeline.uses_state() {
             (0..worker_count)
@@ -122,19 +127,24 @@ impl Engine {
         for (i, store) in stores.into_iter().enumerate() {
             let rx = rx.clone();
             let pipeline = Arc::clone(&pipeline);
-            let metrics = metrics.clone();
+            let signals = signals.clone();
             let handle = thread::Builder::new()
                 .name(format!("pipeline-worker-{i}"))
                 .spawn(move || {
-                    let environment =
-                        StageEnvironment::new(pipeline.name().to_owned(), store, metrics.clone());
+                    let environment = StageEnvironment::new(
+                        pipeline.name().to_owned(),
+                        store,
+                        signals.metrics().clone(),
+                    );
                     let walker = Walker {
                         pipeline: &pipeline,
-                        metrics: &metrics,
+                        metrics: signals.metrics(),
+                        signals: &signals,
                         environment: &environment,
                     };
+                    let mut spans = TraceBuffer::new();
                     for envelope in rx {
-                        walker.handle(envelope);
+                        walker.handle(envelope, &mut spans);
                     }
                 })
                 .map_err(|source| EngineError::Spawn {
@@ -177,35 +187,61 @@ impl Engine {
     }
 }
 
-/// One record's walk through the graph: its [`Meta`], the node it is in, and whether any
-/// branch has failed. `SOURCE_ID` is the `stage` label for decisions the engine takes before
-/// any node runs.
+/// One record's walk through the graph: its [`Meta`], the node it is in, whether any branch
+/// has failed, and the span drafts of the nodes it visited. `SOURCE_ID` is the `stage` label
+/// for decisions the engine takes before any node runs.
 struct Walk<'p: 't, 't> {
     /// Borrowed from the handling call, not owned, so labels built on its tenant never
     /// borrow the walk itself and `fail` can take them while the walk is mutated.
     meta: &'t Meta,
-    /// The labels of the node whose stage or sink is running, so a panic is charged to it.
-    at: Option<Labels<'t>>,
+    /// What the record's trace ids derive from.
+    key: TraceKey,
+    /// The labels and span of the node whose stage or sink is running, so a panic is
+    /// charged to it.
+    at: Option<(Labels<'t>, usize)>,
     /// The first failure of the walk, the one the nak reports.
     failure: Option<Failure>,
     metrics: &'p Metrics,
+    signals: &'p Signals,
+    /// The worker's span drafts, begun for this record.
+    spans: &'t mut TraceBuffer<'p>,
 }
 
-impl Walk<'_, '_> {
-    fn fail(&mut self, labels: &Labels<'_>, kind: FailureKind, error: &dyn std::fmt::Display) {
+impl<'p> Walk<'p, '_> {
+    /// Count and log a failure of the node `labels` names, whose span is `span`, and keep
+    /// it if it is the walk's first. Returns the error text for the span.
+    fn fail(
+        &mut self,
+        labels: &Labels<'_>,
+        span: Option<usize>,
+        kind: FailureKind,
+        error: &dyn std::fmt::Display,
+    ) -> String {
         let node = labels.stage().unwrap_or(SOURCE_ID);
-        // Structured logging over OTLP lands with the logs ticket; until then the failure is
-        // at least visible on stderr rather than swallowed.
-        eprintln!(
-            "pipeline: record {} failed at node `{node}`: {error}",
-            self.meta.record_id,
-        );
+        let error = error.to_string();
+        let delivery = self.meta.delivery_count;
         self.metrics.errored(labels);
+        self.signals.emit(Event {
+            kind: EventKind::StageError,
+            record_id: Some(self.meta.record_id),
+            tenant: Arc::clone(&self.meta.tenant),
+            node: node.to_owned(),
+            reason: Some(kind),
+            delivery_count: delivery,
+            stream_sequence: None,
+            message: error.clone(),
+            trace: Some(span.map_or_else(
+                || self.key.delivery_context(delivery),
+                |span| TraceBuffer::context(self.key, delivery, span),
+            )),
+        });
         self.failure.get_or_insert_with(|| Failure {
             node: node.to_owned(),
+            record_id: Some(self.meta.record_id),
             kind,
-            error: error.to_string(),
+            error: error.clone(),
         });
+        error
     }
 }
 
@@ -253,31 +289,51 @@ fn no_state_store() -> StateError {
 struct Walker<'p> {
     pipeline: &'p Pipeline,
     metrics: &'p Metrics,
+    /// Where events and kept traces go.
+    signals: &'p Signals,
     /// What every stage this worker runs is given: the pipeline name, this worker's
     /// connection to the shared state store, the metrics.
     environment: &'p StageEnvironment,
 }
 
 impl<'p> Walker<'p> {
-    fn handle(&self, envelope: Envelope) {
+    fn handle(&self, envelope: Envelope, spans: &mut TraceBuffer<'p>) {
         let Envelope {
             record,
             arrival,
             ack,
         } = envelope;
+        spans.begin();
         let resolved = Meta::resolve(&record, &arrival);
         let tenant = Arc::clone(match &resolved {
             Ok(meta) => &meta.tenant,
             Err(rejected) => &rejected.tenant,
         });
+        let delivery = arrival.delivery_count;
         // `source` is a node like any other on the metrics: every record the source hands
         // over counts in, every record that enters the graph counts out, and the engine's
         // own rejections are its drops. Intake is then one series whatever the first node
         // is called.
         let source = Labels::new(&tenant, SOURCE_ID);
         self.metrics.records_in(&source);
-        if arrival.delivery_count > 1 {
+        if let Some(bytes) = arrival.bytes {
+            self.metrics.bytes_in(&tenant, bytes);
+        }
+        if delivery > 1 {
             self.metrics.source_redelivery(&tenant);
+            let meta = resolved.as_ref().ok();
+            self.signals.emit(Event {
+                kind: EventKind::Redelivery,
+                record_id: meta.map(|meta| meta.record_id),
+                tenant: Arc::clone(&tenant),
+                node: SOURCE_ID.to_owned(),
+                reason: None,
+                delivery_count: delivery,
+                stream_sequence: None,
+                message: String::new(),
+                // A walked redelivery's trace is always kept, so the link resolves.
+                trace: meta.map(|meta| TraceKey::of(meta).delivery_context(delivery)),
+            });
         }
         let meta = match resolved {
             Ok(meta) => meta,
@@ -290,10 +346,10 @@ impl<'p> Walker<'p> {
                     Rejection::MissingId => {
                         self.metrics.dropped(&source, DropReason::MissingId);
                         self.metrics.source_nak(&tenant);
-                        ack.nak(
-                            None,
-                            Failure::at_source(FailureKind::MissingId, "the record has no `id`"),
-                        );
+                        let failure =
+                            Failure::at_source(FailureKind::MissingId, "the record has no `id`");
+                        self.log_nak(&tenant, delivery, &failure, None);
+                        ack.nak(None, failure);
                     }
                     // Spec: metric and span are rejected by the engine (reason
                     // `invalid_record`). Rejection is a drop, and drops are acked.
@@ -307,24 +363,50 @@ impl<'p> Walker<'p> {
         };
         self.metrics.records_out(&source, 1);
 
+        let key = TraceKey::of(&meta);
         let mut walk = Walk {
             meta: &meta,
+            key,
             at: None,
             failure: None,
             metrics: self.metrics,
+            signals: self.signals,
+            spans,
         };
         // A stage or sink that panics must not take the ack handle down with it: contain the
         // panic (in dev; release aborts) and settle the record as failed.
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             let targets = self.pipeline.dag().source_successors().iter().copied();
-            self.fan_out(targets, Arc::new(record), &mut walk);
+            self.fan_out(targets, Arc::new(record), &mut walk, None);
         }));
         if outcome.is_err() {
-            let labels = walk.at.unwrap_or(source);
-            walk.fail(&labels, FailureKind::Panic, &"stage or sink panicked");
+            const PANICKED: &str = "stage or sink panicked";
+            let (labels, span) = walk
+                .at
+                .map_or((source, None), |(labels, span)| (labels, Some(span)));
+            walk.fail(&labels, span, FailureKind::Panic, &PANICKED);
+            walk.spans
+                .fail_open(Instant::now(), FailureKind::Panic, PANICKED);
         }
-        if let Some(failure) = walk.failure {
+        let Walk { failure, spans, .. } = walk;
+        // The trace of every failed or redelivered walk is kept, so a log line about it
+        // always finds it; of the rest, the sampled share.
+        let settlement = if failure.is_some() {
+            Settlement::Nak
+        } else {
+            Settlement::Ack
+        };
+        if failure.is_some() || delivery > 1 || self.signals.sampling().keeps(key) {
+            self.signals.export(spans.finish(&meta, settlement));
+        }
+        if let Some(failure) = failure {
             self.metrics.source_nak(&tenant);
+            self.log_nak(
+                &tenant,
+                delivery,
+                &failure,
+                Some(key.delivery_context(delivery)),
+            );
             ack.nak(None, failure);
         } else {
             // End to end is measured on the ack only: a nakked record comes back and is
@@ -339,25 +421,54 @@ impl<'p> Walker<'p> {
         }
     }
 
+    /// Log the nak of a record for `failure`, before the source hears of it.
+    fn log_nak(
+        &self,
+        tenant: &Arc<str>,
+        delivery: u64,
+        failure: &Failure,
+        trace: Option<TraceContext>,
+    ) {
+        self.signals.emit(Event {
+            kind: EventKind::Nak,
+            record_id: failure.record_id,
+            tenant: Arc::clone(tenant),
+            node: failure.node.clone(),
+            reason: Some(failure.kind),
+            delivery_count: delivery,
+            stream_sequence: None,
+            message: failure.error.clone(),
+            trace,
+        });
+    }
+
     /// Deliver `record` to every node in `targets`, sharing it until a branch needs to own it.
     /// The last target receives the walker's own reference, so a lone branch never copies.
+    /// `parent` is the span of the node the record comes from, `None` for the source.
     fn fan_out(
         &self,
         targets: impl Iterator<Item = NodeIndex>,
         record: Arc<Record>,
         walk: &mut Walk<'p, '_>,
+        parent: Option<usize>,
     ) {
         let mut targets = targets.peekable();
         while let Some(target) = targets.next() {
             if targets.peek().is_none() {
-                self.run_node(target, record, walk);
+                self.run_node(target, record, walk, parent);
                 return;
             }
-            self.run_node(target, Arc::clone(&record), walk);
+            self.run_node(target, Arc::clone(&record), walk, parent);
         }
     }
 
-    fn run_node(&self, index: NodeIndex, record: Arc<Record>, walk: &mut Walk<'p, '_>) {
+    fn run_node(
+        &self,
+        index: NodeIndex,
+        record: Arc<Record>,
+        walk: &mut Walk<'p, '_>,
+        parent: Option<usize>,
+    ) {
         let dag = self.pipeline.dag();
         let node_id = dag.node(index).id.as_str();
         let metrics = self.metrics;
@@ -368,21 +479,34 @@ impl<'p> Walker<'p> {
         };
         let meta = walk.meta;
         let labels = Labels::new(&meta.tenant, node_id).with_engine(engine);
-        walk.at = Some(labels);
         metrics.records_in(&labels);
         match node {
             CompiledNode::Sink(sink) => {
                 let started = Instant::now();
+                let span = walk.spans.open(node_id, parent, started);
+                walk.at = Some((labels, span));
                 let written = sink.write(&[Outgoing {
                     meta,
                     record: &record,
                 }]);
-                metrics.sink_publish_duration(&labels, started.elapsed());
+                let ended = Instant::now();
+                metrics.sink_publish_duration(&labels, ended - started);
                 match written {
-                    Ok(()) => metrics.records_out(&labels, 1),
+                    Ok(bytes) => {
+                        metrics.records_out(&labels, 1);
+                        metrics.bytes_out(&labels, bytes);
+                        walk.spans
+                            .close(span, ended, SpanOutcome::Written, Detail::None);
+                    }
                     Err(err) => {
                         metrics.sink_publish_error(&labels);
-                        walk.fail(&labels, FailureKind::SinkError, &err);
+                        let error = walk.fail(&labels, Some(span), FailureKind::SinkError, &err);
+                        walk.spans.close(
+                            span,
+                            ended,
+                            SpanOutcome::Error,
+                            Detail::Failure(FailureKind::SinkError, error),
+                        );
                     }
                 }
             }
@@ -391,12 +515,18 @@ impl<'p> Walker<'p> {
                 // Copies only if another branch still shares the record.
                 let owned = Arc::unwrap_or_clone(record);
                 let started = Instant::now();
+                let span = walk.spans.open(node_id, parent, started);
+                walk.at = Some((labels, span));
                 let output = stage.process(owned, &ctx);
-                metrics.stage_duration(&labels, started.elapsed());
+                let ended = Instant::now();
+                metrics.stage_duration(&labels, ended - started);
+                let consumers = |label| dag.consumers(index, label);
                 match output {
                     StageOutput::Pass(record) => {
                         metrics.records_out(&labels, 1);
-                        self.fan_out(dag.consumers(index, None), Arc::new(record), walk);
+                        walk.spans
+                            .close(span, ended, SpanOutcome::Pass, Detail::None);
+                        self.fan_out(consumers(None), Arc::new(record), walk, Some(span));
                     }
                     // The stage could not reach the store and hands the record back. The
                     // policy is the node's, applied here: `pass` forwards the record as if
@@ -405,35 +535,76 @@ impl<'p> Walker<'p> {
                     StageOutput::StateError { record, error } => match stage.on_state_error() {
                         StateErrorPolicy::Pass => {
                             metrics.records_out(&labels, 1);
-                            self.fan_out(dag.consumers(index, None), Arc::new(record), walk);
+                            walk.spans.close(
+                                span,
+                                ended,
+                                SpanOutcome::StateErrorPass,
+                                Detail::None,
+                            );
+                            self.fan_out(consumers(None), Arc::new(record), walk, Some(span));
                         }
                         StateErrorPolicy::Nak => {
-                            walk.fail(&labels, FailureKind::StateError, &error);
+                            let error =
+                                walk.fail(&labels, Some(span), FailureKind::StateError, &error);
+                            walk.spans.close(
+                                span,
+                                ended,
+                                SpanOutcome::Error,
+                                Detail::Failure(FailureKind::StateError, error),
+                            );
                         }
                     },
                     StageOutput::Split(records) => {
-                        metrics.records_out(&labels, records.len() as u64);
+                        let count = records.len() as u64;
+                        metrics.records_out(&labels, count);
+                        walk.spans
+                            .close(span, ended, SpanOutcome::Split, Detail::Split(count));
                         for record in records {
-                            self.fan_out(dag.consumers(index, None), Arc::new(record), walk);
+                            self.fan_out(consumers(None), Arc::new(record), walk, Some(span));
                         }
                     }
-                    StageOutput::Drop(reason) => metrics.dropped(&labels, reason),
+                    StageOutput::Drop(reason) => {
+                        metrics.dropped(&labels, reason);
+                        walk.spans
+                            .close(span, ended, SpanOutcome::Drop, Detail::Drop(reason));
+                    }
                     StageOutput::Routed(label, record) => {
                         metrics.records_out(&labels, 1);
-                        let mut targets = dag.consumers(index, Some(&label)).peekable();
+                        let mut targets = consumers(Some(&label)).peekable();
                         if targets.peek().is_none() {
                             // Load validation guarantees every declared label a consumer, so
                             // this is a stage emitting a label it never declared.
-                            walk.fail(
+                            let error = walk.fail(
                                 &labels,
+                                Some(span),
                                 FailureKind::StageError,
                                 &format!("no consumer for route label `{label}`"),
                             );
+                            walk.spans.close(
+                                span,
+                                ended,
+                                SpanOutcome::Error,
+                                Detail::Failure(FailureKind::StageError, error),
+                            );
                             return;
                         }
-                        self.fan_out(targets, Arc::new(record), walk);
+                        walk.spans
+                            .close(span, ended, SpanOutcome::Routed, Detail::None);
+                        self.fan_out(targets, Arc::new(record), walk, Some(span));
+                        // The label is borrowed by the targets until the branch is done; it
+                        // was allocated by the stage, so the span takes it rather than a
+                        // copy.
+                        walk.spans.detail(span, Detail::Routed(label));
                     }
-                    StageOutput::Error(err) => walk.fail(&labels, FailureKind::StageError, &err),
+                    StageOutput::Error(err) => {
+                        let error = walk.fail(&labels, Some(span), FailureKind::StageError, &err);
+                        walk.spans.close(
+                            span,
+                            ended,
+                            SpanOutcome::Error,
+                            Detail::Failure(FailureKind::StageError, error),
+                        );
+                    }
                 }
             }
         }

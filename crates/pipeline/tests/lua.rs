@@ -586,6 +586,7 @@ fn a_script_stamping_the_clock_into_a_time_field_does_not_move_a_downstream_wind
                 tenant: Some("acme".to_owned()),
                 ingestion_time: Some(IngestionTime::Reported(ingested_s * 1_000_000_000)),
                 delivery_count,
+                bytes: None,
             };
             let probe = h.source.push_arrival(r, arrival);
             assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");

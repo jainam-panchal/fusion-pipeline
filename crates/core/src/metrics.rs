@@ -138,6 +138,12 @@ metrics! {
     counter SinkPublishErrors = "sink_publish_errors_total",
     /// `pipeline_end_to_end_seconds{tenant}`: ingestion time to settlement.
     histogram EndToEnd = "pipeline_end_to_end_seconds",
+    /// `bytes_in_total{tenant}`: payload bytes as the transport delivered them, counted at
+    /// intake for every delivery, rejected ones included.
+    counter BytesIn = "bytes_in_total",
+    /// `bytes_out_total{tenant, stage}`: bytes a sink wrote with durable acceptance. Across a
+    /// fan-out every sink counts its own copy.
+    counter BytesOut = "bytes_out_total",
 }
 
 closed_set! {
@@ -526,6 +532,17 @@ impl Metrics {
             &Labels::for_tenant(tenant),
             elapsed.as_secs_f64(),
         );
+    }
+
+    /// `bytes_in_total`.
+    pub fn bytes_in(&self, tenant: &str, bytes: u64) {
+        self.recorder
+            .count(CounterMetric::BytesIn, &Labels::for_tenant(tenant), bytes);
+    }
+
+    /// `bytes_out_total`.
+    pub fn bytes_out(&self, labels: &Labels<'_>, bytes: u64) {
+        self.recorder.count(CounterMetric::BytesOut, labels, bytes);
     }
 
     /// `pipeline_end_to_end_seconds`.

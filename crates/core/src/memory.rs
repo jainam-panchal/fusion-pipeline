@@ -204,6 +204,11 @@ impl MemorySinks {
         lock_unpoisoned(&self.failing).insert(node_id.to_owned());
     }
 
+    /// Let writes to the sink node `node_id` succeed again.
+    pub fn recover_writes_to(&self, node_id: &str) {
+        lock_unpoisoned(&self.failing).remove(node_id);
+    }
+
     /// Records written to the sink node `node_id`, in arrival order.
     #[must_use]
     pub fn records(&self, node_id: &str) -> Vec<Record> {
@@ -240,10 +245,20 @@ struct MemorySink {
 }
 
 impl Sink for MemorySink {
-    fn write(&self, batch: &[Outgoing<'_>]) -> Result<(), SinkError> {
+    fn write(&self, batch: &[Outgoing<'_>]) -> Result<u64, SinkError> {
         if lock_unpoisoned(&self.failing).contains(&self.node_id) {
             return Err(SinkError::new(InjectedSinkFailure(self.node_id.clone())));
         }
+        // What a sink writing JSON would write: the record's serialized length.
+        let bytes = batch
+            .iter()
+            .map(|outgoing| {
+                outgoing
+                    .record
+                    .to_json()
+                    .map_or(0, |json| json.len() as u64)
+            })
+            .sum();
         lock_unpoisoned(&self.outgoing)
             .entry(self.node_id.clone())
             .or_default()
@@ -251,7 +266,7 @@ impl Sink for MemorySink {
                 meta: outgoing.meta.clone(),
                 record: outgoing.record.clone(),
             }));
-        Ok(())
+        Ok(bytes)
     }
 }
 

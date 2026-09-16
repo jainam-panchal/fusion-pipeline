@@ -345,6 +345,7 @@ impl NatsSource {
                     headers: message.headers.as_ref(),
                     published,
                     delivered,
+                    bytes: message.payload.len() as u64,
                 },
             );
             // The tenant the engine will give the record, so every series the source counts
