@@ -15,7 +15,8 @@ use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::metrics::CounterMetric;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
-use fusion_nats::config::SinkParams;
+use fusion_nats::config::{SinkParams, SourceParams};
+use fusion_nats::subject::covers_every_tenant;
 use fusion_pipeline::default_registry;
 
 /// The default registry with `sink.nats` parsing real sink params and collecting in memory.
@@ -94,6 +95,49 @@ fn every_deploy_config_parses() {
     for name in ["pipeline.yaml", "pipeline-routing.yaml"] {
         Config::from_yaml(&deploy_config(name))
             .unwrap_or_else(|err| panic!("{name} parses: {err}"));
+    }
+}
+
+/// The compose `nats-init` command that adds stream `name`, its continuation lines joined.
+fn compose_stream_add(name: &str) -> String {
+    let compose = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/compose.yaml"),
+    )
+    .expect("deploy/compose.yaml is readable");
+    let joined = compose.replace("\\\n", " ");
+    joined
+        .lines()
+        .find(|line| line.contains(&format!("nats stream add {name} ")))
+        .unwrap_or_else(|| panic!("nats-init adds stream {name}"))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Issue #10: the source refuses to start without a stream capturing every dead-letter
+/// subject, so the stack creates one for the prefix each shipped pipeline uses, capped per
+/// tenant so one tenant's dead letters cannot push another's out.
+#[test]
+fn compose_creates_the_dead_letter_stream_every_deploy_pipeline_needs() {
+    let dlq = compose_stream_add("DLQ");
+    let subjects = dlq
+        .split("--subjects ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(|subjects| subjects.trim_matches('\''))
+        .unwrap_or_else(|| panic!("the DLQ stream names its subjects: {dlq}"));
+    for flag in ["--discard old", "--max-msgs-per-subject ", "--dupe-window "] {
+        assert!(dlq.contains(flag), "`{flag}` missing from: {dlq}");
+    }
+    for name in ["pipeline.yaml", "pipeline-routing.yaml"] {
+        let config = Config::from_yaml(&deploy_config(name)).expect("config parses");
+        let source = config.source.expect("a deploy pipeline names its source");
+        let params: SourceParams = source.parse_params().expect("source params parse");
+        assert!(
+            covers_every_tenant(subjects, &params.dlq_prefix),
+            "{name}: `{subjects}` does not cover `{}.<tenant>`",
+            params.dlq_prefix
+        );
     }
 }
 

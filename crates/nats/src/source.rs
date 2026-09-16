@@ -5,8 +5,9 @@
 //!   type: nats
 //!   url: nats://127.0.0.1:4222   # overridden by NATS_URL
 //!   stream: LOGS
-//!   consumer: pipeline           # pull, explicit ack, ack_wait 30s, max_deliver 5
+//!   consumer: pipeline           # pull, explicit ack, ack_wait 30s, max_deliver 5, no backoff
 //!   tenant_prefix: logs          # {tenant_prefix}.{tenant}.> names the tenant; the default
+//!   dlq_prefix: dlq              # dead letters go to {dlq_prefix}.{tenant}; the default
 //! ```
 //!
 //! Each message is decoded as one JSON record and handed to the engine, untouched, with an
@@ -25,12 +26,25 @@
 //! names a valid tenant, so a header the subject overrides is never counted.
 //!
 //! A payload that is not a record is nak'd like any other failure and reported on stderr; it
-//! runs out `max_deliver` the same way a record without an id does, which is where the
-//! dead-letter ticket picks it up.
+//! runs out `max_deliver` the same way a record without an id does.
 //!
 //! Naks carry a delay. When the engine gives none, [`nak_delay`] derives one from the
 //! message's delivery count: 1s on the first failure, doubling to [`MAX_NAK_DELAY`], so a
 //! sink that is down does not burn through `max_deliver` in milliseconds.
+//!
+//! The dead-letter queue. A nak on the message's final delivery ([`is_final_delivery`]
+//! under the consumer's `max_deliver`, read at startup) is not a nak: the source publishes
+//! the message as it arrived to `{dlq_prefix}.{tenant}` with the headers
+//! [`crate::headers::for_dead_letter`] writes, waits for the `PubAck`, and terminates the
+//! message with the reason `dlq {node}: {kind}`, which JetStream puts on its
+//! `MSG_TERMINATED` advisory. It counts `dlq_total{tenant, stage, reason}`. The publish is
+//! tried [`DEAD_LETTER_RETRIES`] more times; when every try fails the message is nakked
+//! with no delay, so JetStream gives up on it at once with a `MAX_DELIVERIES` advisory, and
+//! `dlq_publish_errors_total` counts it. The message is then only in its stream, which the
+//! stream sequence on stderr finds. Either way `dlq_publish_duration_seconds` times every
+//! try together. A delivery whose message info the source could not read is never taken
+//! for the final one. An undecodable payload takes the same path from the receive loop,
+//! which it holds up while the tries last.
 //!
 //! The engine counts a redelivered record on `source_redeliveries_total` under its `Meta`
 //! tenant. A payload that does not decode has no record, so the source counts it itself,
@@ -38,19 +52,21 @@
 //! gives, which is the tenant `Meta` would have had.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use async_nats::Subject;
 use async_nats::jetstream::consumer::PullConsumer;
-use async_nats::jetstream::{AckKind, message::Acker};
-use fusion_core::io::{AckHandle, Envelope, Intake, Source, SourceError};
-use fusion_core::meta::Meta;
+use async_nats::jetstream::{self, AckKind, message::Acker};
+use fusion_core::io::{AckHandle, Envelope, Failure, FailureKind, Intake, Source, SourceError};
+use fusion_core::meta::{IngestionTime, Meta};
 use fusion_core::metrics::Metrics;
 use fusion_core::record::Record;
 use futures::StreamExt;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
-use crate::headers::{self, InvalidHeader, Received};
+use crate::headers::{self, DeadLetter, InvalidHeader, Received};
+use crate::subject;
 
 /// Longest redelivery delay [`nak_delay`] asks for. A consumer with `max_deliver` 5, as the
 /// compose stack creates, never reaches it (1s, 2s, 4s, 8s, then the final delivery); the cap
@@ -68,6 +84,184 @@ pub fn nak_delay(delivered: u64) -> Duration {
     Duration::from_secs(1 << exponent).min(MAX_NAK_DELAY)
 }
 
+/// The delivery limit of a consumer whose `max_deliver` is `max_deliver`, `None` when it has
+/// none. The server stores 0 as -1, unlimited, and async-nats reads a missing field as 0, so
+/// only a positive value is a limit.
+#[must_use]
+pub fn delivery_limit(max_deliver: i64) -> Option<u64> {
+    u64::try_from(max_deliver).ok().filter(|limit| *limit > 0)
+}
+
+/// Whether the `delivered`-th delivery of a message is its last under `limit`: JetStream
+/// never delivers it again once the count has reached the limit.
+#[must_use]
+pub fn is_final_delivery(delivered: u64, limit: u64) -> bool {
+    delivered >= limit
+}
+
+/// How many more times a failed dead-letter publish is tried, and the pause before each.
+pub const DEAD_LETTER_RETRIES: [Duration; 3] = [
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_millis(1000),
+];
+
+/// Where a source sends the messages it gives up on.
+#[derive(Debug)]
+pub(crate) struct DeadLetters {
+    context: jetstream::Context,
+    /// The first token of the dead-letter subjects.
+    prefix: String,
+    /// The consumer's `max_deliver`.
+    limit: u64,
+    metrics: Metrics,
+}
+
+impl DeadLetters {
+    pub(crate) fn new(
+        context: jetstream::Context,
+        prefix: String,
+        limit: u64,
+        metrics: Metrics,
+    ) -> Self {
+        Self {
+            context,
+            prefix,
+            limit,
+            metrics,
+        }
+    }
+
+    /// Settle a failed `delivery`: dead-letter and terminate it on its final delivery,
+    /// otherwise nak it after `delay`, or after [`nak_delay`] when none is given.
+    async fn settle_failure(
+        &self,
+        delivery: &Delivery,
+        acker: &Acker,
+        delay: Option<Duration>,
+        failure: Failure,
+    ) {
+        let Some(position) = delivery
+            .position
+            .as_ref()
+            .filter(|position| is_final_delivery(position.delivered, self.limit))
+        else {
+            let delivered = delivery.position.as_ref().map_or(1, |p| p.delivered);
+            let nak = AckKind::Nak(Some(delay.unwrap_or_else(|| nak_delay(delivered))));
+            settle(acker, nak).await;
+            return;
+        };
+        let started = Instant::now();
+        let published = self.publish(delivery, position, &failure).await;
+        self.metrics
+            .dlq_publish_duration(&delivery.tenant, started.elapsed());
+        match published {
+            Ok(()) => {
+                // Counted on the `PubAck`, before the terminate: the dead letter is stored,
+                // whatever becomes of the terminate.
+                self.metrics
+                    .dead_lettered(&delivery.tenant, &failure.node, failure.kind);
+                self.terminate(delivery, acker, &failure).await;
+            }
+            Err(err) => {
+                eprintln!(
+                    "nats source: could not dead-letter message {} of stream `{}` (`{}`), \
+                     left in the stream: {err}",
+                    position.stream_sequence, position.stream, delivery.message.subject
+                );
+                self.metrics.dlq_publish_error(&delivery.tenant);
+                // No delay: JetStream gives up on the message now rather than after one.
+                settle(acker, AckKind::Nak(None)).await;
+            }
+        }
+    }
+
+    /// Publish `delivery`'s dead letter and wait for its `PubAck`, retrying on failure.
+    async fn publish(
+        &self,
+        delivery: &Delivery,
+        position: &Position,
+        failure: &Failure,
+    ) -> Result<(), jetstream::context::PublishError> {
+        let subject = subject::dead_letter(&self.prefix, &delivery.tenant);
+        let headers = headers::for_dead_letter(&DeadLetter {
+            stream: &position.stream,
+            stream_sequence: position.stream_sequence,
+            subject: &delivery.message.subject,
+            headers: delivery.message.headers.as_ref(),
+            tenant: &delivery.tenant,
+            ingestion_time: delivery.ingestion_time,
+            failure,
+        });
+        let mut pauses = DEAD_LETTER_RETRIES.iter();
+        loop {
+            let attempt = async {
+                self.context
+                    .publish_with_headers(
+                        subject.clone(),
+                        headers.clone(),
+                        delivery.message.payload.clone(),
+                    )
+                    .await?
+                    .await
+            };
+            match (attempt.await, pauses.next()) {
+                (Ok(_), _) => return Ok(()),
+                (Err(err), None) => return Err(err),
+                (Err(_), Some(pause)) => tokio::time::sleep(*pause).await,
+            }
+        }
+    }
+
+    /// Terminate `delivery` with the reason `dlq {node}: {kind}`. The client's own
+    /// terminate carries no reason, so the reply is written by hand when there is one.
+    async fn terminate(&self, delivery: &Delivery, acker: &Acker, failure: &Failure) {
+        let Some(reply) = delivery.reply.clone() else {
+            settle(acker, AckKind::Term).await;
+            return;
+        };
+        let body = format!("+TERM dlq {}: {}", failure.node, failure.kind);
+        if let Err(err) = self.context.client().publish(reply, body.into()).await {
+            // The dead letter is stored. A lost terminate leaves the message unsettled on
+            // its final delivery, so JetStream does not deliver it again: once `ack_wait`
+            // runs out it gives up on the message with a `MAX_DELIVERIES` advisory.
+            eprintln!("nats source: could not terminate a dead-lettered message: {err}");
+        }
+    }
+}
+
+/// Settle a message, reporting a failure: a lost ack or nak redelivers after `ack_wait`.
+async fn settle(acker: &Acker, kind: AckKind) {
+    if let Err(err) = acker.ack_with(kind).await {
+        eprintln!("nats source: could not settle message: {err}");
+    }
+}
+
+/// Where a message sits in its stream and consumer, from its JetStream message info.
+#[derive(Debug)]
+struct Position {
+    stream: String,
+    stream_sequence: u64,
+    /// How many times JetStream has delivered the message, this one included.
+    delivered: u64,
+}
+
+/// What a source keeps of one delivered message to settle it: all a dead letter needs. The
+/// payload is reference-counted, so keeping it costs no copy, but keeps it alive until the
+/// message is settled.
+#[derive(Debug)]
+struct Delivery {
+    /// The message as it arrived: subject, headers and payload.
+    message: async_nats::Message,
+    /// The tenant the record's `Meta` gets.
+    tenant: String,
+    ingestion_time: Option<IngestionTime>,
+    /// The subject a settlement is published to.
+    reply: Option<Subject>,
+    /// `None` when the message info could not be read; the delivery is then never final.
+    position: Option<Position>,
+}
+
 /// A JetStream source. Build one through [`crate::Nats::source`].
 #[derive(Debug)]
 pub struct NatsSource {
@@ -77,6 +271,7 @@ pub struct NatsSource {
     metrics: Metrics,
     /// The first token of the subjects that name a tenant.
     tenant_prefix: String,
+    dead_letters: Arc<DeadLetters>,
 }
 
 impl NatsSource {
@@ -86,6 +281,7 @@ impl NatsSource {
         shutdown: watch::Receiver<bool>,
         metrics: Metrics,
         tenant_prefix: String,
+        dead_letters: DeadLetters,
     ) -> Self {
         Self {
             runtime,
@@ -93,6 +289,7 @@ impl NatsSource {
             shutdown,
             metrics,
             tenant_prefix,
+            dead_letters: Arc::new(dead_letters),
         }
     }
 
@@ -117,14 +314,29 @@ impl NatsSource {
                 }
                 None => return Ok(()),
             };
-            let info = message.info().ok();
-            let delivered = info
-                .as_ref()
-                .and_then(|info| u64::try_from(info.delivered).ok())
-                .unwrap_or(1);
+            let info = match message.info() {
+                Ok(info) => Some(info),
+                Err(err) => {
+                    eprintln!(
+                        "nats source: no message info on `{}`, so this delivery is not taken \
+                         for the final one: {err}",
+                        message.subject
+                    );
+                    None
+                }
+            };
+            let position = info.as_ref().and_then(|info| {
+                Some(Position {
+                    stream: info.stream.to_owned(),
+                    stream_sequence: info.stream_sequence,
+                    delivered: u64::try_from(info.delivered).ok()?,
+                })
+            });
+            let delivered = position.as_ref().map_or(1, |p| p.delivered);
             let published = info
                 .as_ref()
                 .and_then(|info| u64::try_from(info.published.unix_timestamp_nanos()).ok());
+            let reply = message.message.reply.clone();
             let (message, acker) = message.split();
             let (arrival, invalid_headers) = headers::arrival(
                 &self.tenant_prefix,
@@ -140,7 +352,15 @@ impl NatsSource {
             // tenant there is.
             let tenant = Meta::tenant_of(&arrival);
             self.report_invalid_headers(&message.subject, &invalid_headers, &tenant);
-            let record = match serde_json::from_slice::<Record>(&message.payload) {
+            let decoded = serde_json::from_slice::<Record>(&message.payload);
+            let delivery = Delivery {
+                message,
+                tenant: tenant.to_string(),
+                ingestion_time: arrival.ingestion_time,
+                reply,
+                position,
+            };
+            let record = match decoded {
                 Ok(record) => record,
                 Err(err) => {
                     if delivered > 1 {
@@ -148,22 +368,23 @@ impl NatsSource {
                     }
                     eprintln!(
                         "nats source: nak of undecodable message on `{}` (delivery {delivered}): {err}",
-                        message.subject
+                        delivery.message.subject
                     );
                     self.metrics.source_nak(&tenant);
+                    let failure = Failure::at_source(FailureKind::Undecodable, err.to_string());
                     // Settled here, on the runtime: `NatsAck` blocks on the runtime and
                     // cannot be used from inside it.
-                    let nak = AckKind::Nak(Some(nak_delay(delivered)));
-                    if let Err(err) = acker.ack_with(nak).await {
-                        eprintln!("nats source: could not nak message: {err}");
-                    }
+                    self.dead_letters
+                        .settle_failure(&delivery, &acker, None, failure)
+                        .await;
                     continue;
                 }
             };
             let ack = Box::new(NatsAck {
                 runtime: Arc::clone(&self.runtime),
                 acker,
-                delivered,
+                dead_letters: Arc::clone(&self.dead_letters),
+                delivery,
             });
             // On a closed intake the envelope, and its ack handle, are dropped unsettled; the
             // message redelivers after `ack_wait`.
@@ -197,27 +418,21 @@ impl Source for NatsSource {
 struct NatsAck {
     runtime: Arc<Runtime>,
     acker: Acker,
-    /// How many times JetStream has delivered this message, this one included.
-    delivered: u64,
-}
-
-impl NatsAck {
-    fn settle(&self, kind: AckKind) {
-        if let Err(err) = self.runtime.block_on(self.acker.ack_with(kind)) {
-            // A lost ack redelivers after `ack_wait`; a lost nak redelivers the same way.
-            eprintln!("nats source: could not settle message: {err}");
-        }
-    }
+    dead_letters: Arc<DeadLetters>,
+    delivery: Delivery,
 }
 
 impl AckHandle for NatsAck {
     fn ack(self: Box<Self>) {
-        self.settle(AckKind::Ack);
+        self.runtime.block_on(settle(&self.acker, AckKind::Ack));
     }
 
-    fn nak(self: Box<Self>, delay: Option<Duration>) {
-        self.settle(AckKind::Nak(Some(
-            delay.unwrap_or_else(|| nak_delay(self.delivered)),
-        )));
+    fn nak(self: Box<Self>, delay: Option<Duration>, failure: Failure) {
+        self.runtime.block_on(self.dead_letters.settle_failure(
+            &self.delivery,
+            &self.acker,
+            delay,
+            failure,
+        ));
     }
 }

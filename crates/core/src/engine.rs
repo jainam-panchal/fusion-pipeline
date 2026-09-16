@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::SOURCE_ID;
 use crate::dag::NodeIndex;
-use crate::io::{Envelope, Intake, Outgoing, Source, SourceError};
+use crate::io::{Envelope, Failure, FailureKind, Intake, Outgoing, Source, SourceError};
 use crate::meta::{IngestionTime, Meta, Rejection, unix_nanos_now};
 use crate::metrics::{Labels, Metrics};
 use crate::pipeline::{CompiledNode, Pipeline};
@@ -186,21 +186,26 @@ struct Walk<'p: 't, 't> {
     meta: &'t Meta,
     /// The labels of the node whose stage or sink is running, so a panic is charged to it.
     at: Option<Labels<'t>>,
-    failed: bool,
+    /// The first failure of the walk, the one the nak reports.
+    failure: Option<Failure>,
     metrics: &'p Metrics,
 }
 
 impl Walk<'_, '_> {
-    fn fail(&mut self, labels: &Labels<'_>, error: &dyn std::fmt::Display) {
+    fn fail(&mut self, labels: &Labels<'_>, kind: FailureKind, error: &dyn std::fmt::Display) {
+        let node = labels.stage().unwrap_or(SOURCE_ID);
         // Structured logging over OTLP lands with the logs ticket; until then the failure is
         // at least visible on stderr rather than swallowed.
         eprintln!(
-            "pipeline: record {} failed at node `{}`: {error}",
+            "pipeline: record {} failed at node `{node}`: {error}",
             self.meta.record_id,
-            labels.stage().unwrap_or(SOURCE_ID)
         );
         self.metrics.errored(labels);
-        self.failed = true;
+        self.failure.get_or_insert_with(|| Failure {
+            node: node.to_owned(),
+            kind,
+            error: error.to_string(),
+        });
     }
 }
 
@@ -285,7 +290,10 @@ impl<'p> Walker<'p> {
                     Rejection::MissingId => {
                         self.metrics.dropped(&source, DropReason::MissingId);
                         self.metrics.source_nak(&tenant);
-                        ack.nak(None);
+                        ack.nak(
+                            None,
+                            Failure::at_source(FailureKind::MissingId, "the record has no `id`"),
+                        );
                     }
                     // Spec: metric and span are rejected by the engine (reason
                     // `invalid_record`). Rejection is a drop, and drops are acked.
@@ -302,7 +310,7 @@ impl<'p> Walker<'p> {
         let mut walk = Walk {
             meta: &meta,
             at: None,
-            failed: false,
+            failure: None,
             metrics: self.metrics,
         };
         // A stage or sink that panics must not take the ack handle down with it: contain the
@@ -313,11 +321,11 @@ impl<'p> Walker<'p> {
         }));
         if outcome.is_err() {
             let labels = walk.at.unwrap_or(source);
-            walk.fail(&labels, &"stage or sink panicked");
+            walk.fail(&labels, FailureKind::Panic, &"stage or sink panicked");
         }
-        if walk.failed {
+        if let Some(failure) = walk.failure {
             self.metrics.source_nak(&tenant);
-            ack.nak(None);
+            ack.nak(None, failure);
         } else {
             // End to end is measured on the ack only: a nakked record comes back and is
             // measured when it finally settles. A worker-clock ingestion time says nothing
@@ -374,7 +382,7 @@ impl<'p> Walker<'p> {
                     Ok(()) => metrics.records_out(&labels, 1),
                     Err(err) => {
                         metrics.sink_publish_error(&labels);
-                        walk.fail(&labels, &err);
+                        walk.fail(&labels, FailureKind::SinkError, &err);
                     }
                 }
             }
@@ -399,7 +407,9 @@ impl<'p> Walker<'p> {
                             metrics.records_out(&labels, 1);
                             self.fan_out(dag.consumers(index, None), Arc::new(record), walk);
                         }
-                        StateErrorPolicy::Nak => walk.fail(&labels, &error),
+                        StateErrorPolicy::Nak => {
+                            walk.fail(&labels, FailureKind::StateError, &error);
+                        }
                     },
                     StageOutput::Split(records) => {
                         metrics.records_out(&labels, records.len() as u64);
@@ -414,12 +424,16 @@ impl<'p> Walker<'p> {
                         if targets.peek().is_none() {
                             // Load validation guarantees every declared label a consumer, so
                             // this is a stage emitting a label it never declared.
-                            walk.fail(&labels, &format!("no consumer for route label `{label}`"));
+                            walk.fail(
+                                &labels,
+                                FailureKind::StageError,
+                                &format!("no consumer for route label `{label}`"),
+                            );
                             return;
                         }
                         self.fan_out(targets, Arc::new(record), walk);
                     }
-                    StageOutput::Error(err) => walk.fail(&labels, &err),
+                    StageOutput::Error(err) => walk.fail(&labels, FailureKind::StageError, &err),
                 }
             }
         }

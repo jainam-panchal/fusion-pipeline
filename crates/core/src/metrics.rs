@@ -10,14 +10,15 @@
 //!
 //! Labels are `tenant` on everything, `stage` (the node id, or the reserved `source` for
 //! decisions the engine takes before any node runs) where the spec gives one, `reason` on
-//! `records_dropped_total`, `kind` on `lua_errors_total`, and `op`, `field` and `cause` on
-//! `edit_unapplied_total`.
+//! `records_dropped_total` and `dlq_total`, `kind` on `lua_errors_total`, and `op`, `field`
+//! and `cause` on `edit_unapplied_total`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::closed_set::closed_set;
+use crate::io::FailureKind;
 use crate::memory::lock_unpoisoned;
 use crate::stage::DropReason;
 
@@ -119,8 +120,17 @@ metrics! {
     /// `source_invalid_headers_total{tenant}`: pipeline headers a source ignored because
     /// they did not parse.
     counter SourceInvalidHeaders = "source_invalid_headers_total",
-    /// `dlq_total{tenant}`: messages sent to the dead-letter queue.
+    /// `dlq_total{tenant, stage, reason}`: messages a source published to its dead-letter
+    /// queue, counted on the `PubAck` (the terminate that follows may still be lost), under
+    /// the node that failed and the kind of failure.
     counter Dlq = "dlq_total",
+    /// `dlq_publish_errors_total{tenant}`: messages on their final delivery whose
+    /// dead-letter publish failed on every try, counted once per message; they were not
+    /// terminated.
+    counter DlqPublishErrors = "dlq_publish_errors_total",
+    /// `dlq_publish_duration_seconds{tenant}`: one dead-letter, from the first publish to
+    /// the `PubAck` or the last failed retry.
+    histogram DlqPublishDuration = "dlq_publish_duration_seconds",
     /// `sink_publish_duration_seconds{tenant, stage}`: one sink write, until durable
     /// acceptance.
     histogram SinkPublishDuration = "sink_publish_duration_seconds",
@@ -197,14 +207,33 @@ closed_set! {
 /// `engine` is set on every per-node metric of a node whose stage runs a regex, and on no
 /// other node, so `sum by (stage)` is unchanged and a regex node can be split by engine.
 /// The three `edit` labels are set together or not at all, through [`Labels::with_edit`].
+/// `reason` is a drop reason or a failure kind, never both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Labels<'a> {
     tenant: &'a str,
     stage: Option<&'a str>,
     engine: Option<EngineLabel>,
-    reason: Option<DropReason>,
+    reason: Option<Reason>,
     kind: Option<&'a str>,
     edit: Option<EditLabels<'a>>,
+}
+
+/// The value of the `reason` label: one slot, so a series cannot carry two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reason {
+    /// On `records_dropped_total`.
+    Drop(DropReason),
+    /// On `dlq_total`.
+    Failure(FailureKind),
+}
+
+impl Reason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Drop(reason) => reason.as_str(),
+            Self::Failure(kind) => kind.as_str(),
+        }
+    }
 }
 
 /// The three labels of `edit_unapplied_total`, set together through [`Labels::with_edit`].
@@ -255,10 +284,17 @@ impl<'a> Labels<'a> {
         self
     }
 
-    /// Add the `reason` label.
+    /// Add the `reason` label of a drop.
     #[must_use]
     pub const fn with_reason(mut self, reason: DropReason) -> Self {
-        self.reason = Some(reason);
+        self.reason = Some(Reason::Drop(reason));
+        self
+    }
+
+    /// Add the `reason` label of a dead letter, replacing any drop reason.
+    #[must_use]
+    pub const fn with_failure(mut self, kind: FailureKind) -> Self {
+        self.reason = Some(Reason::Failure(kind));
         self
     }
 
@@ -461,6 +497,34 @@ impl Metrics {
             CounterMetric::SourceInvalidHeaders,
             &Labels::for_tenant(tenant),
             1,
+        );
+    }
+
+    /// `dlq_total`: a message dead-lettered for a `kind` failure at node `stage` (`source`
+    /// for a failure before any node ran).
+    pub fn dead_lettered(&self, tenant: &str, stage: &str, kind: FailureKind) {
+        self.recorder.count(
+            CounterMetric::Dlq,
+            &Labels::new(tenant, stage).with_failure(kind),
+            1,
+        );
+    }
+
+    /// `dlq_publish_errors_total`.
+    pub fn dlq_publish_error(&self, tenant: &str) {
+        self.recorder.count(
+            CounterMetric::DlqPublishErrors,
+            &Labels::for_tenant(tenant),
+            1,
+        );
+    }
+
+    /// `dlq_publish_duration_seconds`.
+    pub fn dlq_publish_duration(&self, tenant: &str, elapsed: Duration) {
+        self.recorder.observe(
+            HistogramMetric::DlqPublishDuration,
+            &Labels::for_tenant(tenant),
+            elapsed.as_secs_f64(),
         );
     }
 

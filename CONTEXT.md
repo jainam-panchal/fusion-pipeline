@@ -129,6 +129,21 @@ One value from the closed set that labels `records_dropped_total`.
 **Stage error**:
 A failure inside a stage that is not a drop. Counted separately and makes the record's message nak.
 
+**Failure**:
+Why a record's message was nakked: the node that failed first in walk order (`source` before any node ran), its failure kind, and the error text. Carried on the nak; the text is for people, never a label.
+_Avoid_: error (a stage error is one kind), cause
+
+**Failure kind**:
+One value from the closed set that labels `dlq_total`: `stage_error`, `state_error`, `sink_error`, `panic`, `missing_id`, `undecodable` (set by a source only).
+
+**Final delivery**:
+The delivery whose count has reached the consumer's `max_deliver`, read once at startup. A nak on it is not a nak: the message is dead-lettered. A delivery whose count the source could not read is never final.
+_Avoid_: last attempt, retry exhausted
+
+**Dead letter**:
+A message the source gave up on: published as it arrived to `{dlq_prefix}.{tenant}` (a tenant that is not one subject token written with `%XX` escapes) with `Fusion-Dlq-Reason`, then terminated. One dead-letter stream holds every tenant, one subject each. A dead letter whose publish fails is not terminated; its message stays in its stream.
+_Avoid_: poison message, parked message, DLQ record
+
 ### Regex
 
 **Facade**:

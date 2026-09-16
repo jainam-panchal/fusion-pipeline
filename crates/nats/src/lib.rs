@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_nats::jetstream::consumer::{AckPolicy, PullConsumer};
-use async_nats::jetstream::context::{ConsumerInfoErrorKind, GetStreamErrorKind};
+use async_nats::jetstream::context::{
+    ConsumerInfoErrorKind, GetStreamByNameErrorKind, GetStreamErrorKind,
+};
 use async_nats::jetstream::{self, ErrorCode};
 use fusion_core::config::{NodeConfig, SourceConfig};
 use fusion_core::io::{Sink, Source};
@@ -81,6 +83,55 @@ pub enum NatsError {
         /// Its configured ack policy.
         policy: String,
         /// The server it lives on.
+        url: String,
+    },
+    /// The consumer has no delivery limit, so no delivery is ever the final one and a
+    /// message that always fails never reaches the dead-letter queue.
+    #[error(
+        "consumer `{consumer}` on stream `{stream}` at {url} has no `max_deliver`; the pipeline needs a positive limit to dead-letter a message"
+    )]
+    UnboundedDelivery {
+        /// The stream the consumer is on.
+        stream: String,
+        /// The consumer.
+        consumer: String,
+        /// The server it lives on.
+        url: String,
+    },
+    /// The consumer sets `backoff`, which replaces the redelivery delay a nak asks for.
+    #[error(
+        "consumer `{consumer}` on stream `{stream}` at {url} sets `backoff`; the pipeline sets each redelivery delay on its nak, so the consumer must not"
+    )]
+    ConsumerBackoff {
+        /// The stream the consumer is on.
+        stream: String,
+        /// The consumer.
+        consumer: String,
+        /// The server it lives on.
+        url: String,
+    },
+    /// No stream captures the dead-letter subjects.
+    #[error(
+        "no stream at {url} captures the dead-letter subjects `{prefix}.<tenant>`; create one (e.g. subjects `{prefix}.>`) before starting the pipeline"
+    )]
+    DeadLetterStreamMissing {
+        /// The dead-letter subject prefix.
+        prefix: String,
+        /// The server that was asked.
+        url: String,
+    },
+    /// A stream captures some dead-letter subjects but not every tenant's.
+    #[error(
+        "stream `{stream}` at {url} captures some `{prefix}.<tenant>` subjects but not every tenant's (its subjects are {subjects:?}); use `{prefix}.>` or `{prefix}.*`"
+    )]
+    DeadLetterNotCovered {
+        /// The stream that overlaps the dead-letter subjects.
+        stream: String,
+        /// The dead-letter subject prefix.
+        prefix: String,
+        /// What the stream captures.
+        subjects: Vec<String>,
+        /// The server the stream lives on.
         url: String,
     },
     /// The named consumer does not exist on the stream.
@@ -183,17 +234,20 @@ impl Nats {
         self.shutdown.send_replace(true);
     }
 
-    /// Build the source for `params`, failing if the server, stream or consumer is missing
-    /// or the consumer does not use explicit ack.
+    /// Build the source for `params`, failing if the server, stream or consumer is missing,
+    /// the consumer does not use explicit ack, has no delivery limit or sets `backoff`, or no
+    /// stream captures every dead-letter subject.
     ///
     /// # Errors
     ///
-    /// [`NatsError::Connect`], [`NatsError::StreamMissing`], [`NatsError::ConsumerMissing`]
-    /// or [`NatsError::ConsumerNotExplicitAck`].
+    /// [`NatsError::Connect`], [`NatsError::StreamMissing`], [`NatsError::ConsumerMissing`],
+    /// [`NatsError::ConsumerNotExplicitAck`], [`NatsError::UnboundedDelivery`],
+    /// [`NatsError::ConsumerBackoff`], [`NatsError::DeadLetterStreamMissing`] or
+    /// [`NatsError::DeadLetterNotCovered`].
     pub fn source(&self, params: &SourceParams) -> Result<NatsSource, NatsError> {
         let url = config::url_from_env(params.url.as_deref());
         let context = self.connect(&url)?;
-        let consumer: PullConsumer = self.runtime.block_on(async {
+        let (consumer, limit): (PullConsumer, u64) = self.runtime.block_on(async {
             let stream = get_stream(&context, &params.stream, &url).await?;
             // `consumer_info` reports "not found" as a typed kind; `get_consumer` does not.
             let info = stream.consumer_info(&params.consumer).await.map_err(|e| {
@@ -215,17 +269,40 @@ impl Nats {
                     url: url.clone(),
                 });
             }
-            stream
+            let Some(limit) = source::delivery_limit(info.config.max_deliver) else {
+                return Err(NatsError::UnboundedDelivery {
+                    stream: params.stream.clone(),
+                    consumer: params.consumer.clone(),
+                    url: url.clone(),
+                });
+            };
+            if !info.config.backoff.is_empty() {
+                return Err(NatsError::ConsumerBackoff {
+                    stream: params.stream.clone(),
+                    consumer: params.consumer.clone(),
+                    url: url.clone(),
+                });
+            }
+            check_dead_letter_stream(&context, &params.dlq_prefix, &url).await?;
+            let consumer = stream
                 .get_consumer(&params.consumer)
                 .await
-                .map_err(|e| request_error(&url, &e))
+                .map_err(|e| request_error(&url, &e))?;
+            Ok((consumer, limit))
         })?;
+        let dead_letters = source::DeadLetters::new(
+            context,
+            params.dlq_prefix.clone(),
+            limit,
+            self.metrics.clone(),
+        );
         Ok(NatsSource::new(
             Arc::clone(&self.runtime),
             consumer,
             self.shutdown.subscribe(),
             self.metrics.clone(),
             params.tenant_prefix.clone(),
+            dead_letters,
         ))
     }
 
@@ -308,6 +385,38 @@ async fn get_stream(
             }
             _ => request_error(url, &e),
         })
+}
+
+/// Check that one stream captures `{prefix}.<tenant>` for every tenant. Several streams can
+/// overlap `{prefix}.*` (`dlq.acme` and `dlq.beta` do, without overlapping each other), but
+/// a stream that covers every tenant overlaps any stream that does, and JetStream refuses
+/// two streams with overlapping subjects. So when a covering stream exists it is the only
+/// one overlapping `{prefix}.*`, and it is the one asked about here.
+async fn check_dead_letter_stream(
+    context: &jetstream::Context,
+    prefix: &str,
+    url: &str,
+) -> Result<(), NatsError> {
+    let name = context
+        .stream_by_subject(format!("{prefix}.*"))
+        .await
+        .map_err(|e| match e.kind() {
+            GetStreamByNameErrorKind::NotFound => NatsError::DeadLetterStreamMissing {
+                prefix: prefix.to_owned(),
+                url: url.to_owned(),
+            },
+            _ => request_error(url, &e),
+        })?;
+    let stream = get_stream(context, &name, url).await?;
+    if subject::stream_covers_every_tenant(&stream, prefix) {
+        return Ok(());
+    }
+    Err(NatsError::DeadLetterNotCovered {
+        stream: name,
+        prefix: prefix.to_owned(),
+        subjects: stream.cached_info().config.subjects.clone(),
+        url: url.to_owned(),
+    })
 }
 
 /// The wire name of an ack policy (`explicit`, `none`, `all`), as the NATS CLI shows it.

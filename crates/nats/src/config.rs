@@ -47,10 +47,21 @@ pub struct SourceParams {
     /// comes from the `Fusion-Tenant` header, as for a pipeline reading another's output.
     #[serde(default = "default_tenant_prefix")]
     pub tenant_prefix: String,
+    /// The first token of the dead-letter subjects, `{dlq_prefix}.{tenant}`; `dlq` by
+    /// default. A stream capturing every such subject must already exist.
+    #[serde(default = "default_dlq_prefix")]
+    pub dlq_prefix: String,
 }
 
 fn default_tenant_prefix() -> String {
     DEFAULT_TENANT_PREFIX.to_owned()
+}
+
+/// The first token of the dead-letter subjects when the config names none.
+pub const DEFAULT_DLQ_PREFIX: &str = "dlq";
+
+fn default_dlq_prefix() -> String {
+    DEFAULT_DLQ_PREFIX.to_owned()
 }
 
 /// `sink.nats` node parameters.

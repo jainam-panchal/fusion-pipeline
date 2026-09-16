@@ -15,8 +15,16 @@
 //! producer can set a header; the header's time wins over the JetStream publish time, so the
 //! first pipeline's time survives every hop. A header that does not parse is ignored,
 //! reported and counted once, never a reason to nak: the record is still valid.
+//!
+//! A dead letter carries the message as it arrived, with [`for_dead_letter`]: the
+//! producer's headers, the tenant and ingestion time the arrival gave (so a replay keeps
+//! them), `Fusion-Dlq-Reason` (the failing node and its error), `Fusion-Dlq-Subject` (where
+//! it arrived) and `Nats-Msg-Id` (its stream and sequence, so a second dead letter of the
+//! same message is dropped as a duplicate). No `Nats-*` header of the producer's is kept:
+//! `Nats-Expected-Stream` and its kind would make the publish fail.
 
 use async_nats::{HeaderMap, HeaderValue};
+use fusion_core::io::Failure;
 use fusion_core::meta::{Arrival, IngestionTime, Meta, TimeKind, is_valid_tenant};
 
 use crate::subject::tenant_from_subject;
@@ -29,22 +37,110 @@ pub const INGESTION_TIME: &str = "Fusion-Ingestion-Time";
 /// (`clock`).
 pub const INGESTION_TIME_KIND: &str = "Fusion-Ingestion-Time-Kind";
 
+/// On a dead letter: `{node}: {error}` of the failure that made the source give up.
+pub const DLQ_REASON: &str = "Fusion-Dlq-Reason";
+/// On a dead letter: the subject the message arrived on.
+pub const DLQ_SUBJECT: &str = "Fusion-Dlq-Subject";
+/// JetStream's deduplication id; on a dead letter, `{stream}:{stream sequence}`.
+pub const MSG_ID: &str = "Nats-Msg-Id";
+/// The longest `Fusion-Dlq-Reason` value, in bytes.
+pub const REASON_CAP: usize = 1024;
+
+/// The prefix of the headers the pipeline writes.
+const PIPELINE_PREFIX: &str = "fusion-";
+/// The prefix of the headers JetStream reads on a publish.
+const NATS_PREFIX: &str = "nats-";
+
 /// The pipeline headers for a record with `meta`. A `Meta` tenant always passes
 /// [`is_valid_tenant`], so it is always a valid header value; the check is kept so a value
 /// that could not be one is left out rather than panicking inside the client.
 #[must_use]
 pub fn for_meta(meta: &Meta) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    for (name, value) in [
-        (TENANT, meta.tenant.to_string()),
-        (INGESTION_TIME, meta.ingestion_time.unix_nanos().to_string()),
-        (INGESTION_TIME_KIND, meta.ingestion_time.kind().to_string()),
-    ] {
-        if let Ok(value) = value.parse::<HeaderValue>() {
-            headers.insert(name, value);
+    write_meta(&mut headers, &meta.tenant, Some(meta.ingestion_time));
+    headers
+}
+
+/// Insert the tenant and, when given, the two ingestion time headers. A value that cannot
+/// be a header is left out.
+fn write_meta(headers: &mut HeaderMap, tenant: &str, ingestion_time: Option<IngestionTime>) {
+    insert(headers, TENANT, tenant);
+    if let Some(time) = ingestion_time {
+        insert(headers, INGESTION_TIME, &time.unix_nanos().to_string());
+        insert(headers, INGESTION_TIME_KIND, &time.kind().to_string());
+    }
+}
+
+/// Insert `value` under `name` when it can be a header value; parsed rather than converted,
+/// since the conversion panics on a line break.
+fn insert(headers: &mut HeaderMap, name: &'static str, value: &str) {
+    if let Ok(value) = value.parse::<HeaderValue>() {
+        headers.insert(name, value);
+    }
+}
+
+/// A message the source gives up on, as its dead letter is written.
+#[derive(Debug, Clone, Copy)]
+pub struct DeadLetter<'m> {
+    /// The stream the message is stored in.
+    pub stream: &'m str,
+    /// Its sequence in that stream.
+    pub stream_sequence: u64,
+    /// The subject it arrived on.
+    pub subject: &'m str,
+    /// The headers it arrived with, if any.
+    pub headers: Option<&'m HeaderMap>,
+    /// The tenant its arrival gave (`unknown` when none): the `Meta` tenant.
+    pub tenant: &'m str,
+    /// The ingestion time its arrival gave, if any.
+    pub ingestion_time: Option<IngestionTime>,
+    /// Why the pipeline gave up on it.
+    pub failure: &'m Failure,
+}
+
+/// The headers of `letter`'s dead letter: the producer's headers except `Nats-*` and
+/// `Fusion-*`, then the tenant and ingestion time, [`DLQ_REASON`], [`DLQ_SUBJECT`] and
+/// [`MSG_ID`].
+#[must_use]
+pub fn for_dead_letter(letter: &DeadLetter<'_>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for (name, values) in letter.headers.into_iter().flat_map(HeaderMap::iter) {
+        let lower = AsRef::<str>::as_ref(name).to_ascii_lowercase();
+        if lower.starts_with(PIPELINE_PREFIX) || lower.starts_with(NATS_PREFIX) {
+            continue;
+        }
+        for value in values {
+            headers.append(name.clone(), value.clone());
         }
     }
+    write_meta(&mut headers, letter.tenant, letter.ingestion_time);
+    let failure = letter.failure;
+    insert(
+        &mut headers,
+        DLQ_REASON,
+        &header_line(&format!("{}: {}", failure.node, failure.error)),
+    );
+    insert(&mut headers, DLQ_SUBJECT, letter.subject);
+    insert(
+        &mut headers,
+        MSG_ID,
+        &format!("{}:{}", letter.stream, letter.stream_sequence),
+    );
     headers
+}
+
+/// `text` as one header line: every control character a space, cut to [`REASON_CAP`]
+/// bytes on a character boundary.
+fn header_line(text: &str) -> String {
+    let mut line = String::with_capacity(text.len().min(REASON_CAP));
+    for c in text.chars() {
+        let c = if c.is_control() { ' ' } else { c };
+        if line.len() + c.len_utf8() > REASON_CAP {
+            break;
+        }
+        line.push(c);
+    }
+    line
 }
 
 /// A pipeline header the source ignored because it did not parse.

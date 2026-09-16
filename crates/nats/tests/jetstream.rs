@@ -15,7 +15,7 @@ use fusion_core::engine::Engine;
 use fusion_core::io::Outgoing;
 use fusion_core::memory::{MemorySinks, MemoryStateStore};
 use fusion_core::meta::{IngestionTime, Meta, unix_nanos_now};
-use fusion_core::metrics::{CounterMetric, InMemoryRecorder, Metrics};
+use fusion_core::metrics::{CounterMetric, HistogramMetric, InMemoryRecorder, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::{Record, RecordId};
 use fusion_core::registry::Registry;
@@ -75,15 +75,87 @@ impl JetStreamClient {
     }
 
     fn create_pull_consumer(&self, stream: &stream::Stream, name: &str, ack_policy: AckPolicy) {
-        self.rt
-            .block_on(stream.create_consumer(pull::Config {
+        self.create_consumer(
+            stream,
+            pull::Config {
                 durable_name: Some(name.to_owned()),
                 ack_policy,
-                ack_wait: Duration::from_secs(30),
-                max_deliver: 5,
-                ..Default::default()
-            }))
+                ..consumer_config(5)
+            },
+        );
+    }
+
+    fn create_consumer(&self, stream: &stream::Stream, config: pull::Config) {
+        self.rt
+            .block_on(stream.create_consumer(config))
             .expect("consumer created");
+    }
+
+    fn create_stream_with(&self, config: stream::Config) -> stream::Stream {
+        self.rt
+            .block_on(self.js.create_stream(config))
+            .expect("stream created")
+    }
+
+    /// Subscribe to `subject` on the core connection. Messages wait in the subscription
+    /// until [`JetStreamClient::next_within`] reads them.
+    fn subscribe(&self, subject: String) -> Subscription {
+        let subscriber = self
+            .rt
+            .block_on(self.js.client().subscribe(subject))
+            .expect("subscribed");
+        Subscription {
+            subscriber: Some(subscriber),
+            runtime: self.rt.handle().clone(),
+        }
+    }
+
+    /// The next message on `subscription` within `timeout`, if any.
+    fn next_within(
+        &self,
+        subscription: &mut Subscription,
+        timeout: Duration,
+    ) -> Option<async_nats::Message> {
+        let subscriber = subscription.subscriber.as_mut()?;
+        self.rt
+            .block_on(async { tokio::time::timeout(timeout, subscriber.next()).await })
+            .ok()
+            .flatten()
+    }
+
+    /// Every message on `stream`, in order, as payload bytes, subject and headers.
+    fn messages(&self, stream: &str) -> Vec<(Vec<u8>, String, async_nats::HeaderMap)> {
+        self.rt.block_on(async {
+            let mut stream = self.js.get_stream(stream).await.expect("stream exists");
+            let last = stream
+                .info()
+                .await
+                .expect("stream info")
+                .state
+                .last_sequence;
+            let mut found = Vec::new();
+            for sequence in 1..=last {
+                if let Ok(message) = stream.get_raw_message(sequence).await {
+                    found.push((
+                        message.payload.to_vec(),
+                        message.subject.to_string(),
+                        message.headers,
+                    ));
+                }
+            }
+            found
+        })
+    }
+
+    fn publish_bytes(&self, subject: &str, headers: async_nats::HeaderMap, payload: &[u8]) {
+        self.rt
+            .block_on(async {
+                self.js
+                    .publish_with_headers(subject.to_owned(), headers, payload.to_vec().into())
+                    .await?
+                    .await
+            })
+            .expect("published");
     }
 
     fn get_stream(&self, name: &str) -> stream::Stream {
@@ -164,6 +236,31 @@ impl JetStreamClient {
     }
 }
 
+/// A core subscription the test thread owns. Dropping a subscriber spawns its unsubscribe,
+/// so it is dropped inside the runtime.
+struct Subscription {
+    subscriber: Option<async_nats::Subscriber>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        let _entered = self.runtime.enter();
+        drop(self.subscriber.take());
+    }
+}
+
+/// The consumer settings the compose stack uses, with `max_deliver` deliveries.
+fn consumer_config(max_deliver: i64) -> pull::Config {
+    pull::Config {
+        durable_name: Some("pipeline".to_owned()),
+        ack_policy: AckPolicy::Explicit,
+        ack_wait: Duration::from_secs(30),
+        max_deliver,
+        ..Default::default()
+    }
+}
+
 /// These pipelines have no stateful node; the engine never opens the store.
 fn no_state() -> std::sync::Arc<MemoryStateStore> {
     std::sync::Arc::new(MemoryStateStore::new())
@@ -184,28 +281,53 @@ struct Fixture {
     client: JetStreamClient,
     in_stream: String,
     out_stream: String,
+    dlq_stream: String,
     consumer: String,
     tenant_prefix: String,
+    dlq_prefix: String,
     out_subject: String,
 }
 
 impl Fixture {
     fn new(tag: &str) -> Self {
+        Self::build(tag, 5, |_| {})
+    }
+
+    /// A fixture whose consumer delivers a message `max_deliver` times.
+    fn with_max_deliver(tag: &str, max_deliver: i64) -> Self {
+        Self::build(tag, max_deliver, |_| {})
+    }
+
+    /// A fixture whose consumer delivers `max_deliver` times and whose dead-letter stream is
+    /// `dlq` adjusted by `adjust_dlq`.
+    fn build(tag: &str, max_deliver: i64, adjust_dlq: impl FnOnce(&mut stream::Config)) -> Self {
         let client = JetStreamClient::connect();
         let in_stream = unique(&format!("LOGS_{tag}"));
         let out_stream = unique(&format!("PROCESSED_{tag}"));
+        let dlq_stream = unique(&format!("DLQ_{tag}"));
         let consumer = "pipeline".to_owned();
         let tenant_prefix = unique("logs").to_ascii_lowercase();
+        let dlq_prefix = unique("dlq").to_ascii_lowercase();
         let out_subject = format!("{}.out", unique("processed").to_ascii_lowercase());
         let input = client.create_stream(&in_stream, &[&format!("{tenant_prefix}.>")]);
-        client.create_pull_consumer(&input, &consumer, AckPolicy::Explicit);
+        client.create_consumer(&input, consumer_config(max_deliver));
         client.create_stream(&out_stream, &[&out_subject]);
+        let mut dlq = stream::Config {
+            name: dlq_stream.clone(),
+            subjects: vec![format!("{dlq_prefix}.>")],
+            duplicate_window: Duration::from_secs(120),
+            ..Default::default()
+        };
+        adjust_dlq(&mut dlq);
+        client.create_stream_with(dlq);
         Self {
             client,
             in_stream,
             out_stream,
+            dlq_stream,
             consumer,
             tenant_prefix,
+            dlq_prefix,
             out_subject,
         }
     }
@@ -216,6 +338,7 @@ impl Fixture {
             stream: self.in_stream.clone(),
             consumer: self.consumer.clone(),
             tenant_prefix: self.tenant_prefix.clone(),
+            dlq_prefix: self.dlq_prefix.clone(),
         }
     }
 
@@ -229,6 +352,42 @@ impl Fixture {
 
     fn in_subject(&self, tenant: &str) -> String {
         format!("{}.{tenant}.syslog", self.tenant_prefix)
+    }
+
+    fn dlq_subject(&self, tenant: &str) -> String {
+        format!("{}.{tenant}", self.dlq_prefix)
+    }
+
+    /// Subscribe to the consumer's JetStream advisory `kind` (`MSG_TERMINATED`,
+    /// `MAX_DELIVERIES`).
+    fn advisories(&self, kind: &str) -> Subscription {
+        self.client.subscribe(format!(
+            "$JS.EVENT.ADVISORY.CONSUMER.{kind}.{}.{}",
+            self.in_stream, self.consumer
+        ))
+    }
+
+    /// Every dead letter so far: payload, subject and headers.
+    fn dead_letters(&self) -> Vec<(Vec<u8>, String, async_nats::HeaderMap)> {
+        self.client.messages(&self.dlq_stream)
+    }
+
+    /// Start `yaml` (compiled with `sink.memory` on `sinks` and the NATS types) on this
+    /// fixture's source, one worker.
+    fn start(
+        &self,
+        nats: &std::sync::Arc<Nats>,
+        yaml: &str,
+        sinks: &MemorySinks,
+        metrics: Metrics,
+    ) -> Engine {
+        let mut registry = Registry::new();
+        nats.register(&mut registry);
+        registry.register_sink("sink.memory", sinks.clone());
+        registry.register_stage("fails_first", fails_first);
+        let pipeline = Pipeline::from_yaml(yaml, &registry).expect("pipeline loads");
+        let source = nats.source(&self.source_params()).expect("source builds");
+        Engine::start(pipeline, Box::new(source), 1, metrics, no_state()).expect("engine starts")
     }
 
     fn consumer_info(&self) -> jetstream::consumer::Info {
@@ -246,8 +405,28 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.client.try_delete_stream(&self.in_stream);
         self.client.try_delete_stream(&self.out_stream);
+        self.client.try_delete_stream(&self.dlq_stream);
     }
 }
+
+/// A stage that fails a record's first delivery and passes every later one.
+struct FailsFirst;
+
+impl Stage for FailsFirst {
+    fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
+        if ctx.meta.delivery_count == 1 {
+            StageOutput::Error(StageError::new("first delivery"))
+        } else {
+            StageOutput::Pass(record)
+        }
+    }
+}
+
+fn fails_first(_: &NodeConfig) -> Result<Box<dyn Stage>, ConfigError> {
+    Ok(Box::new(FailsFirst))
+}
+
+const TO_MEMORY: &str = "nodes:\n  - id: out\n    type: sink.memory\n";
 
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
@@ -693,6 +872,7 @@ fn a_downstream_pipeline_takes_the_tenant_and_the_first_ingestion_time_from_the_
                     stream: fixture.out_stream.clone(),
                     consumer: "downstream".to_owned(),
                     tenant_prefix: fusion_nats::config::DEFAULT_TENANT_PREFIX.to_owned(),
+                    dlq_prefix: fixture.dlq_prefix.clone(),
                 })
                 .expect("downstream source"),
         ),
@@ -839,6 +1019,423 @@ fn a_payload_tenant_is_never_read_when_the_transport_names_none() {
             &[("tenant", "acme"), ("stage", "out")]
         ),
         0
+    );
+
+    nats.shutdown();
+    engine.join().expect("clean shutdown");
+}
+
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn source_fails_fast_when_the_dlq_stream_is_missing_or_does_not_cover_the_prefix() {
+    let fixture = Fixture::new("dlq_missing");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
+
+    let nowhere = SourceParams {
+        dlq_prefix: unique("nowhere").to_ascii_lowercase(),
+        ..fixture.source_params()
+    };
+    let err = nats.source(&nowhere).expect_err("no dead-letter stream");
+    assert!(
+        matches!(err, NatsError::DeadLetterStreamMissing { .. }),
+        "{err}"
+    );
+    assert!(err.to_string().contains(&nowhere.dlq_prefix), "{err}");
+
+    let narrow_prefix = unique("narrow").to_ascii_lowercase();
+    let narrow = unique("DLQ_NARROW");
+    fixture
+        .client
+        .create_stream(&narrow, &[&format!("{narrow_prefix}.acme")]);
+    let one_tenant = SourceParams {
+        dlq_prefix: narrow_prefix,
+        ..fixture.source_params()
+    };
+    let err = nats.source(&one_tenant);
+    fixture.client.delete_stream(&narrow);
+    let err = err.expect_err("a stream for one tenant only");
+    assert!(
+        matches!(err, NatsError::DeadLetterNotCovered { .. }),
+        "{err}"
+    );
+    assert!(err.to_string().contains(&narrow), "{err}");
+}
+
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn source_fails_fast_when_the_consumer_has_no_max_deliver() {
+    let fixture = Fixture::new("unbounded");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
+    let input = fixture.client.get_stream(&fixture.in_stream);
+    for (name, max_deliver) in [("forever", -1), ("unset", 0)] {
+        fixture.client.create_consumer(
+            &input,
+            pull::Config {
+                durable_name: Some(name.to_owned()),
+                ..consumer_config(max_deliver)
+            },
+        );
+        let params = SourceParams {
+            consumer: name.to_owned(),
+            ..fixture.source_params()
+        };
+
+        let err = nats
+            .source(&params)
+            .expect_err("unbounded delivery rejected");
+
+        assert!(
+            matches!(err, NatsError::UnboundedDelivery { .. }),
+            "{name}: {err}"
+        );
+        assert!(err.to_string().contains(name), "{err}");
+    }
+}
+
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn source_fails_fast_when_the_consumer_sets_backoff() {
+    let fixture = Fixture::new("backoff");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
+    let input = fixture.client.get_stream(&fixture.in_stream);
+    fixture.client.create_consumer(
+        &input,
+        pull::Config {
+            durable_name: Some("backs_off".to_owned()),
+            backoff: vec![Duration::from_secs(1), Duration::from_secs(2)],
+            ..consumer_config(5)
+        },
+    );
+    let params = SourceParams {
+        consumer: "backs_off".to_owned(),
+        ..fixture.source_params()
+    };
+
+    let err = nats.source(&params).expect_err("backoff rejected");
+
+    assert!(matches!(err, NatsError::ConsumerBackoff { .. }), "{err}");
+    assert!(err.to_string().contains("backs_off"), "{err}");
+}
+
+/// Issue #10: a message that fails every delivery is published, as it arrived, to its
+/// tenant's dead-letter subject with the failure named, then terminated; the earlier
+/// deliveries publish nothing, and JetStream delivers it no more.
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn a_message_that_fails_every_delivery_is_dead_lettered_and_terminated() {
+    let fixture = Fixture::with_max_deliver("dlq", 3);
+    let recorder = InMemoryRecorder::new();
+    let metrics = Metrics::new(recorder.clone());
+    let nats = std::sync::Arc::new(Nats::new(metrics.clone()).expect("nats runtime"));
+    let sinks = MemorySinks::new();
+    sinks.fail_writes_to("out");
+    let mut terminated = fixture.advisories("MSG_TERMINATED");
+    let mut exhausted = fixture.advisories("MAX_DELIVERIES");
+    let engine = fixture.start(&nats, TO_MEMORY, &sinks, metrics);
+    let payload = br#"{"id": 50, "body": "never lands",   "extra": [1, 2]}"#;
+    let mut produced = async_nats::HeaderMap::new();
+    produced.insert("traceparent", "00-abc-def-01");
+
+    fixture
+        .client
+        .publish_bytes(&fixture.in_subject("acme"), produced, payload);
+
+    let advisory = fixture
+        .client
+        .next_within(&mut terminated, SETTLE_TIMEOUT * 2)
+        .expect("the message is terminated");
+    let advisory: serde_json::Value =
+        serde_json::from_slice(&advisory.payload).expect("advisory is JSON");
+    assert_eq!(advisory["deliveries"], 3, "{advisory}");
+    assert_eq!(advisory["reason"], "dlq out: sink_error", "{advisory}");
+
+    let letters = fixture.dead_letters();
+    assert_eq!(letters.len(), 1, "only the final delivery dead-letters");
+    let (bytes, subject, headers) = &letters[0];
+    assert_eq!(bytes.as_slice(), payload, "the payload as it arrived");
+    assert_eq!(subject, &fixture.dlq_subject("acme"));
+    let header = |name: &str| headers.get(name).map(|v| v.as_str().to_owned());
+    assert_eq!(
+        header("Fusion-Dlq-Reason").as_deref(),
+        Some("out: sink write failed: memory sink `out` is set to fail")
+    );
+    assert_eq!(
+        header("Fusion-Dlq-Subject"),
+        Some(fixture.in_subject("acme"))
+    );
+    assert_eq!(header(TENANT).as_deref(), Some("acme"));
+    assert_eq!(header(INGESTION_TIME_KIND).as_deref(), Some("reported"));
+    assert_eq!(header("traceparent").as_deref(), Some("00-abc-def-01"));
+
+    assert!(
+        fixture
+            .client
+            .next_within(&mut exhausted, Duration::from_secs(1))
+            .is_none(),
+        "a terminated message never runs out of deliveries"
+    );
+    assert!(fixture.consumer_settled(), "{:?}", fixture.consumer_info());
+    assert_eq!(
+        recorder.counter(
+            CounterMetric::Dlq,
+            &[
+                ("tenant", "acme"),
+                ("stage", "out"),
+                ("reason", "sink_error")
+            ]
+        ),
+        1
+    );
+    assert_eq!(
+        recorder
+            .samples(HistogramMetric::DlqPublishDuration, &[("tenant", "acme")])
+            .len(),
+        1
+    );
+    // Past the longest nak delay the message could still be waiting out: no fourth try.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        recorder.counter(
+            CounterMetric::RecordsIn,
+            &[("tenant", "acme"), ("stage", "out")]
+        ),
+        3
+    );
+
+    nats.shutdown();
+    engine.join().expect("clean shutdown");
+}
+
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn an_undecodable_payload_is_dead_lettered_after_max_deliver() {
+    let fixture = Fixture::with_max_deliver("dlq_garbage", 2);
+    let recorder = InMemoryRecorder::new();
+    let metrics = Metrics::new(recorder.clone());
+    let nats = std::sync::Arc::new(Nats::new(metrics.clone()).expect("nats runtime"));
+    let sinks = MemorySinks::new();
+    let mut terminated = fixture.advisories("MSG_TERMINATED");
+    let engine = fixture.start(&nats, TO_MEMORY, &sinks, metrics);
+
+    fixture
+        .client
+        .publish(&fixture.in_subject("acme"), "this is not json");
+
+    assert!(
+        fixture
+            .client
+            .next_within(&mut terminated, SETTLE_TIMEOUT)
+            .is_some(),
+        "the garbage is terminated"
+    );
+    let letters = fixture.dead_letters();
+    assert_eq!(letters.len(), 1);
+    assert_eq!(letters[0].0, b"this is not json");
+    let reason = letters[0]
+        .2
+        .get("Fusion-Dlq-Reason")
+        .map(|v| v.as_str().to_owned());
+    assert!(
+        reason.as_deref().is_some_and(|r| r.starts_with("source: ")),
+        "{reason:?}"
+    );
+    assert_eq!(
+        recorder.counter(
+            CounterMetric::Dlq,
+            &[
+                ("tenant", "acme"),
+                ("stage", "source"),
+                ("reason", "undecodable")
+            ]
+        ),
+        1
+    );
+
+    nats.shutdown();
+    engine.join().expect("clean shutdown");
+}
+
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn a_failed_delivery_that_is_not_the_last_publishes_nothing_and_a_retry_succeeds() {
+    let fixture = Fixture::with_max_deliver("dlq_retry", 2);
+    let nats = std::sync::Arc::new(Nats::new(Metrics::noop()).expect("nats runtime"));
+    let sinks = MemorySinks::new();
+    let yaml = "nodes:\n  - id: flaky\n    type: fails_first\n  - id: out\n    type: sink.memory\n";
+    let engine = fixture.start(&nats, yaml, &sinks, Metrics::noop());
+
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
+        r#"{"id": 51, "body": "second time"}"#,
+    );
+
+    assert!(
+        wait_until(SETTLE_TIMEOUT, || !sinks.records("out").is_empty()),
+        "the second delivery reaches the sink"
+    );
+    assert!(
+        wait_until(SETTLE_TIMEOUT, || fixture.consumer_settled()),
+        "{:?}",
+        fixture.consumer_info()
+    );
+    assert!(fixture.dead_letters().is_empty());
+
+    nats.shutdown();
+    engine.join().expect("clean shutdown");
+}
+
+/// When the dead-letter publish keeps failing, the message is not terminated: its final nak
+/// has no delay, so JetStream gives up on it at once and says so, and it stays in the
+/// input stream to be found by its sequence.
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn a_failed_dlq_publish_naks_without_delay_and_is_not_terminated() {
+    let fixture = Fixture::build("dlq_refused", 3, |dlq| dlq.max_message_size = 16);
+    let recorder = InMemoryRecorder::new();
+    let metrics = Metrics::new(recorder.clone());
+    let nats = std::sync::Arc::new(Nats::new(metrics.clone()).expect("nats runtime"));
+    let sinks = MemorySinks::new();
+    sinks.fail_writes_to("out");
+    let mut terminated = fixture.advisories("MSG_TERMINATED");
+    let mut exhausted = fixture.advisories("MAX_DELIVERIES");
+    let engine = fixture.start(&nats, TO_MEMORY, &sinks, metrics);
+
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
+        r#"{"id": 52, "body": "far larger than the dead-letter stream takes"}"#,
+    );
+
+    assert!(
+        wait_until(SETTLE_TIMEOUT * 2, || {
+            recorder.counter(CounterMetric::DlqPublishErrors, &[("tenant", "acme")]) == 1
+        }),
+        "the dead-letter publish failed"
+    );
+    let failed_at = Instant::now();
+    assert!(
+        fixture
+            .client
+            .next_within(&mut exhausted, SETTLE_TIMEOUT)
+            .is_some(),
+        "JetStream gives up on the message"
+    );
+    // The last nak would otherwise wait out `nak_delay(3)`, four seconds.
+    assert!(
+        failed_at.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        failed_at.elapsed()
+    );
+    assert!(
+        fixture
+            .client
+            .next_within(&mut terminated, Duration::from_millis(500))
+            .is_none(),
+        "not terminated"
+    );
+    assert!(fixture.dead_letters().is_empty());
+    assert_eq!(fixture.client.messages(&fixture.in_stream).len(), 1);
+    assert_eq!(
+        recorder.counter(
+            CounterMetric::Dlq,
+            &[
+                ("tenant", "acme"),
+                ("stage", "out"),
+                ("reason", "sink_error")
+            ]
+        ),
+        0
+    );
+    let timed = recorder.samples(HistogramMetric::DlqPublishDuration, &[("tenant", "acme")]);
+    assert_eq!(timed.len(), 1, "one sample covers every try");
+    // Four tries, with 250 ms, 500 ms and 1 s between them.
+    assert!(timed[0] >= 1.75, "{timed:?}");
+
+    nats.shutdown();
+    engine.join().expect("clean shutdown");
+}
+
+/// A message dead-lettered twice (a retry of a publish the server stored but whose `PubAck`
+/// was lost) is stored once: the dead letter's id is the message's stream and sequence.
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn a_duplicate_dead_letter_is_stored_once() {
+    let fixture = Fixture::with_max_deliver("dlq_dupe", 1);
+    let recorder = InMemoryRecorder::new();
+    let metrics = Metrics::new(recorder.clone());
+    let nats = std::sync::Arc::new(Nats::new(metrics.clone()).expect("nats runtime"));
+    let sinks = MemorySinks::new();
+    sinks.fail_writes_to("out");
+    let mut earlier = async_nats::HeaderMap::new();
+    earlier.insert("Nats-Msg-Id", format!("{}:1", fixture.in_stream).as_str());
+    fixture.client.publish_bytes(
+        &fixture.dlq_subject("acme"),
+        earlier,
+        b"an earlier dead letter",
+    );
+    let mut terminated = fixture.advisories("MSG_TERMINATED");
+    let engine = fixture.start(&nats, TO_MEMORY, &sinks, metrics);
+
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
+        r#"{"id": 53, "body": "again"}"#,
+    );
+
+    assert!(
+        fixture
+            .client
+            .next_within(&mut terminated, SETTLE_TIMEOUT)
+            .is_some(),
+        "terminated: a duplicate is still durably stored"
+    );
+    let letters = fixture.dead_letters();
+    assert_eq!(letters.len(), 1, "{letters:?}");
+    assert_eq!(letters[0].0, b"an earlier dead letter");
+    assert_eq!(
+        recorder.counter(
+            CounterMetric::Dlq,
+            &[
+                ("tenant", "acme"),
+                ("stage", "out"),
+                ("reason", "sink_error")
+            ]
+        ),
+        1
+    );
+
+    nats.shutdown();
+    engine.join().expect("clean shutdown");
+}
+
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn two_tenants_dead_letter_to_their_own_subjects_in_one_stream() {
+    let fixture = Fixture::with_max_deliver("dlq_tenants", 1);
+    let nats = std::sync::Arc::new(Nats::new(Metrics::noop()).expect("nats runtime"));
+    let sinks = MemorySinks::new();
+    sinks.fail_writes_to("out");
+    let engine = fixture.start(&nats, TO_MEMORY, &sinks, Metrics::noop());
+
+    fixture
+        .client
+        .publish(&fixture.in_subject("acme"), r#"{"id": 54, "body": "a"}"#);
+    fixture
+        .client
+        .publish(&fixture.in_subject("beta"), r#"{"id": 55, "body": "b"}"#);
+
+    assert!(
+        wait_until(SETTLE_TIMEOUT, || fixture.dead_letters().len() == 2),
+        "{:?}",
+        fixture.dead_letters()
+    );
+    let mut subjects: Vec<String> = fixture
+        .dead_letters()
+        .into_iter()
+        .map(|(_, subject, _)| subject)
+        .collect();
+    subjects.sort();
+    assert_eq!(
+        subjects,
+        [fixture.dlq_subject("acme"), fixture.dlq_subject("beta")]
     );
 
     nats.shutdown();
