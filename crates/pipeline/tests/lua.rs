@@ -620,33 +620,31 @@ fn a_script_read_from_a_file_runs_over_records() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The issue's demo: what `edit` cannot do. Split a multi-line body into one record per
-/// line and derive `http.status_class` from `http.status`.
-const DEMO: &str = r#"local function class_of(status)
-  if status == nil or status == json.null then return nil end
-  return string.format("%dxx", status // 100)
-end
-
-function process(record)
-  local class = class_of(record.attributes["http.status"])
-  if class then record.attributes["http.status_class"] = class end
-  if type(record.body) ~= "string" or not record.body:find("\n") then
-    return record
-  end
-  local out = {}
-  for line in record.body:gmatch("[^\n]+") do
-    local copy = record:copy()
-    copy.body = line
-    out[#out + 1] = copy
-  end
-  if #out == 0 then return record end   -- only newlines: nothing to split
-  return out
-end"#;
+/// The issue's demo, as the compose pipeline ships it in `deploy/pipeline.yaml`: what
+/// `edit` cannot do. Split a multi-line body into one record per line and derive
+/// `http.status_class` from `http.status`. Read from the shipped file, so the script an
+/// operator copies is the one this test drives.
+fn shipped_split_lines() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/pipeline.yaml");
+    let yaml = std::fs::read_to_string(&path).expect("deploy/pipeline.yaml is readable");
+    let config = fusion_core::config::Config::from_yaml(&yaml).expect("the compose config parses");
+    let node = config
+        .nodes
+        .iter()
+        .find(|node| node.id == "split_lines")
+        .expect("the compose config has `split_lines`");
+    let params: Value = node.parse_params().expect("params parse");
+    params["source"]
+        .as_str()
+        .expect("`split_lines` has an inline source")
+        .to_owned()
+}
 
 #[test]
-fn the_demo_script_splits_lines_and_derives_the_status_class() {
+fn the_shipped_split_script_splits_lines_and_derives_the_status_class() {
+    let script = shipped_split_lines();
     for_each_worker_count(|workers| {
-        let yaml = config("", DEMO);
+        let yaml = config("", &script);
         let (out, h) = run(
             &yaml,
             workers,
