@@ -3,8 +3,9 @@
 //! that names a forbidden global anywhere, even inside a function that would only run per
 //! record, and to see whether a script reaches for `state` at all.
 //!
-//! It is deliberately coarse: `local os = 1` is refused like `os.exit()`, and a name built
-//! at run time (`_G["o".."s"]`) is not seen here and finds `nil` in the sandbox instead.
+//! It is deliberately coarse: `local x = os` is refused like `os.exit()`, and a name built
+//! at run time (`_G["o".."s"]`) is not seen here and finds `nil` in the sandbox instead. A
+//! name followed by a single `=` (a table key, an assignment target) is not a read.
 
 /// Every free identifier in `source` with the line it is on, in source order.
 pub(crate) fn free_names(source: &str) -> Vec<(&str, usize)> {
@@ -75,7 +76,7 @@ pub(crate) fn free_names(source: &str) -> Vec<(&str, usize)> {
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
-            if !matches!(previous, Some(b'.' | b':')) {
+            if !matches!(previous, Some(b'.' | b':')) && !assigned(bytes, i) {
                 names.push((&source[start..i], line));
             }
             previous = Some(b'a');
@@ -85,6 +86,17 @@ pub(crate) fn free_names(source: &str) -> Vec<(&str, usize)> {
         i += 1;
     }
     names
+}
+
+/// Whether the identifier ending at `after` is followed by a single `=`: a table
+/// constructor key (`{ io = 1 }`) or an assignment target, neither of which reads the
+/// global. `==` is a comparison and does read it.
+fn assigned(bytes: &[u8], after: usize) -> bool {
+    let mut i = after;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() && bytes[i] != b'\n' {
+        i += 1;
+    }
+    bytes.get(i) == Some(&b'=') && bytes.get(i + 1) != Some(&b'=')
 }
 
 /// A long bracket (`[[ ... ]]`, `[=[ ... ]=]`) starting at `at`: the index after its close

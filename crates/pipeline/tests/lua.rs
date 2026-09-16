@@ -209,3 +209,192 @@ fn the_budget_is_per_record_so_a_worker_keeps_serving_after_a_trip() {
     assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
     h.finish();
 }
+
+#[test]
+fn unbounded_table_growth_is_stopped_by_the_memory_cap() {
+    for_each_worker_count(|workers| {
+        let yaml = config(
+            "    limits: { instructions: 100000000, memory_kib: 256 }\n    on_error: drop\n",
+            "function process(record)\n  local t = {}\n  while true do t[#t + 1] = string.rep(\"x\", 1024) end\nend",
+        );
+        let (out, h) = run(&yaml, workers, vec![record(1, json!({"body": "x"})), record(2, json!({"body": "y"}))]);
+        assert!(out.is_empty(), "workers {workers}");
+        assert_eq!(h.counter(Metric::LuaErrors, &lua_error("memory")), 2);
+        assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 0);
+        h.finish();
+    });
+}
+
+#[test]
+fn a_script_that_raises_counts_as_a_runtime_error() {
+    let yaml = config(
+        "    on_error: drop\n",
+        "function process(record)\n  local x = nil\n  return x.field\nend",
+    );
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+    assert!(out.is_empty());
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("runtime")), 1);
+    h.finish();
+}
+
+#[test]
+fn a_returned_record_the_stage_refuses_counts_as_an_output_error() {
+    let cases: [(&str, &str); 6] = [
+        ("missing id", "record.id = nil\n  return record"),
+        ("changed id", "record.id = record.id + 1\n  return record"),
+        ("wrong type", "record.severity_number = \"high\"\n  return record"),
+        ("oversized body", "record.body = string.rep(\"x\", 2048)\n  return record"),
+        ("changed tenant", "record.resource[\"tenant.id\"] = \"other\"\n  return record"),
+        ("not a record", "return 42"),
+    ];
+    for (name, body) in cases {
+        let yaml = config(
+            "    limits: { output_kib: 1 }\n    on_error: drop\n",
+            &format!("function process(record)\n  {body}\nend"),
+        );
+        let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
+        assert!(out.is_empty(), "{name}: refused");
+        assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 1, "{name}");
+        h.finish();
+    }
+}
+
+#[test]
+fn state_set_nx_from_lua_writes_through_the_same_state_store_under_the_node_prefix() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  local claimed, holder = state.set_nx("seen:" .. record.body, tostring(record.id), 60000)
+  if not claimed then
+    record.attributes["first_seen_by"] = holder
+  end
+  return record
+end"#,
+    );
+    let (out, h) = run(
+        &yaml,
+        1,
+        vec![record(1, json!({"body": "disk full"})), record(2, json!({"body": "disk full"}))],
+    );
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].attributes.get("first_seen_by"), None);
+    assert_eq!(out[1].attributes.get("first_seen_by"), Some(&json!("1")));
+    assert_eq!(h.state.keys(), vec!["ingest:acme:script:seen:disk full".to_owned()]);
+    assert_eq!(h.counter(Metric::StateOps, &STAGE), 2);
+    h.finish();
+}
+
+#[test]
+fn state_get_incr_and_del_reach_the_store() {
+    let yaml = config(
+        "",
+        r#"function process(record)
+  local n = state.incr("count", 1, 60000)
+  record.attributes["n"] = n
+  record.attributes["seen"] = state.get("count")
+  if n == 2 then state.del("count") end
+  return record
+end"#,
+    );
+    let (out, h) = run(&yaml, 1, (1..=3).map(|id| record(id, json!({}))).collect());
+    let ns: Vec<_> = out.iter().map(|r| r.attributes.get("n").cloned()).collect();
+    assert_eq!(ns, vec![Some(json!(1)), Some(json!(2)), Some(json!(1))]);
+    assert_eq!(out[1].attributes.get("seen"), Some(&json!("2")));
+    h.finish();
+}
+
+#[test]
+fn a_state_error_is_handled_by_on_state_error_not_by_on_error() {
+    let source = "function process(record)\n  state.incr(\"count\", 1, 1000)\n  return record\nend";
+    // Default: nak, the safe choice for a stage that may produce data from state.
+    let h = start(&config("    on_error: drop\n", source), 1);
+    h.state.fail_all(true);
+    let probe = h.source.push(record(1, json!({})));
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Nak(None)));
+    assert_eq!(h.counter(Metric::StateErrors, &STAGE), 1);
+    assert_eq!(h.counter(Metric::LuaErrors, &lua_error("runtime")), 0);
+    assert_eq!(
+        h.counter(Metric::RecordsDropped, &[("tenant", "acme"), ("stage", "script"), ("reason", "lua_error")]),
+        0
+    );
+    h.finish();
+    // `pass` forwards the record as it came in.
+    let h = start(&config("    on_state_error: pass\n", source), 1);
+    h.state.fail_all(true);
+    let probe = h.source.push(record(1, json!({"body": "x"})));
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(h.sinks.records("out").len(), 1);
+    h.finish();
+}
+
+#[test]
+fn an_upvalue_counter_persists_across_records_on_one_worker() {
+    let yaml = config(
+        "",
+        "local seen = 0\nfunction process(record)\n  seen = seen + 1\n  record.attributes[\"seen\"] = seen\n  return record\nend",
+    );
+    let (out, _h) = run(&yaml, 1, (1..=3).map(|id| record(id, json!({}))).collect());
+    let seen: Vec<_> = out.iter().map(|r| r.attributes.get("seen").cloned()).collect();
+    assert_eq!(seen, vec![Some(json!(1)), Some(json!(2)), Some(json!(3))]);
+}
+
+/// The issue's demo: what `edit` cannot do. Split a multi-line body into one record per
+/// line and derive `http.status_class` from `http.status`.
+const DEMO: &str = r#"local function class_of(status)
+  if status == nil then return nil end
+  return string.format("%dxx", status // 100)
+end
+
+function process(record)
+  local class = class_of(record.attributes["http.status"])
+  if class then record.attributes["http.status_class"] = class end
+  if type(record.body) ~= "string" or not record.body:find("\n") then
+    return record
+  end
+  local out = {}
+  for line in record.body:gmatch("[^\n]+") do
+    out[#out + 1] = {
+      id = record.id,
+      kind = record.kind,
+      body = line,
+      severity_text = record.severity_text,
+      attributes = record.attributes,
+      resource = record.resource,
+      scope = record.scope,
+    }
+  end
+  return out
+end"#;
+
+#[test]
+fn the_demo_script_splits_lines_and_derives_the_status_class() {
+    for_each_worker_count(|workers| {
+        let yaml = config("", DEMO);
+        let (out, h) = run(
+            &yaml,
+            workers,
+            vec![
+                record(1, json!({"body": "one\ntwo\nthree", "attributes": {"http.status": 503}})),
+                record(2, json!({"body": "single", "attributes": {"http.status": 200}})),
+                record(3, json!({"body": "no status"})),
+            ],
+        );
+        let lines: Vec<_> = out
+            .iter()
+            .filter(|r| r.id == Some(fusion_core::record::RecordId(1)))
+            .map(|r| (r.body.clone(), r.attributes.get("http.status_class").cloned()))
+            .collect();
+        assert_eq!(lines.len(), 3, "workers {workers}");
+        for (body, class) in &lines {
+            assert!(matches!(body, Some(Value::String(_))));
+            assert_eq!(class, &Some(json!("5xx")));
+        }
+        let single = out.iter().find(|r| r.id == Some(fusion_core::record::RecordId(2))).expect("record 2");
+        assert_eq!(single.attributes.get("http.status_class"), Some(&json!("2xx")));
+        let none = out.iter().find(|r| r.id == Some(fusion_core::record::RecordId(3))).expect("record 3");
+        assert_eq!(none.attributes.get("http.status_class"), None);
+        assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 5);
+        assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);
+        h.finish();
+    });
+}
