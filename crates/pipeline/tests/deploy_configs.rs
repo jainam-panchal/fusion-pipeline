@@ -7,10 +7,9 @@
 
 mod common;
 
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use common::{WAIT, for_each_worker_count, host_record, start_with};
+use common::{WAIT, deploy_config, for_each_worker_count, host_record, start_with};
 use fusion_core::config::Config;
 use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::metrics::CounterMetric;
@@ -18,14 +17,6 @@ use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_nats::config::SinkParams;
 use fusion_pipeline::default_registry;
-
-/// A config shipped under `deploy/`.
-fn deploy_config(name: &str) -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../deploy")
-        .join(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{} is readable: {err}", name))
-}
 
 /// The default registry with `sink.nats` parsing real sink params and collecting in memory.
 fn registry(sinks: &MemorySinks) -> Registry {

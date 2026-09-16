@@ -1,4 +1,4 @@
-//! The `lua` node through the trait boundary: YAML config with an inline script in,
+//! The `lua` node through the trait boundary: YAML config with a script in,
 //! envelopes pushed through the in-memory source, assertions on what the in-memory sink
 //! received, how each ack handle settled and what the recorder counted.
 
@@ -625,9 +625,8 @@ fn a_script_read_from_a_file_runs_over_records() {
 /// `http.status_class` from `http.status`. Read from the shipped file, so the script an
 /// operator copies is the one this test drives.
 fn shipped_split_lines() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/pipeline.yaml");
-    let yaml = std::fs::read_to_string(&path).expect("deploy/pipeline.yaml is readable");
-    let config = fusion_core::config::Config::from_yaml(&yaml).expect("the compose config parses");
+    let config = fusion_core::config::Config::from_yaml(&common::deploy_config("pipeline.yaml"))
+        .expect("the compose config parses");
     let node = config
         .nodes
         .iter()
@@ -667,7 +666,7 @@ fn the_shipped_split_script_splits_lines_and_derives_the_status_class() {
         );
         let lines: Vec<_> = out
             .iter()
-            .filter(|r| r.id == Some(fusion_core::record::RecordId(1)))
+            .filter(|r| r.id == Some(RecordId(1)))
             .map(|r| {
                 (
                     r.body.clone(),
@@ -682,7 +681,7 @@ fn the_shipped_split_script_splits_lines_and_derives_the_status_class() {
         }
         let single = out
             .iter()
-            .find(|r| r.id == Some(fusion_core::record::RecordId(2)))
+            .find(|r| r.id == Some(RecordId(2)))
             .expect("record 2");
         assert_eq!(
             single.attributes.get("http.status_class"),
@@ -690,21 +689,23 @@ fn the_shipped_split_script_splits_lines_and_derives_the_status_class() {
         );
         let none = out
             .iter()
-            .find(|r| r.id == Some(fusion_core::record::RecordId(3)))
+            .find(|r| r.id == Some(RecordId(3)))
             .expect("record 3");
         assert_eq!(none.attributes.get("http.status_class"), None);
         let null = out
             .iter()
-            .find(|r| r.id == Some(fusion_core::record::RecordId(4)))
+            .find(|r| r.id == Some(RecordId(4)))
             .expect("record 4");
         assert_eq!(null.attributes.get("http.status_class"), None);
         assert_eq!(null.attributes.get("http.status"), Some(&Value::Null));
         let blank = out
             .iter()
-            .find(|r| r.id == Some(fusion_core::record::RecordId(5)))
+            .find(|r| r.id == Some(RecordId(5)))
             .expect("record 5, only newlines, passes unchanged");
         assert_eq!(blank.body, Some(json!("\n\n")));
         assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 7);
+        // Without the script's newline-only guard, record 5 still arrives under
+        // `on_error: pass`; only the `output` count shows the empty split was refused.
         for kind in ["output", "runtime"] {
             assert_eq!(h.counter(CounterMetric::LuaErrors, &lua_error(kind)), 0);
         }

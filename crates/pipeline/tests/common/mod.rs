@@ -17,6 +17,14 @@ use fusion_core::registry::Registry;
 use fusion_core::state::StateStoreFactory;
 use fusion_pipeline::default_registry;
 
+/// A config shipped under `deploy/`.
+pub fn deploy_config(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../deploy")
+        .join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{name} is readable: {err}"))
+}
+
 /// How long a test waits for an ack handle to settle.
 pub const WAIT: Duration = Duration::from_secs(5);
 
