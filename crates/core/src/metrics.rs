@@ -129,123 +129,53 @@ impl std::fmt::Display for EngineLabel {
     }
 }
 
-/// The `op` label of `edit_unapplied_total`: the kind of an `edit` op. Closed set, so the
-/// label cannot drift from the five ops the spec defines; the stages crate maps its own op
-/// onto it. [`EditOp::ALL`] lists them in the spec's order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EditOp {
-    /// `set {field, value}`.
-    Set,
-    /// `rename {from, to}`.
-    Rename,
-    /// `copy {from, to}`.
-    Copy,
-    /// `hash {field}`.
-    Hash,
-    /// `delete {fields}`.
-    Delete,
-}
-
-impl EditOp {
-    /// Every op, for checks against the spec's closed set.
-    pub const ALL: [Self; 5] = [
-        Self::Set,
-        Self::Rename,
-        Self::Copy,
-        Self::Hash,
-        Self::Delete,
-    ];
-
-    /// The label value.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Set => "set",
-            Self::Rename => "rename",
-            Self::Copy => "copy",
-            Self::Hash => "hash",
-            Self::Delete => "delete",
-        }
+closed_set! {
+    /// The `op` label of `edit_unapplied_total`: the kind of an `edit` op. Closed set, so the
+    /// label cannot drift from the five ops the spec defines; the stages crate maps its own op
+    /// onto it. [`EditOp::ALL`] lists them in the spec's order.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum EditOp {
+        /// `set {field, value}`.
+        Set = "set",
+        /// `rename {from, to}`.
+        Rename = "rename",
+        /// `copy {from, to}`.
+        Copy = "copy",
+        /// `hash {field}`.
+        Hash = "hash",
+        /// `delete {fields}`.
+        Delete = "delete",
     }
 }
 
-impl std::fmt::Display for EditOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+closed_set! {
+    /// The `cause` label of `edit_unapplied_total`: why an `edit` op could not apply. Closed
+    /// set; [`EditCause::ALL`] lists both.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum EditCause {
+        /// The source field read as null: absent, or JSON `null`.
+        Absent = "absent",
+        /// The target refused the value: a composite into a map key, a string into a typed
+        /// field.
+        Type = "type",
     }
 }
 
-/// The `cause` label of `edit_unapplied_total`: why an `edit` op could not apply. Closed
-/// set; [`EditCause::ALL`] lists both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EditCause {
-    /// The source field read as null: absent, or JSON `null`.
-    Absent,
-    /// The target refused the value: a composite into a map key, a string into a typed
-    /// field.
-    Type,
-}
-
-impl EditCause {
-    /// Every cause, for checks against the spec's closed set.
-    pub const ALL: [Self; 2] = [Self::Absent, Self::Type];
-
-    /// The label value.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Absent => "absent",
-            Self::Type => "type",
-        }
-    }
-}
-
-impl std::fmt::Display for EditCause {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// The `kind` label of `lua_errors_total`: what stopped a run of a Lua script. Closed set;
-/// [`LuaErrorKind::ALL`] lists them all. Load-time failures (a script that does not parse,
-/// defines no `process` or names a forbidden global) reject the config and never count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LuaErrorKind {
-    /// The instruction budget tripped.
-    Instructions,
-    /// The memory cap tripped.
-    Memory,
-    /// The script raised, or indexed something it should not have.
-    Runtime,
-    /// The returned record was refused: a missing or mistyped field, a changed `id` or
-    /// tenant, an oversized output.
-    Output,
-}
-
-impl LuaErrorKind {
-    /// Every kind, for checks against the spec's closed set.
-    pub const ALL: [Self; 4] = [
-        Self::Instructions,
-        Self::Memory,
-        Self::Runtime,
-        Self::Output,
-    ];
-
-    /// The label value.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Instructions => "instructions",
-            Self::Memory => "memory",
-            Self::Runtime => "runtime",
-            Self::Output => "output",
-        }
-    }
-}
-
-impl std::fmt::Display for LuaErrorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+closed_set! {
+    /// The `kind` label of `lua_errors_total`: what stopped a run of a Lua script. Closed set;
+    /// [`LuaErrorKind::ALL`] lists them all. Load-time failures (a script that does not parse,
+    /// defines no `process` or names a forbidden global) reject the config and never count.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum LuaErrorKind {
+        /// The instruction budget tripped.
+        Instructions = "instructions",
+        /// The memory cap tripped.
+        Memory = "memory",
+        /// The script raised, or indexed something it should not have.
+        Runtime = "runtime",
+        /// The returned record was refused: a mistyped field, a key that is not a record
+        /// field, an oversized output, or a table that is neither a record nor a list.
+        Output = "output",
     }
 }
 

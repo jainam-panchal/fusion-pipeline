@@ -9,77 +9,39 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::closed_set::closed_set;
 use crate::meta::Meta;
 use crate::metrics::{EditCause, EditOp, EngineLabel, Labels, LuaErrorKind, Metrics};
 use crate::record::Record;
 use crate::state::{StateError, StateErrorPolicy, StateStore};
 
-/// Why a record was intentionally dropped. Closed set: adding one is a spec amendment, and
-/// [`DropReason::ALL`] lists them all. It is the `reason` label on `records_dropped_total`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DropReason {
-    /// A `filter` node dropped it.
-    Filter,
-    /// A `route` node's default was `drop`.
-    RouteDefaultDrop,
-    /// A `sample` node did not select it.
-    Sample,
-    /// A `dedupe` node saw it before.
-    Dedupe,
-    /// A Lua script returned `nil`.
-    LuaDrop,
-    /// A Lua script errored with `on_error: drop`.
-    LuaError,
-    /// A regex limit tripped.
-    RegexLimit,
-    /// The state store failed and the node's policy is `drop`.
-    StateError,
-    /// The record is malformed or of an unsupported kind.
-    InvalidRecord,
-    /// The record carries no `id`.
-    MissingId,
-    /// An `edit` op could not apply and the node's `on_unapplied` is `drop`.
-    EditUnapplied,
-}
-
-impl DropReason {
-    /// Every reason, for checks against the spec's closed set.
-    pub const ALL: [Self; 11] = [
-        Self::Filter,
-        Self::RouteDefaultDrop,
-        Self::Sample,
-        Self::Dedupe,
-        Self::LuaDrop,
-        Self::LuaError,
-        Self::RegexLimit,
-        Self::StateError,
-        Self::InvalidRecord,
-        Self::MissingId,
-        Self::EditUnapplied,
-    ];
-
-    /// The metric label value.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Filter => "filter",
-            Self::RouteDefaultDrop => "route_default_drop",
-            Self::Sample => "sample",
-            Self::Dedupe => "dedupe",
-            Self::LuaDrop => "lua_drop",
-            Self::LuaError => "lua_error",
-            Self::RegexLimit => "regex_limit",
-            Self::StateError => "state_error",
-            Self::InvalidRecord => "invalid_record",
-            Self::MissingId => "missing_id",
-            Self::EditUnapplied => "edit_unapplied",
-        }
-    }
-}
-
-impl fmt::Display for DropReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+closed_set! {
+    /// Why a record was intentionally dropped. Closed set: adding one is a spec amendment, and
+    /// [`DropReason::ALL`] lists them all. It is the `reason` label on `records_dropped_total`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum DropReason {
+        /// A `filter` node dropped it.
+        Filter = "filter",
+        /// A `route` node's default was `drop`.
+        RouteDefaultDrop = "route_default_drop",
+        /// A `sample` node did not select it.
+        Sample = "sample",
+        /// A `dedupe` node saw it before.
+        Dedupe = "dedupe",
+        /// A Lua script returned `nil`.
+        LuaDrop = "lua_drop",
+        /// A Lua script errored with `on_error: drop`.
+        LuaError = "lua_error",
+        /// A regex limit tripped.
+        RegexLimit = "regex_limit",
+        /// The state store failed and the node's policy is `drop`.
+        StateError = "state_error",
+        /// The record is malformed or of an unsupported kind.
+        InvalidRecord = "invalid_record",
+        /// The record carries no `id`.
+        MissingId = "missing_id",
+        /// An `edit` op could not apply and the node's `on_unapplied` is `drop`.
+        EditUnapplied = "edit_unapplied",
     }
 }
 

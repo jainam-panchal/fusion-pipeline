@@ -1,6 +1,8 @@
-//! The two closed sets the spec's Telemetry section fixes: the metric names and the drop
-//! reasons that label `records_dropped_total`. Nothing else is observable below the trait
-//! boundary; what the engine emits is tested through it in the pipeline crate.
+//! The closed sets the spec fixes: the metric names, the drop reasons that label
+//! `records_dropped_total`, and the `edit` and `lua` label values. Each set's `ALL` is
+//! complete by construction (`closed_set!`), so these pin its names to the spec. Nothing else
+//! is observable below the trait boundary; what the engine emits is tested through it in the
+//! pipeline crate.
 
 use fusion_core::metrics::{EditCause, EditOp, LuaErrorKind, Metric, MetricKind};
 use fusion_core::stage::DropReason;
