@@ -208,15 +208,16 @@ struct Walk<'p: 't, 't> {
 }
 
 impl<'p> Walk<'p, '_> {
-    /// Count and log a failure of the node `labels` names, whose span is `span`, and keep
-    /// it if it is the walk's first. Returns the error text for the span.
+    /// Count and log a failure of the node `labels` names, keep it if it is the walk's
+    /// first, and close the node's span, if it has one, at `ended` as failed.
     fn fail(
         &mut self,
         labels: &Labels<'_>,
         span: Option<usize>,
+        ended: Instant,
         kind: FailureKind,
         error: &dyn std::fmt::Display,
-    ) -> String {
+    ) {
         let node = labels.stage().unwrap_or(SOURCE_ID);
         let error = error.to_string();
         let delivery = self.meta.delivery_count;
@@ -241,7 +242,14 @@ impl<'p> Walk<'p, '_> {
             kind,
             error: error.clone(),
         });
-        error
+        if let Some(span) = span {
+            self.spans.close(
+                span,
+                ended,
+                SpanOutcome::Error,
+                Detail::Failure(kind, error),
+            );
+        }
     }
 }
 
@@ -384,19 +392,22 @@ impl<'p> Walker<'p> {
             let (labels, span) = walk
                 .at
                 .map_or((source, None), |(labels, span)| (labels, Some(span)));
-            walk.fail(&labels, span, FailureKind::Panic, &PANICKED);
+            walk.fail(&labels, span, Instant::now(), FailureKind::Panic, &PANICKED);
             walk.spans
                 .fail_open(Instant::now(), FailureKind::Panic, PANICKED);
         }
         let Walk { failure, spans, .. } = walk;
         // The trace of every failed or redelivered walk is kept, so a log line about it
-        // always finds it; of the rest, the sampled share.
+        // always finds it; of the rest, the sampled share. Nothing is built when nothing
+        // traces.
         let settlement = if failure.is_some() {
             Settlement::Nak
         } else {
             Settlement::Ack
         };
-        if failure.is_some() || delivery > 1 || self.signals.sampling().keeps(key) {
+        if self.signals.tracing()
+            && (failure.is_some() || delivery > 1 || self.signals.sampling().keeps(key))
+        {
             self.signals.export(spans.finish(&meta, settlement));
         }
         if let Some(failure) = failure {
@@ -500,13 +511,7 @@ impl<'p> Walker<'p> {
                     }
                     Err(err) => {
                         metrics.sink_publish_error(&labels);
-                        let error = walk.fail(&labels, Some(span), FailureKind::SinkError, &err);
-                        walk.spans.close(
-                            span,
-                            ended,
-                            SpanOutcome::Error,
-                            Detail::Failure(FailureKind::SinkError, error),
-                        );
+                        walk.fail(&labels, Some(span), ended, FailureKind::SinkError, &err);
                     }
                 }
             }
@@ -544,14 +549,7 @@ impl<'p> Walker<'p> {
                             self.fan_out(consumers(None), Arc::new(record), walk, Some(span));
                         }
                         StateErrorPolicy::Nak => {
-                            let error =
-                                walk.fail(&labels, Some(span), FailureKind::StateError, &error);
-                            walk.spans.close(
-                                span,
-                                ended,
-                                SpanOutcome::Error,
-                                Detail::Failure(FailureKind::StateError, error),
-                            );
+                            walk.fail(&labels, Some(span), ended, FailureKind::StateError, &error);
                         }
                     },
                     StageOutput::Split(records) => {
@@ -574,17 +572,12 @@ impl<'p> Walker<'p> {
                         if targets.peek().is_none() {
                             // Load validation guarantees every declared label a consumer, so
                             // this is a stage emitting a label it never declared.
-                            let error = walk.fail(
+                            walk.fail(
                                 &labels,
                                 Some(span),
+                                ended,
                                 FailureKind::StageError,
                                 &format!("no consumer for route label `{label}`"),
-                            );
-                            walk.spans.close(
-                                span,
-                                ended,
-                                SpanOutcome::Error,
-                                Detail::Failure(FailureKind::StageError, error),
                             );
                             return;
                         }
@@ -597,13 +590,7 @@ impl<'p> Walker<'p> {
                         walk.spans.detail(span, Detail::Routed(label));
                     }
                     StageOutput::Error(err) => {
-                        let error = walk.fail(&labels, Some(span), FailureKind::StageError, &err);
-                        walk.spans.close(
-                            span,
-                            ended,
-                            SpanOutcome::Error,
-                            Detail::Failure(FailureKind::StageError, error),
-                        );
+                        walk.fail(&labels, Some(span), ended, FailureKind::StageError, &err);
                     }
                 }
             }

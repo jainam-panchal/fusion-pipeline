@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::events::{Event, EventLog, NoEvents};
 use crate::metrics::Metrics;
-use crate::trace::{NoTraces, RecordTrace, TraceSampling, TraceSink};
+use crate::trace::{RecordTrace, TraceSampling, TraceSink};
 
 /// Metrics, the event log, the trace sink and the share of passing records to trace.
 /// Cheap to clone. A `Metrics` converts into one that logs and traces nothing, so a caller
@@ -14,7 +14,8 @@ use crate::trace::{NoTraces, RecordTrace, TraceSampling, TraceSink};
 pub struct Signals {
     metrics: Metrics,
     events: Arc<dyn EventLog>,
-    traces: Arc<dyn TraceSink>,
+    /// `None` when nothing traces, so the engine builds no trace at all.
+    traces: Option<Arc<dyn TraceSink>>,
     sampling: TraceSampling,
 }
 
@@ -33,7 +34,7 @@ impl Signals {
         Self {
             metrics,
             events: Arc::new(NoEvents),
-            traces: Arc::new(NoTraces),
+            traces: None,
             sampling: TraceSampling::default(),
         }
     }
@@ -58,7 +59,7 @@ impl Signals {
         traces: impl TraceSink + 'static,
         sampling: TraceSampling,
     ) -> Self {
-        self.traces = Arc::new(traces);
+        self.traces = Some(Arc::new(traces));
         self.sampling = sampling;
         self
     }
@@ -67,6 +68,12 @@ impl Signals {
     #[must_use]
     pub const fn metrics(&self) -> &Metrics {
         &self.metrics
+    }
+
+    /// Whether kept traces go anywhere; when not, the engine keeps none.
+    #[must_use]
+    pub const fn tracing(&self) -> bool {
+        self.traces.is_some()
     }
 
     /// The share of passing records traced.
@@ -80,9 +87,11 @@ impl Signals {
         self.events.emit(event);
     }
 
-    /// Export a kept trace.
+    /// Export a kept trace; dropped when nothing traces.
     pub fn export(&self, trace: RecordTrace) {
-        self.traces.export(trace);
+        if let Some(traces) = &self.traces {
+            traces.export(trace);
+        }
     }
 }
 
