@@ -154,9 +154,10 @@ impl Source for MemorySource {
     }
 }
 
-/// A record a memory sink accepted, with the `Meta` it was written beside.
+/// An outgoing record a memory sink accepted: the record and the `Meta` it was written
+/// beside, owned.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Written {
+pub struct OutgoingRecord {
     /// The pipeline's view of the record.
     pub meta: Meta,
     /// The record as the sink received it.
@@ -169,7 +170,7 @@ pub struct Written {
 /// the engine's nak path.
 #[derive(Debug, Clone, Default)]
 pub struct MemorySinks {
-    written: Arc<Mutex<BTreeMap<String, Vec<Written>>>>,
+    outgoing: Arc<Mutex<BTreeMap<String, Vec<OutgoingRecord>>>>,
     failing: Arc<Mutex<BTreeSet<String>>>,
 }
 
@@ -193,16 +194,16 @@ impl MemorySinks {
     /// Records written to the sink node `node_id`, in arrival order.
     #[must_use]
     pub fn records(&self, node_id: &str) -> Vec<Record> {
-        self.written(node_id)
+        self.outgoing(node_id)
             .into_iter()
-            .map(|written| written.record)
+            .map(|outgoing| outgoing.record)
             .collect()
     }
 
     /// Records written to the sink node `node_id`, each with its `Meta`, in arrival order.
     #[must_use]
-    pub fn written(&self, node_id: &str) -> Vec<Written> {
-        lock_unpoisoned(&self.written)
+    pub fn outgoing(&self, node_id: &str) -> Vec<OutgoingRecord> {
+        lock_unpoisoned(&self.outgoing)
             .get(node_id)
             .cloned()
             .unwrap_or_default()
@@ -213,7 +214,7 @@ impl SinkFactory for MemorySinks {
     fn build(&self, node: &NodeConfig) -> Result<Box<dyn Sink>, ConfigError> {
         Ok(Box::new(MemorySink {
             node_id: node.id.clone(),
-            written: Arc::clone(&self.written),
+            outgoing: Arc::clone(&self.outgoing),
             failing: Arc::clone(&self.failing),
         }))
     }
@@ -221,7 +222,7 @@ impl SinkFactory for MemorySinks {
 
 struct MemorySink {
     node_id: String,
-    written: Arc<Mutex<BTreeMap<String, Vec<Written>>>>,
+    outgoing: Arc<Mutex<BTreeMap<String, Vec<OutgoingRecord>>>>,
     failing: Arc<Mutex<BTreeSet<String>>>,
 }
 
@@ -230,10 +231,10 @@ impl Sink for MemorySink {
         if lock_unpoisoned(&self.failing).contains(&self.node_id) {
             return Err(SinkError::new(InjectedSinkFailure(self.node_id.clone())));
         }
-        lock_unpoisoned(&self.written)
+        lock_unpoisoned(&self.outgoing)
             .entry(self.node_id.clone())
             .or_default()
-            .extend(batch.iter().map(|outgoing| Written {
+            .extend(batch.iter().map(|outgoing| OutgoingRecord {
                 meta: outgoing.meta.clone(),
                 record: outgoing.record.clone(),
             }));

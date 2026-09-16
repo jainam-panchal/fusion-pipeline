@@ -79,10 +79,11 @@ pub enum SourceError {
 ///
 /// A source must give every envelope an [`Arrival`] with the tenant its transport names,
 /// an ingestion time from its transport, and the message's delivery count, and must not
-/// write any of them into the record. Stateful stages measure windows in the ingestion time
-/// on the record's `Meta`, and a redelivered record must get the value it had the first
-/// time; the engine's fallbacks to the record's time fields and to the worker clock exist
-/// for records pushed in tests, not for sources.
+/// write any of them into the record. `Meta` takes its tenant and ingestion time from the
+/// arrival alone and never from the record: a tenant the arrival does not name is
+/// `unknown`, and a time it does not give is the worker clock's. Stateful stages measure
+/// windows in that ingestion time, and a redelivered record must get the value it had the
+/// first time, so the clock fallback is for records pushed in tests, not for sources.
 pub trait Source: Send {
     /// Run to completion, delivering every envelope into `intake`.
     ///

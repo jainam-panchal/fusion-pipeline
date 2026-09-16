@@ -5,7 +5,7 @@
 //! can share state across tenants or pipelines, and counts every operation on
 //! `state_ops_total`, `state_op_duration_seconds` and `state_errors_total`.
 //!
-//! Only core builds a [`Context`]: each worker holds a [`StageEnvironment`] and derives every
+//! Only core builds a [`Context`]: each worker holds a stage environment and derives every
 //! node's context from it, the record's [`Meta`] and the node, so the handle's tenant, the
 //! metric labels and the `Meta` a stage reads are the same tenant by construction.
 
@@ -310,7 +310,7 @@ impl<'a> StageMetrics<'a> {
 }
 
 /// Per-record context handed to a stage alongside the record. Built only by core, from the
-/// worker's [`StageEnvironment`], the record's [`Meta`] and the node.
+/// worker's stage environment, the record's [`Meta`] and the node.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Context<'a> {

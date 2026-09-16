@@ -742,7 +742,8 @@ impl FieldPath {
     /// Core's write rules for `value` through this path, without a record: `Ok` exactly when
     /// [`FieldPath::write`] would store it, and otherwise the error `write` would give. A
     /// stage that needs to know a type at load asks this instead of writing onto an empty
-    /// record.
+    /// record. It runs the same typing step as `write` on a copy of `value`: the copy is paid
+    /// once per op at load, and one typing step keeps a field's type spelled in one place.
     ///
     /// # Errors
     ///

@@ -174,7 +174,7 @@ fn the_sink_receives_the_meta_beside_the_record_it_never_entered() {
         },
     );
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
-    let written = h.sinks.written("out");
+    let written = h.sinks.outgoing("out");
     assert_eq!(written.len(), 1);
     assert_eq!(
         written[0].record, sent,
@@ -203,7 +203,7 @@ fn a_clock_time_an_upstream_pipeline_passed_on_stays_a_clock_time() {
     );
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     assert_eq!(
-        h.sinks.written("out")[0].meta.ingestion_time,
+        h.sinks.outgoing("out")[0].meta.ingestion_time,
         IngestionTime::Clock(9_000_000_000),
         "not replaced by the record's time, and not marked reported"
     );
@@ -483,7 +483,7 @@ nodes:
         ),
         1
     );
-    let written = h.sinks.written("out");
+    let written = h.sinks.outgoing("out");
     assert_eq!(&*written[0].meta.tenant, "acme");
     h.finish();
 }

@@ -37,21 +37,30 @@ macro_rules! metrics {
             }
         }
 
-        metrics!(@counters [] $($kind $variant = $wire,)+);
-        metrics!(@histograms [] $($kind $variant = $wire,)+);
+        metrics!(@subset counter CounterMetric
+            "The metrics that are counters, recorded with [`Recorder::count`]. An exporter \
+             creates one counter per value of [`CounterMetric::ALL`]."
+            [] $($(#[doc = $doc])* $kind $variant = $wire,)+);
+        metrics!(@subset histogram HistogramMetric
+            "The metrics that are histograms of durations in seconds, recorded with \
+             [`Recorder::observe`]. An exporter creates one histogram per value of \
+             [`HistogramMetric::ALL`]."
+            [] $($(#[doc = $doc])* $kind $variant = $wire,)+);
     };
-    (@counters [$($v:ident = $w:literal,)*]) => {
+    // The subset `$name` of the metrics tagged `$want`: every metric is looked at once, and
+    // `@keep` or `@skip` decides whether it joins the accumulator. Once the list is empty the
+    // accumulator is the subset, declared as a closed set with each metric's own docs.
+    (@subset $want:ident $name:ident $about:literal [$($(#[doc = $d:literal])* $v:ident = $w:literal,)*]) => {
         closed_set! {
-            /// The metrics that are counters, recorded with [`Recorder::count`]. An exporter
-            /// creates one counter per value of [`CounterMetric::ALL`].
+            #[doc = $about]
             #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-            pub enum CounterMetric {
-                $(#[doc = $w] $v = $w,)*
+            pub enum $name {
+                $($(#[doc = $d])* $v = $w,)*
             }
         }
 
-        impl CounterMetric {
-            /// The metric this counter is.
+        impl $name {
+            /// The metric this value is.
             #[must_use]
             pub const fn metric(self) -> Metric {
                 match self {
@@ -60,38 +69,18 @@ macro_rules! metrics {
             }
         }
     };
-    (@counters [$($acc:tt)*] counter $v:ident = $w:literal, $($rest:tt)*) => {
-        metrics!(@counters [$($acc)* $v = $w,] $($rest)*);
+    (@subset $want:ident $name:ident $about:literal [$($acc:tt)*]
+        $(#[doc = $d:literal])* $kind:ident $v:ident = $w:literal, $($rest:tt)*) => {
+        metrics!(@pick $want $kind $name $about [$($acc)*] [$(#[doc = $d])* $v = $w,] $($rest)*);
     };
-    (@counters [$($acc:tt)*] histogram $v:ident = $w:literal, $($rest:tt)*) => {
-        metrics!(@counters [$($acc)*] $($rest)*);
+    (@pick counter counter $($t:tt)*) => { metrics!(@keep counter $($t)*); };
+    (@pick histogram histogram $($t:tt)*) => { metrics!(@keep histogram $($t)*); };
+    (@pick $want:ident $other:ident $name:ident $about:literal [$($acc:tt)*] [$($item:tt)*]
+        $($rest:tt)*) => {
+        metrics!(@subset $want $name $about [$($acc)*] $($rest)*);
     };
-    (@histograms [$($v:ident = $w:literal,)*]) => {
-        closed_set! {
-            /// The metrics that are histograms of durations in seconds, recorded with
-            /// [`Recorder::observe`]. An exporter creates one histogram per value of
-            /// [`HistogramMetric::ALL`].
-            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-            pub enum HistogramMetric {
-                $(#[doc = $w] $v = $w,)*
-            }
-        }
-
-        impl HistogramMetric {
-            /// The metric this histogram is.
-            #[must_use]
-            pub const fn metric(self) -> Metric {
-                match self {
-                    $(Self::$v => Metric::$v,)*
-                }
-            }
-        }
-    };
-    (@histograms [$($acc:tt)*] histogram $v:ident = $w:literal, $($rest:tt)*) => {
-        metrics!(@histograms [$($acc)* $v = $w,] $($rest)*);
-    };
-    (@histograms [$($acc:tt)*] counter $v:ident = $w:literal, $($rest:tt)*) => {
-        metrics!(@histograms [$($acc)*] $($rest)*);
+    (@keep $want:ident $name:ident $about:literal [$($acc:tt)*] [$($item:tt)*] $($rest:tt)*) => {
+        metrics!(@subset $want $name $about [$($acc)* $($item)*] $($rest)*);
     };
 }
 

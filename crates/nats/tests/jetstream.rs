@@ -420,10 +420,10 @@ fn source_writes_nothing_into_the_record_and_acks_after_the_sink() {
     }
 
     assert!(
-        wait_until(SETTLE_TIMEOUT, || sinks.written("out").len() == 3),
+        wait_until(SETTLE_TIMEOUT, || sinks.outgoing("out").len() == 3),
         "records reach the memory sink"
     );
-    let mut written = sinks.written("out");
+    let mut written = sinks.outgoing("out");
     written.sort_by_key(|w| w.meta.record_id);
     let now = unix_nanos_now();
     for (w, payload) in written.iter().zip(published) {
@@ -706,7 +706,7 @@ fn a_downstream_pipeline_takes_the_tenant_and_the_first_ingestion_time_from_the_
     fixture.client.publish(&fixture.in_subject("acme"), payload);
 
     assert!(
-        wait_until(SETTLE_TIMEOUT, || sinks.written("out").len() == 1),
+        wait_until(SETTLE_TIMEOUT, || sinks.outgoing("out").len() == 1),
         "the record crosses both pipelines"
     );
     let (_, upstream_headers) = fixture
@@ -719,7 +719,7 @@ fn a_downstream_pipeline_takes_the_tenant_and_the_first_ingestion_time_from_the_
         .as_str()
         .parse()
         .expect("decimal");
-    let written = &sinks.written("out")[0];
+    let written = &sinks.outgoing("out")[0];
     assert_eq!(
         written.record,
         Record::from_json(payload).expect("record parses"),
@@ -770,10 +770,10 @@ fn the_subject_beats_a_spoofed_tenant_header_and_a_bad_header_is_counted_not_nak
     );
 
     assert!(
-        wait_until(SETTLE_TIMEOUT, || sinks.written("out").len() == 1),
+        wait_until(SETTLE_TIMEOUT, || sinks.outgoing("out").len() == 1),
         "the record is walked"
     );
-    let written = &sinks.written("out")[0];
+    let written = &sinks.outgoing("out")[0];
     assert_eq!(&*written.meta.tenant, "acme");
     assert!(
         matches!(written.meta.ingestion_time, IngestionTime::Reported(t) if t > 1_000),
@@ -823,10 +823,10 @@ fn a_payload_tenant_is_never_read_when_the_transport_names_none() {
         .publish(&format!("{}.acme", fixture.tenant_prefix), payload);
 
     assert!(
-        wait_until(SETTLE_TIMEOUT, || sinks.written("out").len() == 1),
+        wait_until(SETTLE_TIMEOUT, || sinks.outgoing("out").len() == 1),
         "the record is walked"
     );
-    let written = &sinks.written("out")[0];
+    let written = &sinks.outgoing("out")[0];
     assert_eq!(&*written.meta.tenant, "unknown");
     assert_eq!(
         written.record,
