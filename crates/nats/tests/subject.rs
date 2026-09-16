@@ -64,3 +64,50 @@ mod capture {
         assert!(!captures("logs.>", "processed.logs"));
     }
 }
+
+mod dead_letter {
+    use fusion_nats::subject::{covers_every_tenant, dead_letter};
+
+    #[test]
+    fn a_tenant_is_the_token_after_the_prefix() {
+        assert_eq!(dead_letter("dlq", "acme"), "dlq.acme");
+        assert_eq!(dead_letter("dlq", "unknown"), "dlq.unknown");
+        assert_eq!(dead_letter("dead", "acme-eu_1"), "dead.acme-eu_1");
+    }
+
+    #[test]
+    fn a_tenant_that_is_not_one_token_is_escaped_into_one() {
+        for (tenant, token) in [
+            ("a.b", "a%2Eb"),
+            ("a*", "a%2A"),
+            ("a>", "a%3E"),
+            ("a b", "a%20b"),
+            ("a\tb", "a%09b"),
+            ("é", "%C3%A9"),
+            ("100%", "100%25"),
+        ] {
+            assert_eq!(
+                dead_letter("dlq", tenant),
+                format!("dlq.{token}"),
+                "{tenant}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_tenants_never_share_a_subject() {
+        assert_ne!(dead_letter("dlq", "a.b"), dead_letter("dlq", "a%2Eb"));
+        assert_ne!(dead_letter("dlq", "a b"), dead_letter("dlq", "a%20b"));
+    }
+
+    #[test]
+    fn a_stream_pattern_must_cover_every_tenant_under_the_prefix() {
+        assert!(covers_every_tenant("dlq.*", "dlq"));
+        assert!(covers_every_tenant("dlq.>", "dlq"));
+        assert!(covers_every_tenant(">", "dlq"));
+        assert!(covers_every_tenant("*.*", "dlq"));
+        assert!(!covers_every_tenant("dlq.x", "dlq"), "one tenant only");
+        assert!(!covers_every_tenant("dlq", "dlq"));
+        assert!(!covers_every_tenant("dead.>", "dlq"));
+    }
+}

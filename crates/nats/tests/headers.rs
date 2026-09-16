@@ -1,12 +1,15 @@
 //! Pipeline headers through the crate's public helpers: what the sink writes for a `Meta`,
-//! and the arrival the source builds from a subject, headers and the JetStream message info.
+//! the arrival the source builds from a subject, headers and the JetStream message info,
+//! and what the source writes on a dead letter.
 //! The live round trip is in `jetstream.rs`.
 
 use async_nats::HeaderMap;
+use fusion_core::io::{Failure, FailureKind};
 use fusion_core::meta::{Arrival, IngestionTime, Meta};
 use fusion_core::record::RecordId;
 use fusion_nats::headers::{
-    self, INGESTION_TIME, INGESTION_TIME_KIND, InvalidHeader, Received, TENANT,
+    self, DLQ_REASON, DLQ_SUBJECT, DeadLetter, INGESTION_TIME, INGESTION_TIME_KIND, InvalidHeader,
+    MSG_ID, REASON_CAP, Received, TENANT,
 };
 
 fn meta(ingestion_time: IngestionTime) -> Meta {
@@ -259,4 +262,88 @@ fn a_tenant_that_cannot_be_a_header_is_never_written() {
     let written = headers::for_meta(&meta);
     assert_eq!(value(&written, TENANT), None, "left out, not a panic");
     assert_eq!(value(&written, INGESTION_TIME), Some("5"));
+}
+
+mod dead_letter {
+    use super::*;
+
+    fn failure(error: &str) -> Failure {
+        Failure {
+            node: "out".to_owned(),
+            kind: FailureKind::SinkError,
+            error: error.to_owned(),
+        }
+    }
+
+    fn letter<'a>(headers: Option<&'a HeaderMap>, failure: &'a Failure) -> DeadLetter<'a> {
+        DeadLetter {
+            stream: "LOGS",
+            stream_sequence: 42,
+            subject: "logs.acme.syslog",
+            headers,
+            tenant: "acme",
+            ingestion_time: Some(IngestionTime::Reported(9)),
+            failure,
+        }
+    }
+
+    #[test]
+    fn names_the_node_and_error_the_subject_and_the_message() {
+        let failure = failure("publish failed");
+        let written = headers::for_dead_letter(&letter(None, &failure));
+        assert_eq!(value(&written, DLQ_REASON), Some("out: publish failed"));
+        assert_eq!(value(&written, DLQ_SUBJECT), Some("logs.acme.syslog"));
+        assert_eq!(value(&written, MSG_ID), Some("LOGS:42"));
+    }
+
+    #[test]
+    fn carries_the_meta_the_arrival_gave_so_a_replay_keeps_it() {
+        let failure = failure("x");
+        let written = headers::for_dead_letter(&letter(None, &failure));
+        assert_eq!(value(&written, TENANT), Some("acme"));
+        assert_eq!(value(&written, INGESTION_TIME), Some("9"));
+        assert_eq!(value(&written, INGESTION_TIME_KIND), Some("reported"));
+
+        let mut no_time = letter(None, &failure);
+        no_time.ingestion_time = None;
+        let written = headers::for_dead_letter(&no_time);
+        assert_eq!(value(&written, INGESTION_TIME), None);
+        assert_eq!(value(&written, INGESTION_TIME_KIND), None);
+    }
+
+    #[test]
+    fn a_line_break_in_the_error_is_a_space_not_a_panic() {
+        let failure = failure("bad\r\nthing\u{7}");
+        let written = headers::for_dead_letter(&letter(None, &failure));
+        assert_eq!(value(&written, DLQ_REASON), Some("out: bad  thing "));
+    }
+
+    #[test]
+    fn a_long_error_is_cut_at_the_cap_on_a_character_boundary() {
+        let failure = failure(&"é".repeat(10 * 1024));
+        let written = headers::for_dead_letter(&letter(None, &failure));
+        let reason = value(&written, DLQ_REASON).expect("reason");
+        assert!(reason.len() <= REASON_CAP, "{}", reason.len());
+        assert!(reason.len() > REASON_CAP - 2, "{}", reason.len());
+        assert_eq!(REASON_CAP, 1024);
+    }
+
+    #[test]
+    fn keeps_the_producers_headers_but_not_nats_or_its_own_pipeline_headers() {
+        let original = map(&[
+            ("traceparent", "00-abc-def-01"),
+            ("Nats-Expected-Stream", "LOGS"),
+            ("Nats-Msg-Id", "producer-1"),
+            (TENANT, "spoofed"),
+            (DLQ_REASON, "old reason"),
+        ]);
+        let failure = failure("x");
+        let written = headers::for_dead_letter(&letter(Some(&original), &failure));
+        assert_eq!(value(&written, "traceparent"), Some("00-abc-def-01"));
+        assert_eq!(value(&written, "Nats-Expected-Stream"), None);
+        assert_eq!(value(&written, MSG_ID), Some("LOGS:42"));
+        assert_eq!(value(&written, TENANT), Some("acme"));
+        assert_eq!(value(&written, DLQ_REASON), Some("out: x"));
+        assert_eq!(written.get_all(TENANT).count(), 1);
+    }
 }
