@@ -79,7 +79,7 @@ impl Route {
 impl Stage for Route {
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
         for rule in &self.routes {
-            match rule.condition.matches(&record) {
+            match rule.condition.matches(&record, ctx.meta) {
                 Ok(true) => return StageOutput::Routed(rule.label.clone(), record),
                 Ok(false) => {}
                 Err(error) => return match_failure(ctx.node_id, error),

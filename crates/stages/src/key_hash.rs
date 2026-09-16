@@ -5,6 +5,7 @@
 use std::fmt::Write as _;
 
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::meta::Meta;
 use fusion_core::path::{FieldPath, FieldValue, Num};
 use fusion_core::record::Record;
 
@@ -28,16 +29,17 @@ pub(crate) fn parse_key_fields(
         .collect()
 }
 
-/// FNV-1a 64 over the canonical JSON array of the key `fields` read from `record`. A
-/// missing field is `null`, so records lacking it hash together.
+/// FNV-1a 64 over the canonical JSON array of the key `fields` read from `record` (a
+/// `meta.*` field from `meta`). A missing field is `null`, so records lacking it hash
+/// together.
 #[must_use]
-pub(crate) fn hash_key_fields(fields: &[FieldPath], record: &Record) -> u64 {
+pub(crate) fn hash_key_fields(fields: &[FieldPath], record: &Record, meta: &Meta) -> u64 {
     let mut canonical = String::from("[");
     for (i, path) in fields.iter().enumerate() {
         if i > 0 {
             canonical.push(',');
         }
-        write_canonical(&mut canonical, path.read(record));
+        write_canonical(&mut canonical, path.read(record, meta));
     }
     canonical.push(']');
     fnv1a64(canonical.as_bytes())

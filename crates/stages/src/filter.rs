@@ -77,7 +77,7 @@ impl Filter {
 
 impl Stage for Filter {
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
-        let matched = match self.condition.matches(&record) {
+        let matched = match self.condition.matches(&record, ctx.meta) {
             Ok(matched) => matched,
             Err(error) => return match_failure(ctx.node_id, error),
         };

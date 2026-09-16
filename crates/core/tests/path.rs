@@ -1,8 +1,9 @@
 //! Field paths: one dotted path names one record field. Under `attributes`, `resource` and
 //! `scope` the rest of the path, joined with dots, is the flat map key.
 
-use fusion_core::path::{FieldPath, FieldValue, Num, PathError};
-use fusion_core::record::Record;
+use fusion_core::meta::{IngestionTime, Meta};
+use fusion_core::path::{FieldPath, FieldValue, Num, PathError, TopLevel};
+use fusion_core::record::{Kind, Record, RecordId};
 use serde_json::{Value, json};
 
 #[test]
@@ -10,8 +11,8 @@ fn map_paths_join_the_rest_into_one_key() {
     let path = FieldPath::parse("attributes.http.status").expect("parses");
     assert_eq!(path.map_key(), Some("http.status"));
 
-    let path = FieldPath::parse("resource.tenant.id").expect("parses");
-    assert_eq!(path.map_key(), Some("tenant.id"));
+    let path = FieldPath::parse("resource.service.name").expect("parses");
+    assert_eq!(path.map_key(), Some("service.name"));
 
     let path = FieldPath::parse("resource.env").expect("parses");
     assert_eq!(path.map_key(), Some("env"));
@@ -81,16 +82,30 @@ fn record() -> Record {
             "severity_number": 17,
             "body": "disk full on /var",
             "attributes": {"http.path": "/api/v1", "http.status": 503},
-            "resource": {"tenant.id": "acme", "env": "prod"}
+            "resource": {"tenant.id": "acme", "service.name": "api", "env": "prod"}
         }"#,
     )
     .expect("record parses")
 }
 
-/// Read `path` from `record` as an owned JSON value, `None` when absent, so assertions can
-/// use `json!` literals.
+/// The `Meta` the reads below see: a different id and tenant from the record's, so a test
+/// can tell which one a path read.
+fn meta() -> Meta {
+    Meta {
+        record_id: RecordId(99),
+        tenant: "from-meta".into(),
+        ingestion_time: IngestionTime::Reported(9_000_000_000),
+        delivery_count: 2,
+    }
+}
+
+/// Read `path` from `record` (and [`meta`]) as an owned JSON value, `None` when absent, so
+/// assertions can use `json!` literals.
 fn read_from(record: &Record, path: &str) -> Option<Value> {
-    match FieldPath::parse(path).expect("parses").read(record) {
+    match FieldPath::parse(path)
+        .expect("parses")
+        .read(record, &meta())
+    {
         FieldValue::Null => None,
         FieldValue::Bool(b) => Some(json!(b)),
         FieldValue::Num(Num::Int(i)) => Some(json!(i)),
@@ -104,13 +119,17 @@ fn read_from(record: &Record, path: &str) -> Option<Value> {
 #[test]
 fn read_borrows_strings_and_views_a_structured_body() {
     let mut r = record();
-    let FieldValue::Str(text) = FieldPath::parse("severity_text").expect("parses").read(&r) else {
+    let meta = meta();
+    let FieldValue::Str(text) = FieldPath::parse("severity_text")
+        .expect("parses")
+        .read(&r, &meta)
+    else {
         panic!("severity_text is a string");
     };
     assert!(std::ptr::eq(text, r.severity_text.as_deref().expect("set")));
 
     r.body = Some(json!({"raw": "x"}));
-    let FieldValue::Json(body) = FieldPath::parse("body").expect("parses").read(&r) else {
+    let FieldValue::Json(body) = FieldPath::parse("body").expect("parses").read(&r, &meta) else {
         panic!("structured body is a view");
     };
     assert_eq!(body, &json!({"raw": "x"}));
@@ -124,7 +143,7 @@ fn read(path: &str) -> Option<Value> {
 fn read_resolves_map_keys_and_top_level_fields() {
     assert_eq!(read("attributes.http.status"), Some(json!(503)));
     assert_eq!(read("attributes.http.path"), Some(json!("/api/v1")));
-    assert_eq!(read("resource.tenant.id"), Some(json!("acme")));
+    assert_eq!(read("resource.service.name"), Some(json!("api")));
     assert_eq!(read("resource.env"), Some(json!("prod")));
     assert_eq!(read("attributes.nope"), None);
     assert_eq!(read("scope.nope"), None);
@@ -226,23 +245,32 @@ fn write_creates_or_replaces_a_map_key() {
 }
 
 #[test]
-fn write_to_id_or_kind_is_refused() {
+fn id_and_kind_are_payload_and_take_their_types() {
     let mut record = record();
+
+    write(&mut record, "id", json!(8)).expect("an id is a non-negative integer");
+    assert_eq!(record.id, Some(RecordId(8)));
+    write(&mut record, "kind", json!("metric")).expect("a kind is one of the three");
+    assert_eq!(record.kind, Kind::Metric);
+
     let before = record.clone();
-
-    let err = write(&mut record, "id", json!(8)).expect_err("id is read-only");
-    assert!(
-        matches!(err, PathError::ReadOnly { ref field } if field == "id"),
-        "{err}"
-    );
-
-    let err = write(&mut record, "kind", json!("metric")).expect_err("kind is read-only");
-    assert!(
-        matches!(err, PathError::ReadOnly { ref field } if field == "kind"),
-        "{err}"
-    );
-
+    for (path, value, expected) in [
+        ("id", json!(-1), "a non-negative integer"),
+        ("id", json!("8"), "a non-negative integer"),
+        ("kind", json!("trace"), "`log`, `metric` or `span`"),
+        ("kind", json!(1), "`log`, `metric` or `span`"),
+        ("kind", json!(null), "`log`, `metric` or `span`"),
+    ] {
+        let err = write(&mut record, path, value).expect_err("wrong type");
+        assert!(
+            matches!(err, PathError::WrongType { ref field, expected: e, .. } if field == path && e == expected),
+            "{path}: {err}"
+        );
+    }
     assert_eq!(record, before);
+
+    write(&mut record, "id", json!(null)).expect("null clears the id");
+    assert_eq!(record.id, None);
 }
 
 #[test]
@@ -270,17 +298,99 @@ fn write_of_wrong_type_is_refused_and_leaves_the_record_unchanged() {
 }
 
 #[test]
-fn write_of_array_or_object_under_a_map_key_is_refused() {
+fn a_map_key_takes_any_json_value_since_ingest_does_not_flatten() {
     let mut record = record();
-    let before = record.clone();
-    for value in [json!({"a": 1}), json!([1, 2])] {
-        let err = write(&mut record, "attributes.x", value.clone()).expect_err("maps are flat");
-        assert!(
-            matches!(err, PathError::WrongType { ref field, .. } if field == "attributes.x"),
-            "{value}: {err}"
+    for value in [json!({"a": 1}), json!([1, 2]), json!(null), json!("x")] {
+        write(&mut record, "attributes.x", value.clone()).expect("a map key takes any value");
+        assert_eq!(record.attributes.get("x"), Some(&value));
+    }
+}
+
+#[test]
+fn accepts_answers_exactly_what_write_would_without_a_record() {
+    let cases = [
+        ("id", json!(7)),
+        ("id", json!("7")),
+        ("id", json!(-1)),
+        ("kind", json!("span")),
+        ("kind", json!("LOG")),
+        ("kind", json!(null)),
+        ("severity_number", json!(4)),
+        ("severity_number", json!(4.5)),
+        ("severity_number", json!(i64::MAX)),
+        ("severity_text", json!(3)),
+        ("time_unix_nano", json!(5)),
+        ("time_unix_nano", json!(null)),
+        ("body", json!({"a": [1]})),
+        ("trace_id", json!(true)),
+        ("attributes.x", json!([1])),
+        ("meta.tenant", json!("beta")),
+    ];
+    for (path, value) in cases {
+        let parsed = FieldPath::parse(path).expect("parses");
+        let mut record = record();
+        let written = parsed.write(&mut record, value.clone());
+        assert_eq!(
+            parsed.accepts(&value),
+            written,
+            "{path} <- {value}: accepts and write agree"
         );
     }
-    assert_eq!(record, before);
+}
+
+#[test]
+fn writable_is_every_record_field_and_no_meta_path() {
+    for path in [
+        "id",
+        "kind",
+        "body",
+        "attributes.x",
+        "resource.service.name",
+    ] {
+        FieldPath::parse(path)
+            .expect("parses")
+            .writable()
+            .unwrap_or_else(|e| panic!("{path}: {e}"));
+    }
+    for path in [
+        "meta.id",
+        "meta.tenant",
+        "meta.ingestion_time",
+        "meta.delivery_count",
+    ] {
+        assert_eq!(
+            FieldPath::parse(path).expect("parses").writable(),
+            Err(PathError::ReadOnly {
+                path: path.to_owned()
+            })
+        );
+    }
+}
+
+#[test]
+fn a_path_can_be_built_from_a_field_name_or_a_map_and_any_key() {
+    assert_eq!(
+        FieldPath::top_level("severity_text"),
+        Some(TopLevel::Field(
+            FieldPath::parse("severity_text").expect("parses")
+        ))
+    );
+    for name in ["meta", "nope", "", "attributes.x"] {
+        assert_eq!(FieldPath::top_level(name), None, "{name}");
+    }
+    let Some(TopLevel::Map(attributes)) = FieldPath::top_level("attributes") else {
+        panic!("attributes is a map");
+    };
+    assert_eq!(
+        attributes.key("Event ID.code"),
+        FieldPath::parse(r#"attributes."Event ID".code"#).expect("parses")
+    );
+    for name in ["resource", "scope"] {
+        assert!(
+            matches!(FieldPath::top_level(name), Some(TopLevel::Map(_))),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -336,43 +446,34 @@ fn write_of_typed_fields_with_the_right_type_reads_back() {
 #[test]
 fn remove_deletes_the_field_and_returns_the_old_value() {
     let mut record = record();
-    let remove =
-        |record: &mut Record, path: &str| FieldPath::parse(path).expect("parses").remove(record);
+    let remove = |record: &mut Record, path: &str| {
+        FieldPath::parse(path)
+            .expect("parses")
+            .remove(record)
+            .expect("a record field can always be removed")
+    };
 
     assert_eq!(
-        remove(&mut record, "attributes.http.path").expect("removes"),
+        remove(&mut record, "attributes.http.path"),
         Some(json!("/api/v1"))
     );
     assert!(record.attributes.get("http.path").is_none());
-    assert_eq!(
-        remove(&mut record, "attributes.http.path").expect("absent is fine"),
-        None
-    );
+    assert_eq!(remove(&mut record, "attributes.http.path"), None);
 
-    assert_eq!(
-        remove(&mut record, "severity_text").expect("removes"),
-        Some(json!("ERROR"))
-    );
+    assert_eq!(remove(&mut record, "severity_text"), Some(json!("ERROR")));
     assert_eq!(record.severity_text, None);
     assert_eq!(
-        remove(&mut record, "body").expect("removes"),
+        remove(&mut record, "body"),
         Some(json!("disk full on /var"))
     );
     assert_eq!(record.body, None);
-    assert_eq!(
-        remove(&mut record, "trace_id").expect("absent is fine"),
-        None
-    );
+    assert_eq!(remove(&mut record, "trace_id"), None);
 
-    let before = record.clone();
-    for path in ["id", "kind"] {
-        let err = remove(&mut record, path).expect_err("read-only");
-        assert!(
-            matches!(err, PathError::ReadOnly { ref field } if field == path),
-            "{err}"
-        );
-    }
-    assert_eq!(record, before);
+    record.kind = Kind::Span;
+    assert_eq!(remove(&mut record, "id"), Some(json!(7)));
+    assert_eq!(record.id, None);
+    assert_eq!(remove(&mut record, "kind"), Some(json!("span")));
+    assert_eq!(record.kind, Kind::Log, "a removed kind is the wire default");
 }
 
 #[test]
@@ -481,4 +582,126 @@ fn empty_brackets_hint_the_shape_of_a_key() {
         matches!(err, PathError::BracketSyntax { ref instead } if instead == "body"),
         "{err}"
     );
+}
+
+#[test]
+fn every_kind_round_trips_through_its_wire_name() {
+    let names: Vec<&str> = Kind::ALL.into_iter().map(Kind::as_str).collect();
+    // The spec's record model names these three; a kind added to the enum fails here, and
+    // whoever extends this list amends the spec with it.
+    assert_eq!(names, ["log", "metric", "span"], "the spec's record model");
+    for kind in Kind::ALL {
+        let name = kind.as_str();
+        assert_eq!(Kind::parse(name), Some(kind), "{name}");
+        assert_eq!(
+            serde_json::to_value(kind).expect("serializes"),
+            json!(name),
+            "serde writes as_str"
+        );
+        assert_eq!(
+            serde_json::from_value::<Kind>(json!(name)).expect("deserializes"),
+            kind,
+            "serde reads as_str"
+        );
+        let mut record = record();
+        write(&mut record, "kind", json!(name)).expect("a wire name is a kind");
+        assert_eq!(
+            FieldPath::parse("kind")
+                .expect("parses")
+                .read(&record, &meta()),
+            FieldValue::Str(name)
+        );
+    }
+    for name in ["LOG", "logs", ""] {
+        assert_eq!(Kind::parse(name), None, "{name:?} is not a kind");
+        assert!(
+            serde_json::from_value::<Kind>(json!(name)).is_err(),
+            "{name:?} is not a kind on the wire either"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_field_is_refused_listing_every_root_in_reading_order() {
+    let err = FieldPath::parse("nonsense").expect_err("not a root");
+    assert_eq!(
+        err.to_string(),
+        "`nonsense` is not a record field; instead use one of id, kind, body, severity_text, \
+         severity_number, time_unix_nano, observed_time_unix_nano, trace_id, span_id, \
+         attributes.<key>, resource.<key>, scope.<key>, meta.<field>"
+    );
+}
+
+#[test]
+fn meta_paths_read_the_records_meta_not_the_record() {
+    assert_eq!(read("meta.id"), Some(json!(99)));
+    assert_eq!(read("meta.tenant"), Some(json!("from-meta")));
+    assert_eq!(read("meta.ingestion_time"), Some(json!(9_000_000_000_u64)));
+    assert_eq!(read("meta.delivery_count"), Some(json!(2)));
+    assert_eq!(
+        read("id"),
+        Some(json!(7)),
+        "the record's own id is still there"
+    );
+    assert_eq!(read("resource.tenant.id"), Some(json!("acme")));
+}
+
+#[test]
+fn a_meta_path_is_one_field_and_displays_as_written() {
+    for text in [
+        "meta.id",
+        "meta.tenant",
+        "meta.ingestion_time",
+        "meta.delivery_count",
+    ] {
+        let path = FieldPath::parse(text).expect("parses");
+        assert!(path.writable().is_err(), "{text}");
+        assert_eq!(path.map_key(), None, "{text}");
+        assert_eq!(path.to_string(), text);
+    }
+}
+
+#[test]
+fn meta_alone_or_with_an_unknown_field_lists_the_meta_fields() {
+    for text in ["meta", "meta.nope", "meta.tenant.id", "meta.Tenant"] {
+        let err = FieldPath::parse(text).expect_err(text);
+        match &err {
+            PathError::UnknownMetaField { path } => assert_eq!(path, text),
+            other => panic!("{text}: {other:?}"),
+        }
+        assert!(
+            err.to_string()
+                .contains("`meta.id`, `meta.tenant`, `meta.ingestion_time`, `meta.delivery_count`"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn a_meta_path_refuses_every_write_and_removal() {
+    let path = FieldPath::parse("meta.tenant").expect("parses");
+    let mut record = record();
+    let before = record.clone();
+    let err = path
+        .write(&mut record, json!("beta"))
+        .expect_err("read-only");
+    assert_eq!(
+        err,
+        PathError::ReadOnly {
+            path: "meta.tenant".to_owned()
+        }
+    );
+    assert!(
+        err.to_string().contains(
+            "instead copy it into a record field: `copy {from: meta.tenant, to: <field>}`"
+        ),
+        "{err}"
+    );
+    assert_eq!(
+        path.remove(&mut record),
+        Err(PathError::ReadOnly {
+            path: "meta.tenant".to_owned()
+        })
+    );
+    assert_eq!(record, before, "the record is unchanged");
 }

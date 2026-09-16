@@ -6,8 +6,9 @@ mod common;
 
 use common::{WAIT, for_each_worker_count, start};
 use fusion_core::memory::AckOutcome;
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::CounterMetric;
 use fusion_core::record::Record;
+use fusion_core::state::StateStore as _;
 use serde_json::{Value, json};
 
 /// The issue's example, behind a filter, into one sink.
@@ -49,10 +50,9 @@ fn config(node_lines: &str, ops: &str) -> String {
     )
 }
 
-/// A tenant `acme` record from a JSON object, with `id` and `resource.tenant.id` filled in.
+/// A record from a JSON object, with `id` filled in. The harness pushes it as tenant `acme`.
 fn record(id: u64, mut json: Value) -> Record {
     json["id"] = json!(id);
-    json["resource"]["tenant.id"] = json!("acme");
     Record::from_json(&json.to_string()).expect("record parses")
 }
 
@@ -60,7 +60,7 @@ fn record(id: u64, mut json: Value) -> Record {
 /// received in id order plus the harness for counter assertions.
 fn run(yaml: &str, workers: usize, records: Vec<Record>) -> (Vec<Record>, common::Harness) {
     let h = start(yaml, workers);
-    let probes: Vec<_> = records.into_iter().map(|r| h.source.push(r)).collect();
+    let probes: Vec<_> = records.into_iter().map(|r| h.push(r)).collect();
     for (i, probe) in probes.iter().enumerate() {
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "record {i}");
     }
@@ -86,7 +86,7 @@ fn filter_then_edit_then_sink_acks_every_record_and_the_sink_sees_the_edits() {
         let h = start(EXAMPLE, workers);
         let probes: Vec<_> = (1..=100)
             .map(|id| {
-                h.source.push(record(
+                h.push(record(
                     id,
                     json!({
                         "severity_text": if id % 2 == 0 { "ERROR" } else { "INFO" },
@@ -118,9 +118,9 @@ fn filter_then_edit_then_sink_acks_every_record_and_the_sink_sees_the_edits() {
             assert_eq!(r.attributes.get("user.email"), Some(&json!(ALICE_SHA256)));
             assert_eq!(r.attributes.get("debug"), None);
         }
-        assert_eq!(h.counter(Metric::RecordsIn, &STAGE), 50);
-        assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 50);
-        assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsIn, &STAGE), 50);
+        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 50);
+        assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
         h.finish();
     });
 }
@@ -157,7 +157,7 @@ fn each_op_produces_the_expected_record() {
     for (ops, before, after) in cases {
         let (out, h) = run(&config("", ops), 1, vec![record(1, before)]);
         assert_eq!(out, vec![record(1, after)], "{ops}");
-        assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
         h.finish();
     }
 }
@@ -202,7 +202,7 @@ fn ops_run_in_order_on_the_same_record() {
     assert_eq!(out[0].attributes.get("b"), Some(&json!("set")));
     assert_eq!(
         h.counter(
-            Metric::EditUnapplied,
+            CounterMetric::EditUnapplied,
             &unapplied("rename", "attributes.a", "absent")
         ),
         1
@@ -253,27 +253,27 @@ fn an_absent_source_leaves_the_record_and_counts_absent_for_that_op_and_field() 
         );
         assert_eq!(
             h.counter(
-                Metric::EditUnapplied,
+                CounterMetric::EditUnapplied,
                 &unapplied("rename", "attributes.http.path", "absent")
             ),
             1
         );
         assert_eq!(
             h.counter(
-                Metric::EditUnapplied,
+                CounterMetric::EditUnapplied,
                 &unapplied("copy", "attributes.nothing", "absent")
             ),
             1
         );
         assert_eq!(
             h.counter(
-                Metric::EditUnapplied,
+                CounterMetric::EditUnapplied,
                 &unapplied("hash", "attributes.nil", "absent")
             ),
             1
         );
-        assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 1);
-        assert_eq!(h.counter(Metric::RecordsDropped, &STAGE), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsDropped, &STAGE), 0);
         h.finish();
     });
 }
@@ -282,29 +282,43 @@ fn an_absent_source_leaves_the_record_and_counts_absent_for_that_op_and_field() 
 fn a_target_that_refuses_the_value_leaves_the_record_and_counts_type() {
     let yaml = config(
         "",
-        "      - copy: { from: body, to: severity_number }\n      - rename: { from: body, to: attributes.raw }\n      - hash: { field: attributes.list }\n",
+        "      - copy: { from: body, to: severity_number }\n      - hash: { field: attributes.list }\n",
     );
     let before = json!({"body": {"nested": true}, "attributes": {"list": [1, 2]}});
     let (out, h) = run(&yaml, 1, vec![record(1, before.clone())]);
     assert_eq!(out, vec![record(1, before)], "record unchanged");
     assert_eq!(
-        h.counter(Metric::EditUnapplied, &unapplied("copy", "body", "type")),
+        h.counter(
+            CounterMetric::EditUnapplied,
+            &unapplied("copy", "body", "type")
+        ),
         1,
         "a composite cannot go into severity_number"
     );
     assert_eq!(
-        h.counter(Metric::EditUnapplied, &unapplied("rename", "body", "type")),
-        1,
-        "a composite cannot go under a map key, and body is still there"
-    );
-    assert_eq!(
         h.counter(
-            Metric::EditUnapplied,
+            CounterMetric::EditUnapplied,
             &unapplied("hash", "attributes.list", "type")
         ),
         1
     );
-    assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
+    assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
+    h.finish();
+}
+
+#[test]
+fn a_composite_body_renames_under_a_map_key_since_core_takes_any_value_there() {
+    let yaml = config("", "      - rename: { from: body, to: attributes.raw }\n");
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": {"nested": true}}))]);
+    assert_eq!(out[0].body, None);
+    assert_eq!(out[0].attributes.get("raw"), Some(&json!({"nested": true})));
+    assert_eq!(
+        h.counter(
+            CounterMetric::EditUnapplied,
+            &unapplied("rename", "body", "type")
+        ),
+        0
+    );
     h.finish();
 }
 
@@ -350,7 +364,7 @@ fn on_unapplied_drop_drops_with_reason_edit_unapplied_and_acks() {
         assert_eq!(out[0].attributes.get("after"), Some(&json!("ran")));
         assert_eq!(
             h.counter(
-                Metric::RecordsDropped,
+                CounterMetric::RecordsDropped,
                 &[
                     ("tenant", "acme"),
                     ("stage", "normalise"),
@@ -361,13 +375,13 @@ fn on_unapplied_drop_drops_with_reason_edit_unapplied_and_acks() {
         );
         assert_eq!(
             h.counter(
-                Metric::EditUnapplied,
+                CounterMetric::EditUnapplied,
                 &unapplied("rename", "attributes.a", "absent")
             ),
             1
         );
-        assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 1);
-        assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
+        assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
         h.finish();
     });
 }
@@ -396,8 +410,104 @@ fn edit_never_errors_whatever_the_record_holds() {
     );
     let (out, h) = run(&yaml, 4, mixed);
     assert_eq!(out.len(), 5);
-    assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
-    assert_eq!(h.counter(Metric::RecordsDropped, &STAGE), 0);
-    assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 5);
+    assert_eq!(h.counter(CounterMetric::RecordsErrored, &STAGE), 0);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &STAGE), 0);
+    assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 5);
     h.finish();
+}
+
+const RETENANT_THEN_DEDUPE: &str = r#"
+name: ingest
+nodes:
+  - id: normalise
+    type: edit
+    ops:
+      - set: { field: resource.tenant.id, value: other }
+  - id: dedupe_body
+    type: dedupe
+    from: normalise
+    key: [body]
+    window: 10s
+  - id: out
+    type: sink.memory
+    from: dedupe_body
+"#;
+
+#[test]
+fn a_tenant_rewritten_by_edit_is_payload_and_labels_and_state_keys_keep_the_meta_tenant() {
+    for_each_worker_count(|workers| {
+        let (out, h) = run(
+            RETENANT_THEN_DEDUPE,
+            workers,
+            vec![record(1, json!({"body": "x"}))],
+        );
+        assert_eq!(out[0].resource.get("tenant.id"), Some(&json!("other")));
+        assert_eq!(
+            h.counter(CounterMetric::RecordsOut, &STAGE),
+            1,
+            "workers={workers}"
+        );
+        assert_eq!(
+            h.counter(
+                CounterMetric::RecordsOut,
+                &[("tenant", "acme"), ("stage", "out")]
+            ),
+            1,
+            "workers={workers}"
+        );
+        let keys = h.state.keys();
+        assert_eq!(keys.len(), 1, "workers={workers}");
+        assert!(
+            keys[0].starts_with("ingest:acme:dedupe_body:"),
+            "{keys:?} workers={workers}"
+        );
+        h.finish();
+    });
+}
+
+#[test]
+fn id_and_kind_rewritten_by_edit_are_payload_and_the_walk_keeps_the_records_meta() {
+    const REKIND: &str = r#"
+name: ingest
+nodes:
+  - id: normalise
+    type: edit
+    ops:
+      - set: { field: kind, value: span }
+      - delete: { fields: [id] }
+  - id: dedupe_body
+    type: dedupe
+    from: normalise
+    key: [body]
+    window: 10s
+  - id: out
+    type: sink.memory
+    from: dedupe_body
+"#;
+    for_each_worker_count(|workers| {
+        let h = start(REKIND, workers);
+        for id in [1, 2] {
+            let probe = h.push(record(id, json!({"body": "x"})));
+            assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
+        }
+        let out = h.sinks.records("out");
+        assert_eq!(
+            out.len(),
+            1,
+            "the second is the first's repeat: workers={workers}"
+        );
+        assert_eq!(out[0].id, None, "the sink writes the payload");
+        assert_eq!(out[0].kind, fusion_core::record::Kind::Span);
+        let holder = h
+            .state
+            .get(&h.state.keys()[0])
+            .expect("store answers")
+            .expect("key held");
+        assert!(
+            holder.starts_with(b"1 "),
+            "the window's holder is Meta's record id: {:?} workers={workers}",
+            String::from_utf8_lossy(&holder)
+        );
+        h.finish();
+    });
 }

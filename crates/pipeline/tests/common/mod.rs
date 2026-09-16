@@ -1,6 +1,7 @@
 //! The engine harness the trait-boundary tests share: a YAML config compiled with the
 //! default registry plus an in-memory sink, an in-memory source to push envelopes through,
-//! an in-memory state store, and the sinks to assert on.
+//! an in-memory state store, and the sinks to assert on. It also owns where `deploy/` is,
+//! so a test that drives a shipped config does not spell the path itself.
 
 #![allow(dead_code)]
 
@@ -8,13 +9,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fusion_core::engine::Engine;
-use fusion_core::memory::{MemoryInput, MemorySinks, MemorySource, MemoryStateStore};
-use fusion_core::metrics::{InMemoryRecorder, Metric, Metrics};
+use fusion_core::memory::{AckProbe, MemoryInput, MemorySinks, MemorySource, MemoryStateStore};
+use fusion_core::meta::{Arrival, IngestionTime};
+use fusion_core::metrics::{CounterMetric, HistogramMetric, InMemoryRecorder, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_core::state::StateStoreFactory;
 use fusion_pipeline::default_registry;
+
+/// A config shipped under `deploy/`.
+pub fn deploy_config(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../deploy")
+        .join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("deploy/{name} is readable: {err}"))
+}
 
 /// How long a test waits for an ack handle to settle.
 pub const WAIT: Duration = Duration::from_secs(5);
@@ -95,27 +105,16 @@ fn launch(
     }
 }
 
-/// A tenant `acme` record with `id` and `body`, the shape the dedupe tests push.
-pub fn acme_record(id: u64, body: &str) -> Record {
-    Record::from_json(&format!(
-        r#"{{"id": {id}, "body": "{body}", "resource": {{"tenant.id": "acme"}}}}"#
-    ))
-    .expect("record parses")
+/// A record with `id` and `body`, the shape the dedupe tests push. It carries no tenant and
+/// no time: those are the arrival's, given by [`Harness::push`] and its siblings.
+pub fn body_record(id: u64, body: &str) -> Record {
+    Record::from_json(&format!(r#"{{"id": {id}, "body": "{body}"}}"#)).expect("record parses")
 }
 
-/// [`acme_record`] with an explicit ingestion time (`observed_time_unix_nano`).
-pub fn acme_record_observed_at(id: u64, body: &str, observed_unix_nanos: u64) -> Record {
-    Record::from_json(&format!(
-        r#"{{"id": {id}, "body": "{body}", "observed_time_unix_nano": {observed_unix_nanos},
-             "resource": {{"tenant.id": "acme"}}}}"#
-    ))
-    .expect("record parses")
-}
-
-/// [`acme_record`] with `resource.host` set, or absent for `None`, the shape the
+/// [`body_record`] with `resource.host` set, or absent for `None`, the shape the
 /// `consistent` sampling tests push.
-pub fn acme_host_record(id: u64, host: Option<&str>) -> Record {
-    let mut record = acme_record(id, "x");
+pub fn host_record(id: u64, host: Option<&str>) -> Record {
+    let mut record = body_record(id, "x");
     if let Some(host) = host {
         record.resource.insert(
             "host".to_owned(),
@@ -123,6 +122,19 @@ pub fn acme_host_record(id: u64, host: Option<&str>) -> Record {
         );
     }
     record
+}
+
+/// The tenant [`Harness::push`] gives every record, as a NATS source reading `logs.acme.>`
+/// would.
+pub const TENANT: &str = "acme";
+
+/// What a source subscribed to `tenant`'s subjects says about a first delivery: the tenant,
+/// and no time, so the engine reads the worker clock.
+pub fn arrival_as(tenant: &str) -> Arrival {
+    Arrival {
+        tenant: Some(tenant.to_owned()),
+        ..Arrival::default()
+    }
 }
 
 /// The labels of a `dedupe` drop by the node `dedupe_body` for tenant `acme`.
@@ -133,6 +145,28 @@ pub const DEDUPE_DROP: [(&str, &str); 3] = [
 ];
 
 impl Harness {
+    /// Push `record` as a first delivery for tenant [`TENANT`], with no transport time.
+    pub fn push(&self, record: Record) -> AckProbe {
+        self.push_as(TENANT, record)
+    }
+
+    /// Push `record` as a first delivery for `tenant`, with no transport time.
+    pub fn push_as(&self, tenant: &str, record: Record) -> AckProbe {
+        self.source.push_arrival(record, arrival_as(tenant))
+    }
+
+    /// Push `record` as a first delivery for tenant [`TENANT`] that entered the transport at
+    /// `ingestion_unix_nanos`, as the JetStream publish time says.
+    pub fn push_at(&self, record: Record, ingestion_unix_nanos: u64) -> AckProbe {
+        self.source.push_arrival(
+            record,
+            Arrival {
+                ingestion_time: Some(IngestionTime::Reported(ingestion_unix_nanos)),
+                ..arrival_as(TENANT)
+            },
+        )
+    }
+
     /// Close the source and wait for the workers to drain.
     pub fn finish(self) {
         drop(self.source);
@@ -140,12 +174,12 @@ impl Harness {
     }
 
     /// The counter `metric` under exactly `labels`, zero if never counted.
-    pub fn counter(&self, metric: Metric, labels: &[(&str, &str)]) -> u64 {
+    pub fn counter(&self, metric: CounterMetric, labels: &[(&str, &str)]) -> u64 {
         self.recorder.counter(metric, labels)
     }
 
     /// Every sample of the histogram `metric` under exactly `labels`.
-    pub fn samples(&self, metric: Metric, labels: &[(&str, &str)]) -> Vec<f64> {
+    pub fn samples(&self, metric: HistogramMetric, labels: &[(&str, &str)]) -> Vec<f64> {
         self.recorder.samples(metric, labels)
     }
 

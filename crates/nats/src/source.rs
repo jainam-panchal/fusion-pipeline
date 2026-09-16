@@ -6,14 +6,23 @@
 //!   url: nats://127.0.0.1:4222   # overridden by NATS_URL
 //!   stream: LOGS
 //!   consumer: pipeline           # pull, explicit ack, ack_wait 30s, max_deliver 5
+//!   tenant_prefix: logs          # {tenant_prefix}.{tenant}.> names the tenant; the default
 //! ```
 //!
-//! Each message is decoded as one JSON record, stamped with the tenant from its subject when
-//! the record carries none and with the JetStream publish time as `observed_time_unix_nano`
-//! when it carries no timestamp at all, and handed to the engine with an ack handle that acks
-//! or naks the JetStream message. The publish time is the server's and does not change on
-//! redelivery, so stateful stages that measure windows in ingestion time see the same value
-//! every time the record comes back.
+//! Each message is decoded as one JSON record and handed to the engine, untouched, with an
+//! ack handle that acks or naks the JetStream message. What the transport says about the
+//! message goes beside the record as its [`fusion_core::meta::Arrival`], built by
+//! [`crate::headers::arrival`]: the subject's tenant (`{tenant_prefix}.{tenant}.>`), else an
+//! upstream pipeline's `Fusion-Tenant`; an upstream pipeline's `Fusion-Ingestion-Time`, else
+//! the JetStream publish time; and the delivery count. The engine resolves the record's
+//! `Meta` from it alone (ADR 0005). Nothing is read from or written into the record. The
+//! publish time is the server's and does not change on redelivery, so stateful stages that
+//! measure windows in ingestion time see the same value every time the record comes back.
+//!
+//! A pipeline header that does not parse is ignored, reported on stderr and counted once on
+//! `source_invalid_headers_total` under the tenant the record's `Meta` gets; the message is
+//! walked as if the header were absent. A `Fusion-Tenant` is not read when the subject
+//! names a valid tenant, so a header the subject overrides is never counted.
 //!
 //! A payload that is not a record is nak'd like any other failure and reported on stderr; it
 //! runs out `max_deliver` the same way a record without an id does, which is where the
@@ -23,9 +32,10 @@
 //! message's delivery count: 1s on the first failure, doubling to [`MAX_NAK_DELAY`], so a
 //! sink that is down does not burn through `max_deliver` in milliseconds.
 //!
-//! A message delivered more than once counts on `source_redeliveries_total`, and a nak the
-//! source issues itself (an undecodable payload) on `source_naks_total`, both under the
-//! tenant the subject names.
+//! The engine counts a redelivered record on `source_redeliveries_total` under its `Meta`
+//! tenant. A payload that does not decode has no record, so the source counts it itself,
+//! the redelivery and the nak it issues (`source_naks_total`), under the tenant its arrival
+//! gives, which is the tenant `Meta` would have had.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,13 +43,14 @@ use std::time::Duration;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{AckKind, message::Acker};
 use fusion_core::io::{AckHandle, Envelope, Intake, Source, SourceError};
+use fusion_core::meta::Meta;
 use fusion_core::metrics::Metrics;
 use fusion_core::record::Record;
 use futures::StreamExt;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
-use crate::subject::{stamp_tenant, tenant_from_subject};
+use crate::headers::{self, InvalidHeader, Received};
 
 /// Longest redelivery delay [`nak_delay`] asks for. A consumer with `max_deliver` 5, as the
 /// compose stack creates, never reaches it (1s, 2s, 4s, 8s, then the final delivery); the cap
@@ -64,6 +75,8 @@ pub struct NatsSource {
     consumer: PullConsumer,
     shutdown: watch::Receiver<bool>,
     metrics: Metrics,
+    /// The first token of the subjects that name a tenant.
+    tenant_prefix: String,
 }
 
 impl NatsSource {
@@ -72,12 +85,14 @@ impl NatsSource {
         consumer: PullConsumer,
         shutdown: watch::Receiver<bool>,
         metrics: Metrics,
+        tenant_prefix: String,
     ) -> Self {
         Self {
             runtime,
             consumer,
             shutdown,
             metrics,
+            tenant_prefix,
         }
     }
 
@@ -111,19 +126,31 @@ impl NatsSource {
                 .as_ref()
                 .and_then(|info| u64::try_from(info.published.unix_timestamp_nanos()).ok());
             let (message, acker) = message.split();
-            let subject_tenant = tenant_from_subject(&message.subject);
-            let tenant = subject_tenant.unwrap_or(Metrics::UNKNOWN_TENANT);
-            if delivered > 1 {
-                self.metrics.source_redelivery(tenant);
-            }
-            let record = match decode(subject_tenant, published, &message.payload) {
+            let (arrival, invalid_headers) = headers::arrival(
+                &self.tenant_prefix,
+                Received {
+                    subject: &message.subject,
+                    headers: message.headers.as_ref(),
+                    published,
+                    delivered,
+                },
+            );
+            // The tenant the engine will give the record, so every series the source counts
+            // agrees with the record's others; for a payload that does not decode, the only
+            // tenant there is.
+            let tenant = Meta::tenant_of(&arrival);
+            self.report_invalid_headers(&message.subject, &invalid_headers, &tenant);
+            let record = match serde_json::from_slice::<Record>(&message.payload) {
                 Ok(record) => record,
                 Err(err) => {
+                    if delivered > 1 {
+                        self.metrics.source_redelivery(&tenant);
+                    }
                     eprintln!(
                         "nats source: nak of undecodable message on `{}` (delivery {delivered}): {err}",
                         message.subject
                     );
-                    self.metrics.source_nak(tenant);
+                    self.metrics.source_nak(&tenant);
                     // Settled here, on the runtime: `NatsAck` blocks on the runtime and
                     // cannot be used from inside it.
                     let nak = AckKind::Nak(Some(nak_delay(delivered)));
@@ -140,35 +167,20 @@ impl NatsSource {
             });
             // On a closed intake the envelope, and its ack handle, are dropped unsettled; the
             // message redelivers after `ack_wait`.
-            intake.send(Envelope { record, ack })?;
+            intake.send(Envelope {
+                record,
+                arrival,
+                ack,
+            })?;
         }
     }
-}
 
-/// Decode one record, stamping `tenant` (from the subject) when the record carries none and
-/// `published` (the JetStream publish time) when it carries no timestamp.
-fn decode(
-    tenant: Option<&str>,
-    published: Option<u64>,
-    payload: &[u8],
-) -> Result<Record, serde_json::Error> {
-    let mut record: Record = serde_json::from_slice(payload)?;
-    if let Some(tenant) = tenant {
-        stamp_tenant(&mut record, tenant);
-    }
-    if let Some(published) = published {
-        stamp_ingestion_time(&mut record, published);
-    }
-    Ok(record)
-}
-
-/// Set `observed_time_unix_nano` to `published_unix_nanos` when the record has neither
-/// `observed_time_unix_nano` nor `time_unix_nano`. A record that says when it was observed
-/// or when it happened keeps its own word; only a record with no notion of time gets the
-/// server's.
-fn stamp_ingestion_time(record: &mut Record, published_unix_nanos: u64) {
-    if record.observed_time_unix_nano.is_none() && record.time_unix_nano.is_none() {
-        record.observed_time_unix_nano = Some(published_unix_nanos);
+    /// Log and count every pipeline header the source ignored, under `tenant`.
+    fn report_invalid_headers(&self, subject: &str, invalid: &[InvalidHeader], tenant: &str) {
+        for problem in invalid {
+            eprintln!("nats source: ignored a pipeline header on `{subject}`: {problem}");
+            self.metrics.source_invalid_header(tenant);
+        }
     }
 }
 

@@ -2,8 +2,9 @@
 //! against records in the OTLP-semantic wire shape.
 
 use fusion_core::condition::{Condition, ConditionError};
+use fusion_core::meta::{IngestionTime, Meta};
 use fusion_core::path::PathError;
-use fusion_core::record::Record;
+use fusion_core::record::{Record, RecordId};
 
 fn record() -> Record {
     Record::from_json(
@@ -23,10 +24,21 @@ fn record() -> Record {
     .expect("record parses")
 }
 
+/// The record's `Meta`: tenant `globex`, where the record's own `resource.tenant.id` says
+/// `acme`, so a condition shows which one it read.
+fn meta() -> Meta {
+    Meta {
+        record_id: RecordId(7),
+        tenant: "globex".into(),
+        ingestion_time: IngestionTime::Reported(5),
+        delivery_count: 1,
+    }
+}
+
 fn eval(expr: &str) -> bool {
     Condition::parse(expr)
         .unwrap_or_else(|e| panic!("{expr}: {e}"))
-        .matches(&record())
+        .matches(&record(), &meta())
 }
 
 #[test]
@@ -133,7 +145,7 @@ fn parentheses_group() {
 fn dotted_paths_name_flat_map_keys() {
     assert!(eval(r#"attributes.http.path == "/api/v1""#));
     assert!(eval("attributes.http.status >= 500"));
-    assert!(eval(r#"resource.tenant.id == "acme""#));
+    assert!(eval(r#"resource.service.name == "api""#));
     assert!(eval(r#"resource.service.name == "api""#));
     assert!(eval(r#"body == "disk full on /var""#));
     assert!(eval(r#"kind == "log""#));
@@ -271,7 +283,7 @@ fn quoted_segment_escapes_match_the_path_rule() {
     );
     let c =
         Condition::parse(r#"attributes."a[0]" == 1"#).expect("brackets inside quotes are key text");
-    assert!(!c.matches(&record()));
+    assert!(!c.matches(&record(), &meta()));
 }
 
 #[test]
@@ -295,4 +307,13 @@ fn unterminated_quote_inside_a_bracket_is_the_bracket_error_for_both_quote_kinds
             "{expr}: {err}"
         );
     }
+}
+
+#[test]
+fn a_meta_path_decides_on_the_pipelines_value_not_the_payloads() {
+    assert!(eval(r#"meta.tenant == "globex""#));
+    assert!(!eval(r#"meta.tenant == "acme""#));
+    assert!(eval(r#"resource.tenant.id == "acme""#));
+    assert!(eval("meta.delivery_count == 1 and meta.ingestion_time < 6"));
+    assert!(eval("meta.id == 7 and not meta.delivery_count > 1"));
 }

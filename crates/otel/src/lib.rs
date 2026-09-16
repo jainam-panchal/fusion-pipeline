@@ -1,10 +1,12 @@
 //! OTLP telemetry wiring: the [`Recorder`] that turns the engine's measurements into
 //! OpenTelemetry instruments, and the exporter that ships them to the collector.
 //!
-//! Every metric in [`Metric::ALL`] becomes one instrument, created up front and named as the
-//! spec spells it; a counter for `*_total`, an `f64` histogram in seconds with sub-second
-//! buckets for `*_seconds`. Labels become attributes with the same names, so the collector's
-//! Prometheus exporter surfaces `records_dropped_total{tenant, stage, reason}` verbatim.
+//! Every metric becomes one instrument, created up front and named as the spec spells it: a
+//! counter for each [`CounterMetric`], an `f64` histogram in seconds with sub-second buckets
+//! for each [`HistogramMetric`]. The instruments sit in arrays indexed by the metric, built
+//! from the closed sets, so a recorded metric always has its instrument. Labels become
+//! attributes with the same names, so the collector's Prometheus exporter surfaces
+//! `records_dropped_total{tenant, stage, reason}` verbatim.
 //!
 //! The process also reports its own CPU time, resident memory and thread count; see
 //! [`process`].
@@ -22,9 +24,7 @@
 
 pub mod process;
 
-use std::collections::BTreeMap;
-
-use fusion_core::metrics::{Labels, Metric, MetricKind, Metrics, Recorder};
+use fusion_core::metrics::{CounterMetric, HistogramMetric, Labels, Metrics, Recorder};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _};
 use opentelemetry_otlp::{MetricExporter, OTEL_EXPORTER_OTLP_ENDPOINT};
@@ -61,44 +61,31 @@ pub enum OtelError {
     Shutdown(#[source] opentelemetry_sdk::error::OTelSdkError),
 }
 
-/// A [`Recorder`] over OpenTelemetry instruments, one per [`Metric`].
+/// A [`Recorder`] over OpenTelemetry instruments, one per metric, indexed by it.
 #[derive(Debug, Clone)]
 pub struct OtlpRecorder {
-    counters: BTreeMap<Metric, Counter<u64>>,
-    histograms: BTreeMap<Metric, Histogram<f64>>,
+    counters: [Counter<u64>; CounterMetric::ALL.len()],
+    histograms: [Histogram<f64>; HistogramMetric::ALL.len()],
 }
 
 impl OtlpRecorder {
     /// Create every instrument on `meter`.
     #[must_use]
     pub fn new(meter: &Meter) -> Self {
-        let mut counters = BTreeMap::new();
-        let mut histograms = BTreeMap::new();
-        for metric in Metric::ALL {
-            match metric.kind() {
-                MetricKind::Counter => {
-                    counters.insert(metric, meter.u64_counter(metric.as_str()).build());
-                }
-                MetricKind::Histogram => {
-                    let boundaries = if metric == Metric::EndToEnd {
-                        END_TO_END_BOUNDARIES.to_vec()
-                    } else {
-                        SECONDS_BOUNDARIES.to_vec()
-                    };
-                    histograms.insert(
-                        metric,
-                        meter
-                            .f64_histogram(metric.as_str())
-                            .with_unit("s")
-                            .with_boundaries(boundaries)
-                            .build(),
-                    );
-                }
-            }
-        }
         Self {
-            counters,
-            histograms,
+            counters: CounterMetric::ALL.map(|metric| meter.u64_counter(metric.as_str()).build()),
+            histograms: HistogramMetric::ALL.map(|metric| {
+                let boundaries = if metric == HistogramMetric::EndToEnd {
+                    END_TO_END_BOUNDARIES.to_vec()
+                } else {
+                    SECONDS_BOUNDARIES.to_vec()
+                };
+                meter
+                    .f64_histogram(metric.as_str())
+                    .with_unit("s")
+                    .with_boundaries(boundaries)
+                    .build()
+            }),
         }
     }
 }
@@ -111,16 +98,13 @@ fn attributes(labels: &Labels<'_>) -> Vec<KeyValue> {
 }
 
 impl Recorder for OtlpRecorder {
-    fn count(&self, metric: Metric, labels: &Labels<'_>, by: u64) {
-        if let Some(counter) = self.counters.get(&metric) {
-            counter.add(by, &attributes(labels));
-        }
+    fn count(&self, metric: CounterMetric, labels: &Labels<'_>, by: u64) {
+        // `ALL` lists every value in declaration order, so the value is its own index.
+        self.counters[metric as usize].add(by, &attributes(labels));
     }
 
-    fn observe(&self, metric: Metric, labels: &Labels<'_>, value: f64) {
-        if let Some(histogram) = self.histograms.get(&metric) {
-            histogram.record(value, &attributes(labels));
-        }
+    fn observe(&self, metric: HistogramMetric, labels: &Labels<'_>, value: f64) {
+        self.histograms[metric as usize].record(value, &attributes(labels));
     }
 }
 

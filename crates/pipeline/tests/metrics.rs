@@ -5,7 +5,7 @@
 mod common;
 
 use fusion_core::memory::AckOutcome;
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::CounterMetric;
 use fusion_core::record::Record;
 
 use common::{WAIT, for_each_worker_count, start};
@@ -51,27 +51,24 @@ fn a_record_that_reaches_a_sink_is_counted_in_and_out_of_every_node_it_touched()
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
 
-        assert_eq!(
-            h.source.push(record(1, "ERROR")).wait(WAIT),
-            Some(AckOutcome::Ack)
-        );
+        assert_eq!(h.push(record(1, "ERROR")).wait(WAIT), Some(AckOutcome::Ack));
 
         for stage in ["keep_errors", "out"] {
             let labels = [("tenant", "acme"), ("stage", stage)];
             assert_eq!(
-                h.counter(Metric::RecordsIn, &labels),
+                h.counter(CounterMetric::RecordsIn, &labels),
                 1,
                 "in {stage} workers={workers}"
             );
             assert_eq!(
-                h.counter(Metric::RecordsOut, &labels),
+                h.counter(CounterMetric::RecordsOut, &labels),
                 1,
                 "out {stage} workers={workers}"
             );
         }
         assert_eq!(
             h.counter(
-                Metric::RecordsDropped,
+                CounterMetric::RecordsDropped,
                 &[
                     ("tenant", "acme"),
                     ("stage", "keep_errors"),
@@ -90,21 +87,22 @@ fn a_filtered_record_is_counted_in_but_dropped_with_reason_filter_and_never_leav
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
 
-        assert_eq!(
-            h.source.push(record(1, "INFO")).wait(WAIT),
-            Some(AckOutcome::Ack)
-        );
+        assert_eq!(h.push(record(1, "INFO")).wait(WAIT), Some(AckOutcome::Ack));
 
         let stage = [("tenant", "acme"), ("stage", "keep_errors")];
-        assert_eq!(h.counter(Metric::RecordsIn, &stage), 1, "workers={workers}");
         assert_eq!(
-            h.counter(Metric::RecordsOut, &stage),
+            h.counter(CounterMetric::RecordsIn, &stage),
+            1,
+            "workers={workers}"
+        );
+        assert_eq!(
+            h.counter(CounterMetric::RecordsOut, &stage),
             0,
             "workers={workers}"
         );
         assert_eq!(
             h.counter(
-                Metric::RecordsDropped,
+                CounterMetric::RecordsDropped,
                 &[
                     ("tenant", "acme"),
                     ("stage", "keep_errors"),
@@ -115,7 +113,10 @@ fn a_filtered_record_is_counted_in_but_dropped_with_reason_filter_and_never_leav
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::RecordsIn, &[("tenant", "acme"), ("stage", "out")]),
+            h.counter(
+                CounterMetric::RecordsIn,
+                &[("tenant", "acme"), ("stage", "out")]
+            ),
             0
         );
         h.finish();
@@ -129,11 +130,11 @@ fn a_route_default_of_drop_is_counted_with_reason_route_default_drop() {
 
         let mut mac = record(1, "ERROR");
         mac.resource.insert("log.format".to_owned(), "Mac".into());
-        assert_eq!(h.source.push(mac).wait(WAIT), Some(AckOutcome::Ack));
+        assert_eq!(h.push(mac).wait(WAIT), Some(AckOutcome::Ack));
 
         assert_eq!(
             h.counter(
-                Metric::RecordsDropped,
+                CounterMetric::RecordsDropped,
                 &[
                     ("tenant", "acme"),
                     ("stage", "by_format"),
@@ -148,7 +149,7 @@ fn a_route_default_of_drop_is_counted_with_reason_route_default_drop() {
 }
 
 #[test]
-fn a_record_without_a_tenant_is_counted_under_tenant_unknown() {
+fn a_record_whose_source_names_no_tenant_is_counted_under_tenant_unknown() {
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
 
@@ -159,7 +160,7 @@ fn a_record_without_a_tenant_is_counted_under_tenant_unknown() {
 
         assert_eq!(
             h.counter(
-                Metric::RecordsIn,
+                CounterMetric::RecordsIn,
                 &[("tenant", "unknown"), ("stage", "keep_errors")]
             ),
             1,
@@ -176,11 +177,11 @@ fn a_record_without_an_id_is_dropped_at_the_source_with_reason_missing_id_and_na
 
         let mut no_id = record(1, "ERROR");
         no_id.id = None;
-        assert_eq!(h.source.push(no_id).wait(WAIT), Some(AckOutcome::Nak(None)));
+        assert_eq!(h.push(no_id).wait(WAIT), Some(AckOutcome::Nak(None)));
 
         assert_eq!(
             h.counter(
-                Metric::RecordsDropped,
+                CounterMetric::RecordsDropped,
                 &[
                     ("tenant", "acme"),
                     ("stage", "source"),
@@ -191,7 +192,7 @@ fn a_record_without_an_id_is_dropped_at_the_source_with_reason_missing_id_and_na
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::SourceNaks, &[("tenant", "acme")]),
+            h.counter(CounterMetric::SourceNaks, &[("tenant", "acme")]),
             1,
             "workers={workers}"
         );
@@ -206,11 +207,11 @@ fn a_non_log_record_is_dropped_at_the_source_with_reason_invalid_record_and_acks
 
         let mut metric = record(1, "ERROR");
         metric.kind = fusion_core::record::Kind::Metric;
-        assert_eq!(h.source.push(metric).wait(WAIT), Some(AckOutcome::Ack));
+        assert_eq!(h.push(metric).wait(WAIT), Some(AckOutcome::Ack));
 
         assert_eq!(
             h.counter(
-                Metric::RecordsDropped,
+                CounterMetric::RecordsDropped,
                 &[
                     ("tenant", "acme"),
                     ("stage", "source"),
@@ -221,7 +222,7 @@ fn a_non_log_record_is_dropped_at_the_source_with_reason_invalid_record_and_acks
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::SourceNaks, &[("tenant", "acme")]),
+            h.counter(CounterMetric::SourceNaks, &[("tenant", "acme")]),
             0,
             "workers={workers}"
         );
@@ -236,25 +237,33 @@ fn a_sink_that_cannot_confirm_durable_acceptance_counts_an_error_a_publish_error
         h.sinks.fail_writes_to("out");
 
         assert_eq!(
-            h.source.push(record(1, "ERROR")).wait(WAIT),
+            h.push(record(1, "ERROR")).wait(WAIT),
             Some(AckOutcome::Nak(None))
         );
 
         let out = [("tenant", "acme"), ("stage", "out")];
-        assert_eq!(h.counter(Metric::RecordsIn, &out), 1, "workers={workers}");
-        assert_eq!(h.counter(Metric::RecordsOut, &out), 0, "workers={workers}");
         assert_eq!(
-            h.counter(Metric::RecordsErrored, &out),
+            h.counter(CounterMetric::RecordsIn, &out),
             1,
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::SinkPublishErrors, &out),
+            h.counter(CounterMetric::RecordsOut, &out),
+            0,
+            "workers={workers}"
+        );
+        assert_eq!(
+            h.counter(CounterMetric::RecordsErrored, &out),
             1,
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::SourceNaks, &[("tenant", "acme")]),
+            h.counter(CounterMetric::SinkPublishErrors, &out),
+            1,
+            "workers={workers}"
+        );
+        assert_eq!(
+            h.counter(CounterMetric::SourceNaks, &[("tenant", "acme")]),
             1,
             "workers={workers}"
         );
@@ -280,21 +289,21 @@ nodes:
     for_each_worker_count(|workers| {
         let h = start(FAN_OUT, workers);
 
-        assert_eq!(
-            h.source.push(record(1, "ERROR")).wait(WAIT),
-            Some(AckOutcome::Ack)
-        );
+        assert_eq!(h.push(record(1, "ERROR")).wait(WAIT), Some(AckOutcome::Ack));
 
         assert_eq!(
             h.counter(
-                Metric::RecordsOut,
+                CounterMetric::RecordsOut,
                 &[("tenant", "acme"), ("stage", "keep_errors")]
             ),
             1
         );
         for stage in ["out", "archive"] {
             assert_eq!(
-                h.counter(Metric::RecordsIn, &[("tenant", "acme"), ("stage", stage)]),
+                h.counter(
+                    CounterMetric::RecordsIn,
+                    &[("tenant", "acme"), ("stage", stage)]
+                ),
                 1,
                 "{stage} workers={workers}"
             );
@@ -312,18 +321,14 @@ fn source_counts_every_record_in_and_only_those_entering_the_graph_out() {
         no_id.id = None;
         let mut metric = record(2, "ERROR");
         metric.kind = fusion_core::record::Kind::Metric;
-        let probes = [
-            h.source.push(record(3, "ERROR")),
-            h.source.push(no_id),
-            h.source.push(metric),
-        ];
+        let probes = [h.push(record(3, "ERROR")), h.push(no_id), h.push(metric)];
         for probe in &probes {
             assert!(probe.wait(WAIT).is_some(), "workers={workers}");
         }
 
         assert_eq!(
             h.counter(
-                Metric::RecordsIn,
+                CounterMetric::RecordsIn,
                 &[("tenant", "acme"), ("stage", "source")]
             ),
             3,
@@ -332,7 +337,7 @@ fn source_counts_every_record_in_and_only_those_entering_the_graph_out() {
         // Only the record with an id and of kind log entered the graph.
         assert_eq!(
             h.counter(
-                Metric::RecordsOut,
+                CounterMetric::RecordsOut,
                 &[("tenant", "acme"), ("stage", "source")]
             ),
             1,
@@ -376,18 +381,21 @@ nodes:
     let h = common::start_with(PANICS, 1, sinks, registry);
 
     assert_eq!(
-        h.source.push(record(1, "ERROR")).wait(WAIT),
+        h.push(record(1, "ERROR")).wait(WAIT),
         Some(AckOutcome::Nak(None))
     );
 
     assert_eq!(
         h.counter(
-            Metric::RecordsErrored,
+            CounterMetric::RecordsErrored,
             &[("tenant", "acme"), ("stage", "boom")]
         ),
         1
     );
-    assert_eq!(h.counter(Metric::SourceNaks, &[("tenant", "acme")]), 1);
+    assert_eq!(
+        h.counter(CounterMetric::SourceNaks, &[("tenant", "acme")]),
+        1
+    );
     // The worker survives the panic: the next record is processed normally.
     h.finish();
 }

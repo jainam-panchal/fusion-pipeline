@@ -44,7 +44,7 @@ fn an_unknown_op_is_rejected_listing_the_ops() {
     rejects(
         "    ops:\n      - replace: { field: body, value: x }\n",
         "op 0",
-        &["replace", "set", "rename", "copy", "hash", "delete"],
+        &["`replace`", "`set`, `rename`, `copy`, `hash` or `delete`"],
     );
 }
 
@@ -55,7 +55,14 @@ fn an_entry_with_two_ops_or_none_is_rejected() {
         "op 0",
         &["one op per entry"],
     );
-    rejects("    ops:\n      - {}\n", "op 0", &["one op per entry"]);
+    rejects(
+        "    ops:\n      - {}\n",
+        "op 0",
+        &[
+            "one op per entry",
+            "`set`, `rename`, `copy`, `hash` or `delete`",
+        ],
+    );
 }
 
 #[test]
@@ -98,26 +105,35 @@ fn a_malformed_path_is_rejected_with_the_parser_hint() {
 }
 
 #[test]
-fn a_write_to_id_or_kind_is_rejected_as_read_only() {
+fn every_op_may_name_id_or_kind_since_they_are_payload() {
+    for op in [
+        "set: { field: id, value: 7 }",
+        "set: { field: kind, value: span }",
+        "rename: { from: attributes.n, to: id }",
+        "copy: { from: attributes.k, to: kind }",
+        "delete: { fields: [id, kind] }",
+    ] {
+        let ops = format!("    ops:\n      - {op}\n");
+        assert!(build(&ops).is_ok(), "{op}");
+    }
+}
+
+#[test]
+fn a_literal_or_hash_id_and_kind_do_not_take_is_rejected_by_type() {
     rejects(
-        "    ops:\n      - set: { field: id, value: 7 }\n",
+        "    ops:\n      - set: { field: id, value: seven }\n",
         "op 0",
-        &["id", "read-only"],
+        &["id", "non-negative integer", "\"seven\""],
     );
     rejects(
-        "    ops:\n      - rename: { from: body, to: kind }\n",
+        "    ops:\n      - set: { field: kind, value: trace }\n",
         "op 0",
-        &["kind", "read-only"],
+        &["kind", "`log`, `metric` or `span`"],
     );
     rejects(
         "    ops:\n      - hash: { field: id }\n",
         "op 0",
-        &["id", "read-only"],
-    );
-    rejects(
-        "    ops:\n      - delete: { fields: [kind] }\n",
-        "op 0",
-        &["kind", "read-only"],
+        &["hash", "id"],
     );
 }
 
@@ -127,7 +143,7 @@ fn copy_from_id_is_allowed_since_it_only_reads() {
 }
 
 #[test]
-fn every_op_naming_the_tenant_is_rejected() {
+fn every_op_naming_the_tenant_is_accepted_since_it_is_payload() {
     for op in [
         "set: { field: resource.tenant.id, value: acme }",
         "rename: { from: resource.tenant.id, to: resource.owner }",
@@ -136,11 +152,8 @@ fn every_op_naming_the_tenant_is_rejected() {
         "hash: { field: resource.tenant.id }",
         "delete: { fields: [resource.tenant.id] }",
     ] {
-        rejects(
-            &format!("    ops:\n      - {op}\n"),
-            "op 0",
-            &["resource.tenant.id", "tenant"],
-        );
+        let ops = format!("    ops:\n      - {op}\n");
+        assert!(build(&ops).is_ok(), "{op}");
     }
 }
 
@@ -257,4 +270,48 @@ fn an_unknown_node_key_is_rejected() {
         err.contains("normalise") && err.contains("on_missing"),
         "{err}"
     );
+}
+
+#[test]
+fn every_op_that_writes_or_removes_a_meta_path_is_rejected() {
+    for (op, key) in [
+        ("set: { field: meta.tenant, value: beta }", "`field`"),
+        ("hash: { field: meta.tenant }", "`field`"),
+        ("delete: { fields: [meta.tenant] }", "`fields`"),
+        (
+            "rename: { from: meta.tenant, to: resource.tenant.id }",
+            "`from`",
+        ),
+        (
+            "rename: { from: resource.tenant.id, to: meta.tenant }",
+            "`to`",
+        ),
+        (
+            "copy: { from: resource.tenant.id, to: meta.tenant }",
+            "`to`",
+        ),
+    ] {
+        rejects(
+            &format!("    ops:\n      - {op}\n"),
+            "op 0",
+            &[
+                key,
+                "`meta.tenant` is the pipeline's",
+                "copy {from: meta.tenant, to: <field>}",
+            ],
+        );
+    }
+}
+
+#[test]
+fn copy_from_a_meta_path_is_how_a_pipeline_value_enters_a_record() {
+    build(
+        "    ops:
+      - copy: { from: meta.tenant, to: resource.tenant.id }
+      - copy: { from: meta.ingestion_time, to: observed_time_unix_nano }
+      - copy: { from: meta.delivery_count, to: attributes.delivery }
+      - copy: { from: meta.id, to: id }
+",
+    )
+    .expect("reading meta is allowed");
 }

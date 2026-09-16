@@ -12,7 +12,9 @@
 //! ```
 //!
 //! A path is resolved by [`FieldPath`]: the root is a top-level record field and, under
-//! `attributes`, `resource` or `scope`, the segments joined with dots are the flat map key.
+//! `attributes`, `resource` or `scope`, the segments joined with dots are the flat map key;
+//! a `meta.*` path reads the record's `Meta`, so a condition can decide on the pipeline's
+//! tenant rather than the payload's.
 //! `=~` and `!~` take a string literal, the pattern. Core has no regex engine: a stage
 //! compiles the patterns [`Condition::regex_patterns`] lists through the facade and
 //! evaluates with [`Condition::matches_with`], handing in the match function; a `!~` is the
@@ -22,6 +24,7 @@
 
 use std::cmp::Ordering;
 
+use crate::meta::Meta;
 use crate::path::{FieldPath, FieldValue, Num, PathError, quoted_end};
 use crate::record::Record;
 
@@ -179,14 +182,14 @@ impl Condition {
         }
     }
 
-    /// Evaluate against `record` with regex operators treated as false. For a condition
-    /// that uses them, see [`Condition::matches_with`].
+    /// Evaluate against `record` and its `meta` with regex operators treated as false. For a
+    /// condition that uses them, see [`Condition::matches_with`].
     ///
     /// A missing field equals `null` and nothing else; comparisons between mismatched types
     /// are false (so `!=` is true); ordering applies to numbers and to strings.
     #[must_use]
-    pub fn matches(&self, record: &Record) -> bool {
-        self.matches_with(record, &mut |_, _| Ok::<bool, ()>(false))
+    pub fn matches(&self, record: &Record, meta: &Meta) -> bool {
+        self.matches_with(record, meta, &mut |_, _| Ok::<bool, ()>(false))
             .unwrap_or(false)
     }
 
@@ -201,6 +204,7 @@ impl Condition {
     pub fn matches_with<E>(
         &self,
         record: &Record,
+        meta: &Meta,
         regex: &mut impl FnMut(&str, &str) -> Result<bool, E>,
     ) -> Result<bool, E> {
         match self {
@@ -209,7 +213,7 @@ impl Condition {
                 op: op @ (CompareOp::Match | CompareOp::NotMatch),
                 literal: Literal::Str(pattern),
             } => {
-                let matched = match field.read(record) {
+                let matched = match field.read(record, meta) {
                     FieldValue::Str(text) => regex(pattern, text)?,
                     _ => false,
                 };
@@ -219,10 +223,16 @@ impl Condition {
                     !matched
                 })
             }
-            Self::Compare { field, op, literal } => Ok(compare(field.read(record), *op, literal)),
-            Self::And(a, b) => Ok(a.matches_with(record, regex)? && b.matches_with(record, regex)?),
-            Self::Or(a, b) => Ok(a.matches_with(record, regex)? || b.matches_with(record, regex)?),
-            Self::Not(inner) => Ok(!inner.matches_with(record, regex)?),
+            Self::Compare { field, op, literal } => {
+                Ok(compare(field.read(record, meta), *op, literal))
+            }
+            Self::And(a, b) => {
+                Ok(a.matches_with(record, meta, regex)? && b.matches_with(record, meta, regex)?)
+            }
+            Self::Or(a, b) => {
+                Ok(a.matches_with(record, meta, regex)? || b.matches_with(record, meta, regex)?)
+            }
+            Self::Not(inner) => Ok(!inner.matches_with(record, meta, regex)?),
         }
     }
 }

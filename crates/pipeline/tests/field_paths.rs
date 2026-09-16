@@ -37,20 +37,20 @@ fn filter_on_a_dotted_attribute_key_reads_the_flat_map() {
     for_each_worker_count(|workers| {
         let h = start(&filter("attributes.http.status >= 500"), workers);
 
-        let kept = h.source.push(record(
+        let kept = h.push(record(
             1,
             r#"{"http.status": 503}"#,
-            r#"{"tenant.id": "acme"}"#,
+            r#"{"service.name": "api"}"#,
         ));
-        let dropped = h.source.push(record(
+        let dropped = h.push(record(
             2,
             r#"{"http.status": 200}"#,
-            r#"{"tenant.id": "acme"}"#,
+            r#"{"service.name": "api"}"#,
         ));
-        let nested = h.source.push(record(
+        let nested = h.push(record(
             3,
             r#"{"http": {"status": 503}}"#,
-            r#"{"tenant.id": "acme"}"#,
+            r#"{"service.name": "api"}"#,
         ));
 
         assert_eq!(kept.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
@@ -79,24 +79,24 @@ fn filter_on_a_dotted_attribute_key_reads_the_flat_map() {
 fn filter_on_resource_keys_including_hyphens_digits_and_quotes() {
     for_each_worker_count(|workers| {
         let yaml = filter(
-            r#"resource.tenant.id == "acme" and resource.env == "prod" and resource.k8s.pod-name == "web-0" and attributes.5xx.count > 0 and attributes."Event ID" == 4625"#,
+            r#"resource.service.name == "api" and resource.env == "prod" and resource.k8s.pod-name == "web-0" and attributes.5xx.count > 0 and attributes."Event ID" == 4625"#,
         );
         let h = start(&yaml, workers);
 
-        let kept = h.source.push(record(
+        let kept = h.push(record(
             1,
             r#"{"5xx.count": 2, "Event ID": 4625}"#,
-            r#"{"tenant.id": "acme", "env": "prod", "k8s.pod-name": "web-0"}"#,
+            r#"{"service.name": "api", "env": "prod", "k8s.pod-name": "web-0"}"#,
         ));
-        let other_tenant = h.source.push(record(
+        let other_service = h.push(record(
             2,
             r#"{"5xx.count": 2, "Event ID": 4625}"#,
-            r#"{"tenant.id": "beta", "env": "prod", "k8s.pod-name": "web-0"}"#,
+            r#"{"service.name": "web", "env": "prod", "k8s.pod-name": "web-0"}"#,
         ));
 
         assert_eq!(kept.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
         assert_eq!(
-            other_tenant.wait(WAIT),
+            other_service.wait(WAIT),
             Some(AckOutcome::Ack),
             "workers={workers}"
         );

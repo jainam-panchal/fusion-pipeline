@@ -7,14 +7,12 @@ mod common;
 use std::time::Duration;
 
 use fusion_core::memory::AckOutcome;
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::{CounterMetric, HistogramMetric};
 use fusion_core::record::Record;
 use fusion_core::state::StateStore as _;
 use fusion_stages::dedupe as dedupe_stage;
 
-use common::{
-    DEDUPE_DROP, WAIT, acme_record as record, acme_record_observed_at, for_each_worker_count, start,
-};
+use common::{DEDUPE_DROP, WAIT, body_record as record, for_each_worker_count, start};
 
 const DEDUPE_BODY: &str = r#"
 name: ingest
@@ -32,9 +30,9 @@ fn two_different_records_with_the_same_key_inside_the_window_pass_once_and_drop_
     for_each_worker_count(|workers| {
         let h = start(DEDUPE_BODY, workers);
 
-        let first = h.source.push(record(101, "disk full"));
+        let first = h.push(record(101, "disk full"));
         assert_eq!(first.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
-        let second = h.source.push(record(102, "disk full"));
+        let second = h.push(record(102, "disk full"));
         assert_eq!(
             second.wait(WAIT),
             Some(AckOutcome::Ack),
@@ -43,7 +41,7 @@ fn two_different_records_with_the_same_key_inside_the_window_pass_once_and_drop_
 
         assert_eq!(h.ids("out"), vec![101], "workers={workers}");
         assert_eq!(
-            h.counter(Metric::RecordsDropped, &DEDUPE_DROP),
+            h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP),
             1,
             "workers={workers}"
         );
@@ -51,9 +49,9 @@ fn two_different_records_with_the_same_key_inside_the_window_pass_once_and_drop_
     });
 }
 
-/// A record with an explicit ingestion time, in seconds.
-fn record_at(id: u64, body: &str, observed_s: u64) -> Record {
-    acme_record_observed_at(id, body, observed_s * 1_000_000_000)
+/// `s` seconds as the nanoseconds an arrival's ingestion time is given in.
+const fn secs(s: u64) -> u64 {
+    s * 1_000_000_000
 }
 
 #[test]
@@ -61,14 +59,14 @@ fn the_same_record_pushed_twice_passes_twice_because_redelivery_is_not_a_duplica
     for_each_worker_count(|workers| {
         let h = start(DEDUPE_BODY, workers);
 
-        let first = h.source.push(record(101, "disk full"));
+        let first = h.push(record(101, "disk full"));
         assert_eq!(first.wait(WAIT), Some(AckOutcome::Ack));
-        let again = h.source.push(record(101, "disk full"));
+        let again = h.push(record(101, "disk full"));
         assert_eq!(again.wait(WAIT), Some(AckOutcome::Ack));
 
         assert_eq!(h.ids("out"), vec![101, 101], "workers={workers}");
         assert_eq!(
-            h.counter(Metric::RecordsDropped, &DEDUPE_DROP),
+            h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP),
             0,
             "workers={workers}"
         );
@@ -81,12 +79,12 @@ fn a_repeat_after_the_window_passes_again() {
     let h = start(DEDUPE_BODY, 1);
 
     assert_eq!(
-        h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+        h.push_at(record(101, "disk full"), secs(0)).wait(WAIT),
         Some(AckOutcome::Ack)
     );
     h.state.advance(Duration::from_secs(10));
     assert_eq!(
-        h.source.push(record_at(102, "disk full", 11)).wait(WAIT),
+        h.push_at(record(102, "disk full"), secs(11)).wait(WAIT),
         Some(AckOutcome::Ack)
     );
 
@@ -103,28 +101,28 @@ fn a_record_redelivered_after_its_window_expired_and_a_newer_duplicate_took_the_
     let h = start(DEDUPE_BODY, 1);
 
     assert_eq!(
-        h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+        h.push_at(record(101, "disk full"), secs(0)).wait(WAIT),
         Some(AckOutcome::Ack)
     );
     h.state.advance(Duration::from_secs(15));
     assert_eq!(
-        h.source.push(record_at(102, "disk full", 15)).wait(WAIT),
+        h.push_at(record(102, "disk full"), secs(15)).wait(WAIT),
         Some(AckOutcome::Ack),
         "new window"
     );
     assert_eq!(
-        h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+        h.push_at(record(101, "disk full"), secs(0)).wait(WAIT),
         Some(AckOutcome::Ack),
         "redelivery of 101"
     );
     assert_eq!(
-        h.source.push(record_at(103, "disk full", 18)).wait(WAIT),
+        h.push_at(record(103, "disk full"), secs(18)).wait(WAIT),
         Some(AckOutcome::Ack),
         "repeat inside 102's window"
     );
 
     assert_eq!(h.ids("out"), vec![101, 101, 102]);
-    assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 1);
     h.finish();
 }
 
@@ -137,12 +135,12 @@ fn a_record_past_the_window_opens_a_new_one_so_the_burst_behind_it_still_dedupes
     let h = start(DEDUPE_BODY, 1);
 
     assert_eq!(
-        h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+        h.push_at(record(101, "disk full"), secs(0)).wait(WAIT),
         Some(AckOutcome::Ack)
     );
     for (id, s) in [(102, 10), (103, 11), (104, 15), (105, 20), (106, 29)] {
         assert_eq!(
-            h.source.push(record_at(id, "disk full", s)).wait(WAIT),
+            h.push_at(record(id, "disk full"), secs(s)).wait(WAIT),
             Some(AckOutcome::Ack),
             "record {id}"
         );
@@ -151,7 +149,7 @@ fn a_record_past_the_window_opens_a_new_one_so_the_burst_behind_it_still_dedupes
     // 101 opens [0, 10); 102 at 10 opens [10, 20) and 103, 104 drop; 105 at 20 opens
     // [20, 30) and 106 drops.
     assert_eq!(h.ids("out"), vec![101, 102, 105]);
-    assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 3);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 3);
     h.finish();
 }
 
@@ -160,12 +158,12 @@ fn a_repeat_whose_ingestion_time_is_past_the_window_passes_even_while_the_key_is
     let h = start(DEDUPE_BODY, 1);
 
     assert_eq!(
-        h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+        h.push_at(record(101, "disk full"), secs(0)).wait(WAIT),
         Some(AckOutcome::Ack)
     );
     // The key is still alive on the store's clock, but in ingestion time the window is over.
     assert_eq!(
-        h.source.push(record_at(102, "disk full", 10)).wait(WAIT),
+        h.push_at(record(102, "disk full"), secs(10)).wait(WAIT),
         Some(AckOutcome::Ack)
     );
 
@@ -196,7 +194,7 @@ fn two_records_past_the_window_racing_on_two_workers_pass_exactly_once() {
     for_each_worker_count(|workers| {
         let h = start(DEDUPE_BODY, workers);
         assert_eq!(
-            h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+            h.push_at(record(101, "disk full"), secs(0)).wait(WAIT),
             Some(AckOutcome::Ack)
         );
         h.state.after_next_holder_reply(|data, key| {
@@ -205,12 +203,12 @@ fn two_records_past_the_window_racing_on_two_workers_pass_exactly_once() {
         });
 
         assert_eq!(
-            h.source.push(record_at(103, "disk full", 11)).wait(WAIT),
+            h.push_at(record(103, "disk full"), secs(11)).wait(WAIT),
             Some(AckOutcome::Ack)
         );
 
         assert_eq!(h.ids("out"), vec![101], "103 is a repeat of 102");
-        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 1);
         assert_eq!(stored_holder(&h), holder(102, 10), "102 keeps the key");
         h.finish();
     });
@@ -225,7 +223,7 @@ fn a_stale_takeover_against_a_newer_holder_does_not_move_the_window_back() {
     for_each_worker_count(|workers| {
         let h = start(DEDUPE_BODY, workers);
         assert_eq!(
-            h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+            h.push_at(record(101, "disk full"), secs(0)).wait(WAIT),
             Some(AckOutcome::Ack)
         );
         h.state.after_next_holder_reply(|data, key| {
@@ -234,18 +232,18 @@ fn a_stale_takeover_against_a_newer_holder_does_not_move_the_window_back() {
         });
 
         assert_eq!(
-            h.source.push(record_at(102, "disk full", 10)).wait(WAIT),
+            h.push_at(record(102, "disk full"), secs(10)).wait(WAIT),
             Some(AckOutcome::Ack),
             "102 is older than the holder 105: an extra copy, never a loss"
         );
         assert_eq!(
-            h.source.push(record_at(106, "disk full", 25)).wait(WAIT),
+            h.push_at(record(106, "disk full"), secs(25)).wait(WAIT),
             Some(AckOutcome::Ack),
             "106 is inside 105's window"
         );
 
         assert_eq!(h.ids("out"), vec![101, 102]);
-        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 1);
         assert_eq!(
             stored_holder(&h),
             holder(105, 20),
@@ -262,24 +260,24 @@ fn a_takeover_of_a_key_that_expired_since_the_claim_still_claims_it() {
     for_each_worker_count(|workers| {
         let h = start(DEDUPE_BODY, workers);
         assert_eq!(
-            h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+            h.push_at(record(101, "disk full"), secs(0)).wait(WAIT),
             Some(AckOutcome::Ack)
         );
         h.state
             .after_next_holder_reply(|data, _| data.advance(Duration::from_secs(10)));
 
         assert_eq!(
-            h.source.push(record_at(102, "disk full", 10)).wait(WAIT),
+            h.push_at(record(102, "disk full"), secs(10)).wait(WAIT),
             Some(AckOutcome::Ack)
         );
         assert_eq!(
-            h.source.push(record_at(103, "disk full", 11)).wait(WAIT),
+            h.push_at(record(103, "disk full"), secs(11)).wait(WAIT),
             Some(AckOutcome::Ack),
             "inside 102's window"
         );
 
         assert_eq!(h.ids("out"), vec![101, 102]);
-        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 1);
         h.finish();
     });
 }
@@ -294,7 +292,7 @@ fn a_takeover_refused_by_a_holder_that_is_also_past_the_window_is_retried_once()
     for_each_worker_count(|workers| {
         let h = start(DEDUPE_BODY, workers);
         assert_eq!(
-            h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+            h.push_at(record(101, "disk full"), secs(0)).wait(WAIT),
             Some(AckOutcome::Ack)
         );
         h.state.after_next_holder_reply(|data, key| {
@@ -303,17 +301,17 @@ fn a_takeover_refused_by_a_holder_that_is_also_past_the_window_is_retried_once()
         });
 
         assert_eq!(
-            h.source.push(record_at(102, "disk full", 10)).wait(WAIT),
+            h.push_at(record(102, "disk full"), secs(10)).wait(WAIT),
             Some(AckOutcome::Ack)
         );
         assert_eq!(
-            h.source.push(record_at(103, "disk full", 11)).wait(WAIT),
+            h.push_at(record(103, "disk full"), secs(11)).wait(WAIT),
             Some(AckOutcome::Ack),
             "inside 102's window"
         );
 
         assert_eq!(h.ids("out"), vec![101, 102], "workers={workers}");
-        assert_eq!(h.counter(Metric::RecordsDropped, &DEDUPE_DROP), 1);
+        assert_eq!(h.counter(CounterMetric::RecordsDropped, &DEDUPE_DROP), 1);
         assert_eq!(stored_holder(&h), holder(102, 10), "102 took the key over");
         h.finish();
     });
@@ -327,7 +325,7 @@ fn a_takeover_refused_twice_passes_without_a_third_attempt() {
     for_each_worker_count(|workers| {
         let h = start(DEDUPE_BODY, workers);
         assert_eq!(
-            h.source.push(record_at(101, "disk full", 0)).wait(WAIT),
+            h.push_at(record(101, "disk full"), secs(0)).wait(WAIT),
             Some(AckOutcome::Ack)
         );
         // After the claim is refused, and again after the first takeover is refused.
@@ -341,7 +339,7 @@ fn a_takeover_refused_twice_passes_without_a_third_attempt() {
         });
 
         assert_eq!(
-            h.source.push(record_at(102, "disk full", 10)).wait(WAIT),
+            h.push_at(record(102, "disk full"), secs(10)).wait(WAIT),
             Some(AckOutcome::Ack)
         );
 
@@ -349,7 +347,7 @@ fn a_takeover_refused_twice_passes_without_a_third_attempt() {
         assert_eq!(stored_holder(&h), holder(98, 0), "102 gave up the takeover");
         let stage = [("tenant", "acme"), ("stage", "dedupe_body")];
         assert_eq!(
-            h.counter(Metric::StateOps, &stage),
+            h.counter(CounterMetric::StateOps, &stage),
             1 + 3,
             "101's claim, then 102's claim and two takeovers"
         );
@@ -363,23 +361,23 @@ fn with_on_state_error_pass_a_failing_store_forwards_the_record_and_counts_the_e
         let h = start(DEDUPE_BODY, workers);
         h.state.fail_all(true);
 
-        let probe = h.source.push(record(101, "disk full"));
+        let probe = h.push(record(101, "disk full"));
 
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
         assert_eq!(h.ids("out"), vec![101], "workers={workers}");
         let stage = [("tenant", "acme"), ("stage", "dedupe_body")];
         assert_eq!(
-            h.counter(Metric::StateErrors, &stage),
+            h.counter(CounterMetric::StateErrors, &stage),
             1,
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::RecordsErrored, &stage),
+            h.counter(CounterMetric::RecordsErrored, &stage),
             0,
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::RecordsOut, &stage),
+            h.counter(CounterMetric::RecordsOut, &stage),
             1,
             "workers={workers}"
         );
@@ -394,7 +392,7 @@ fn with_on_state_error_nak_a_failing_store_naks_the_record_and_counts_the_error(
         let h = start(&yaml, workers);
         h.state.fail_all(true);
 
-        let probe = h.source.push(record(101, "disk full"));
+        let probe = h.push(record(101, "disk full"));
 
         assert!(
             matches!(probe.wait(WAIT), Some(AckOutcome::Nak(_))),
@@ -403,16 +401,19 @@ fn with_on_state_error_nak_a_failing_store_naks_the_record_and_counts_the_error(
         assert!(h.ids("out").is_empty(), "workers={workers}");
         let stage = [("tenant", "acme"), ("stage", "dedupe_body")];
         assert_eq!(
-            h.counter(Metric::StateErrors, &stage),
+            h.counter(CounterMetric::StateErrors, &stage),
             1,
             "workers={workers}"
         );
         assert_eq!(
-            h.counter(Metric::RecordsErrored, &stage),
+            h.counter(CounterMetric::RecordsErrored, &stage),
             1,
             "workers={workers}"
         );
-        assert_eq!(h.counter(Metric::SourceNaks, &[("tenant", "acme")]), 1);
+        assert_eq!(
+            h.counter(CounterMetric::SourceNaks, &[("tenant", "acme")]),
+            1
+        );
         h.finish();
     });
 }
@@ -422,15 +423,11 @@ fn state_keys_are_namespaced_by_pipeline_tenant_and_node() {
     let h = start(DEDUPE_BODY, 1);
 
     assert_eq!(
-        h.source.push(record(101, "disk full")).wait(WAIT),
+        h.push(record(101, "disk full")).wait(WAIT),
         Some(AckOutcome::Ack)
     );
-    let other_tenant = Record::from_json(
-        r#"{"id": 201, "body": "disk full", "resource": {"tenant.id": "globex"}}"#,
-    )
-    .expect("record parses");
     assert_eq!(
-        h.source.push(other_tenant).wait(WAIT),
+        h.push_as("globex", record(201, "disk full")).wait(WAIT),
         Some(AckOutcome::Ack)
     );
 
@@ -453,12 +450,10 @@ fn state_keys_are_namespaced_by_pipeline_tenant_and_node() {
 #[test]
 fn a_tenant_containing_the_separator_cannot_escape_its_segment() {
     let h = start(DEDUPE_BODY, 1);
-    let tricky = Record::from_json(
-        r#"{"id": 301, "body": "x", "resource": {"tenant.id": "acme:dedupe_body"}}"#,
-    )
-    .expect("record parses");
-
-    assert_eq!(h.source.push(tricky).wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(
+        h.push_as("acme:dedupe_body", record(301, "x")).wait(WAIT),
+        Some(AckOutcome::Ack)
+    );
 
     let keys = h.state.keys();
     assert!(
@@ -473,22 +468,22 @@ fn every_store_operation_is_counted_and_timed_for_the_tenant_and_node() {
     let h = start(DEDUPE_BODY, 1);
 
     assert_eq!(
-        h.source.push(record(101, "disk full")).wait(WAIT),
+        h.push(record(101, "disk full")).wait(WAIT),
         Some(AckOutcome::Ack)
     );
     assert_eq!(
-        h.source.push(record(102, "disk full")).wait(WAIT),
+        h.push(record(102, "disk full")).wait(WAIT),
         Some(AckOutcome::Ack)
     );
 
     let stage = [("tenant", "acme"), ("stage", "dedupe_body")];
     assert_eq!(
-        h.counter(Metric::StateOps, &stage),
+        h.counter(CounterMetric::StateOps, &stage),
         2,
         "one set_nx per record"
     );
-    assert_eq!(h.samples(Metric::StateOpDuration, &stage).len(), 2);
-    assert_eq!(h.counter(Metric::StateErrors, &stage), 0);
+    assert_eq!(h.samples(HistogramMetric::StateOpDuration, &stage).len(), 2);
+    assert_eq!(h.counter(CounterMetric::StateErrors, &stage), 0);
     h.finish();
 }
 
@@ -497,14 +492,8 @@ fn a_missing_key_field_counts_as_null_so_records_without_it_dedupe_together() {
     let yaml = DEDUPE_BODY.replace("key: [body]", "key: [attributes.host]");
     let h = start(&yaml, 1);
 
-    assert_eq!(
-        h.source.push(record(101, "a")).wait(WAIT),
-        Some(AckOutcome::Ack)
-    );
-    assert_eq!(
-        h.source.push(record(102, "b")).wait(WAIT),
-        Some(AckOutcome::Ack)
-    );
+    assert_eq!(h.push(record(101, "a")).wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(h.push(record(102, "b")).wait(WAIT), Some(AckOutcome::Ack));
 
     assert_eq!(h.ids("out"), vec![101]);
     h.finish();
@@ -521,18 +510,9 @@ fn the_key_is_the_combination_of_every_listed_field() {
         .expect("record parses")
     };
 
-    assert_eq!(
-        h.source.push(on(1, "web-0")).wait(WAIT),
-        Some(AckOutcome::Ack)
-    );
-    assert_eq!(
-        h.source.push(on(2, "web-1")).wait(WAIT),
-        Some(AckOutcome::Ack)
-    );
-    assert_eq!(
-        h.source.push(on(3, "web-0")).wait(WAIT),
-        Some(AckOutcome::Ack)
-    );
+    assert_eq!(h.push(on(1, "web-0")).wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(h.push(on(2, "web-1")).wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(h.push(on(3, "web-0")).wait(WAIT), Some(AckOutcome::Ack));
 
     assert_eq!(h.ids("out"), vec![1, 2]);
     h.finish();
@@ -582,22 +562,22 @@ fn a_stage_that_uses_state_without_declaring_it_gets_an_error_naming_the_node_an
     registry.register_stage("liar", undeclared::build(StateErrorPolicy::Nak));
     let h = common::start_with(yaml, 1, sinks.clone(), registry);
 
-    let outcome = h.source.push(record(1, "x")).wait(WAIT);
+    let outcome = h.push(record(1, "x")).wait(WAIT);
 
     assert!(matches!(outcome, Some(AckOutcome::Nak(_))), "{outcome:?}");
     let stage = [("tenant", "acme"), ("stage", "liar")];
     assert_eq!(
-        h.counter(Metric::StateOps, &stage),
+        h.counter(CounterMetric::StateOps, &stage),
         0,
         "no store was contacted"
     );
     assert_eq!(
-        h.counter(Metric::StateErrors, &stage),
+        h.counter(CounterMetric::StateErrors, &stage),
         0,
         "not a store error"
     );
     assert_eq!(
-        h.counter(Metric::RecordsErrored, &stage),
+        h.counter(CounterMetric::RecordsErrored, &stage),
         1,
         "policy still applied"
     );
@@ -615,15 +595,91 @@ fn an_undeclared_stage_under_pass_forwards_the_record() {
     registry.register_stage("liar", undeclared::build(StateErrorPolicy::Pass));
     let h = common::start_with(yaml, 1, sinks.clone(), registry);
 
-    assert_eq!(
-        h.source.push(record(1, "x")).wait(WAIT),
-        Some(AckOutcome::Ack)
-    );
+    assert_eq!(h.push(record(1, "x")).wait(WAIT), Some(AckOutcome::Ack));
 
     assert_eq!(h.ids("out"), vec![1]);
     assert_eq!(
-        h.counter(Metric::StateOps, &[("tenant", "acme"), ("stage", "liar")]),
+        h.counter(
+            CounterMetric::StateOps,
+            &[("tenant", "acme"), ("stage", "liar")]
+        ),
         0
     );
     h.finish();
+}
+
+const REWRITE_THEN_DEDUPE: &str = r#"
+name: ingest
+nodes:
+  - id: restamp
+    type: edit
+    ops:
+      - set: { field: observed_time_unix_nano, value: 5000000000 }
+  - id: dedupe_body
+    type: dedupe
+    from: restamp
+    key: [body]
+    window: 10s
+  - id: out
+    type: sink.memory
+    from: dedupe_body
+"#;
+
+#[test]
+fn a_time_field_rewritten_upstream_does_not_move_the_window_of_the_records_ingestion_time() {
+    for_each_worker_count(|workers| {
+        let h = start(REWRITE_THEN_DEDUPE, workers);
+
+        // Ingested 20 s apart, past the 10 s window, then stamped with one time by
+        // `restamp`. The window is measured in ingestion time, so both pass; the third was
+        // ingested 5 s after the second and is its repeat.
+        for (id, ingested_s) in [(101, 1_000), (102, 1_020), (103, 1_025)] {
+            let pushed = h.push_at(record(id, "disk full"), secs(ingested_s));
+            assert_eq!(
+                pushed.wait(WAIT),
+                Some(AckOutcome::Ack),
+                "workers={workers}"
+            );
+        }
+
+        assert_eq!(h.ids("out"), vec![101, 102], "workers={workers}");
+        let written: Vec<_> = h
+            .sinks
+            .records("out")
+            .iter()
+            .map(|r| r.observed_time_unix_nano)
+            .collect();
+        assert_eq!(
+            written,
+            vec![Some(5_000_000_000); 2],
+            "the sink writes the payload"
+        );
+        h.finish();
+    });
+}
+
+#[test]
+fn the_window_follows_the_transports_time_not_the_producers_clock() {
+    for_each_worker_count(|workers| {
+        let h = start(DEDUPE_BODY, workers);
+
+        // The producer's clock says all three happened at the same instant; the transport
+        // says they entered 20 s and then 5 s apart. The transport decides: the first two
+        // are past the 10 s window, the third is the second's repeat.
+        for (id, entered_s) in [(101, 1_000), (102, 1_020), (103, 1_025)] {
+            let mut stamped_by_producer = record(id, "disk full");
+            stamped_by_producer.observed_time_unix_nano = Some(secs(7));
+            stamped_by_producer.time_unix_nano = Some(secs(7));
+            let pushed = h.push_at(stamped_by_producer, secs(entered_s));
+            assert_eq!(
+                pushed.wait(WAIT),
+                Some(AckOutcome::Ack),
+                "workers={workers}"
+            );
+        }
+
+        assert_eq!(h.ids("out"), vec![101, 102], "workers={workers}");
+        assert_eq!(stored_holder(&h), holder(102, 1_020), "workers={workers}");
+        h.finish();
+    });
 }

@@ -5,10 +5,10 @@
 mod common;
 
 use fusion_core::memory::{AckOutcome, MemorySinks};
-use fusion_core::metrics::Metric;
+use fusion_core::metrics::CounterMetric;
 use fusion_core::pipeline::Pipeline;
 
-use common::{WAIT, acme_record, for_each_worker_count, start};
+use common::{WAIT, body_record, for_each_worker_count, start};
 
 const KEEP_DISK: &str = r#"
 nodes:
@@ -33,9 +33,9 @@ fn filter_keeps_records_whose_field_matches_and_drops_the_rest() {
     for_each_worker_count(|workers| {
         let h = start(KEEP_DISK, workers);
         let probes = [
-            h.source.push(acme_record(1, "disk full on /var")),
-            h.source.push(acme_record(2, "disk fine")),
-            h.source.push(acme_record(3, "disk failing")),
+            h.push(body_record(1, "disk full on /var")),
+            h.push(body_record(2, "disk fine")),
+            h.push(body_record(3, "disk failing")),
         ];
         for probe in &probes {
             assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
@@ -47,13 +47,13 @@ fn filter_keeps_records_whose_field_matches_and_drops_the_rest() {
             ("engine", "linear"),
         ];
         assert_eq!(
-            h.counter(Metric::RecordsIn, &labels),
+            h.counter(CounterMetric::RecordsIn, &labels),
             3,
             "workers={workers}"
         );
         assert_eq!(
             h.counter(
-                Metric::RecordsDropped,
+                CounterMetric::RecordsDropped,
                 &[
                     ("tenant", "acme"),
                     ("stage", "keep_disk"),
@@ -72,13 +72,11 @@ fn not_match_is_the_negation_and_a_non_string_field_never_matches() {
     let yaml = KEEP_DISK.replace("=~", "!~");
     let h = start(&yaml, 1);
     let probes = [
-        h.source.push(acme_record(1, "disk full")),
-        h.source.push(acme_record(2, "all good")),
-        h.source.push(
-            fusion_core::record::Record::from_json(
-                r#"{"id": 3, "body": 7, "resource": {"tenant.id": "acme"}}"#,
-            )
-            .expect("record parses"),
+        h.push(body_record(1, "disk full")),
+        h.push(body_record(2, "all good")),
+        h.push(
+            fusion_core::record::Record::from_json(r#"{"id": 3, "body": 7}"#)
+                .expect("record parses"),
         ),
     ];
     for probe in &probes {
@@ -99,13 +97,11 @@ fn a_field_over_input_bytes_is_dropped_with_reason_regex_limit_by_the_filter() {
     );
     let h = start(&yaml, 1);
     assert_eq!(
-        h.source
-            .push(acme_record(1, "disk full on /var"))
-            .wait(WAIT),
+        h.push(body_record(1, "disk full on /var")).wait(WAIT),
         Some(AckOutcome::Ack)
     );
     assert_eq!(
-        h.source.push(acme_record(2, "disk full")).wait(WAIT),
+        h.push(body_record(2, "disk full")).wait(WAIT),
         Some(AckOutcome::Ack)
     );
 
@@ -116,7 +112,7 @@ fn a_field_over_input_bytes_is_dropped_with_reason_regex_limit_by_the_filter() {
         ("engine", "linear"),
         ("reason", "regex_limit"),
     ];
-    assert_eq!(h.counter(Metric::RecordsDropped, &dropped), 1);
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &dropped), 1);
     h.finish();
 }
 
@@ -143,9 +139,9 @@ nodes:
 "#;
     let h = start(yaml, 1);
     let probes = [
-        h.source.push(acme_record(1, "sshd[19939]: check pass")),
-        h.source.push(acme_record(2, "disk full")),
-        h.source.push(acme_record(3, "hello")),
+        h.push(body_record(1, "sshd[19939]: check pass")),
+        h.push(body_record(2, "disk full")),
+        h.push(body_record(3, "hello")),
     ];
     for probe in &probes {
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
@@ -159,7 +155,7 @@ nodes:
         ("stage", "by_body"),
         ("engine", "backtracking"),
     ];
-    assert_eq!(h.counter(Metric::RecordsIn, &labels), 3);
+    assert_eq!(h.counter(CounterMetric::RecordsIn, &labels), 3);
     h.finish();
 }
 
@@ -182,12 +178,12 @@ nodes:
     let mut adversarial = "a".repeat(30);
     adversarial.push('!');
     let flagged = fusion_core::record::Record::from_json(&format!(
-        r#"{{"id": 1, "body": "{adversarial}", "attributes": {{"keep": true}}, "resource": {{"tenant.id": "acme"}}}}"#
+        r#"{{"id": 1, "body": "{adversarial}", "attributes": {{"keep": true}}}}"#
     ))
     .expect("record parses");
-    assert_eq!(h.source.push(flagged).wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(h.push(flagged).wait(WAIT), Some(AckOutcome::Ack));
     assert_eq!(
-        h.source.push(acme_record(2, &adversarial)).wait(WAIT),
+        h.push(body_record(2, &adversarial)).wait(WAIT),
         Some(AckOutcome::Ack)
     );
 
@@ -203,7 +199,7 @@ nodes:
         ("reason", "regex_limit"),
     ];
     assert_eq!(
-        h.counter(Metric::RecordsDropped, &dropped),
+        h.counter(CounterMetric::RecordsDropped, &dropped),
         1,
         "record 2 reached the pattern"
     );
@@ -215,12 +211,12 @@ fn a_condition_without_regex_operators_carries_no_engine_label() {
     let yaml = KEEP_DISK.replace(r#"body =~ "disk (full|failing)""#, r#"body == "disk full""#);
     let h = start(&yaml, 1);
     assert_eq!(
-        h.source.push(acme_record(1, "disk full")).wait(WAIT),
+        h.push(body_record(1, "disk full")).wait(WAIT),
         Some(AckOutcome::Ack)
     );
     assert_eq!(
         h.counter(
-            Metric::RecordsIn,
+            CounterMetric::RecordsIn,
             &[("tenant", "acme"), ("stage", "keep_disk")]
         ),
         1

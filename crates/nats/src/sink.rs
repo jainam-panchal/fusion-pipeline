@@ -8,6 +8,9 @@
 //!   subject: processed.logs
 //! ```
 //!
+//! Each message carries the record as the last stage left it, and its `Meta` as the
+//! [`crate::headers`]: nothing is written into the record.
+//!
 //! A batch is all-or-nothing from the engine's point of view: if any record's `PubAck` is
 //! missing the whole write fails and the source message is nak'd, so records published
 //! earlier in that batch are delivered again. That is the at-least-once contract.
@@ -15,9 +18,10 @@
 use std::sync::Arc;
 
 use async_nats::jetstream;
-use fusion_core::io::{Sink, SinkError};
-use fusion_core::record::Record;
+use fusion_core::io::{Outgoing, Sink, SinkError};
 use tokio::runtime::Runtime;
+
+use crate::headers;
 
 /// A JetStream sink. Build one through [`crate::Nats::sink`].
 #[derive(Debug)]
@@ -65,14 +69,18 @@ impl NatsSink {
         }
     }
 
-    async fn publish_all(&self, records: &[Record]) -> Result<(), WriteError> {
+    async fn publish_all(&self, batch: &[Outgoing<'_>]) -> Result<(), WriteError> {
         // Send every publish first, then wait for the acks, so a batch costs one round trip.
-        let mut acks = Vec::with_capacity(records.len());
-        for record in records {
-            let payload = record.to_json()?;
+        let mut acks = Vec::with_capacity(batch.len());
+        for outgoing in batch {
+            let payload = outgoing.record.to_json()?;
             let ack = self
                 .context
-                .publish(self.subject.clone(), payload.into())
+                .publish_with_headers(
+                    self.subject.clone(),
+                    headers::for_meta(outgoing.meta),
+                    payload.into(),
+                )
                 .await
                 .map_err(|e| self.publish_error(e))?;
             acks.push(ack);
@@ -85,9 +93,9 @@ impl NatsSink {
 }
 
 impl Sink for NatsSink {
-    fn write(&self, records: &[Record]) -> Result<(), SinkError> {
+    fn write(&self, batch: &[Outgoing<'_>]) -> Result<(), SinkError> {
         self.runtime
-            .block_on(self.publish_all(records))
+            .block_on(self.publish_all(batch))
             .map_err(SinkError::new)
     }
 }

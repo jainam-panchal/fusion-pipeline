@@ -151,13 +151,13 @@ nodes:
                 &json!({
                     "id": line_id,
                     "body": lines[line_id - 1],
-                    "resource": {"tenant.id": set.name, "log.format": set.name},
+                    "resource": {"log.format": set.name},
                     "attributes": {"loghub.line_id": line_id},
                 })
                 .to_string(),
             )
             .expect("record parses");
-            (line_id, h.source.push(record))
+            (line_id, h.push(record))
         })
         .collect();
     for (line_id, probe) in &probes {

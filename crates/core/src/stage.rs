@@ -4,81 +4,48 @@
 //! [`Context`]. The handle prefixes every key with `{pipeline}:{tenant}:{node}:` so no stage
 //! can share state across tenants or pipelines, and counts every operation on
 //! `state_ops_total`, `state_op_duration_seconds` and `state_errors_total`.
+//!
+//! Only core builds a [`Context`]: each worker holds a stage environment and derives every
+//! node's context from it, the record's [`Meta`] and the node, so the handle's tenant, the
+//! metric labels and the `Meta` a stage reads are the same tenant by construction.
 
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::closed_set::closed_set;
+use crate::meta::Meta;
 use crate::metrics::{EditCause, EditOp, EngineLabel, Labels, LuaErrorKind, Metrics};
-use crate::record::{Record, RecordId};
+use crate::record::Record;
 use crate::state::{StateError, StateErrorPolicy, StateStore};
 
-/// Why a record was intentionally dropped. Closed set: adding one is a spec amendment, and
-/// [`DropReason::ALL`] lists them all. It is the `reason` label on `records_dropped_total`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DropReason {
-    /// A `filter` node dropped it.
-    Filter,
-    /// A `route` node's default was `drop`.
-    RouteDefaultDrop,
-    /// A `sample` node did not select it.
-    Sample,
-    /// A `dedupe` node saw it before.
-    Dedupe,
-    /// A Lua script returned `nil`.
-    LuaDrop,
-    /// A Lua script errored with `on_error: drop`.
-    LuaError,
-    /// A regex limit tripped.
-    RegexLimit,
-    /// The state store failed and the node's policy is `drop`.
-    StateError,
-    /// The record is malformed or of an unsupported kind.
-    InvalidRecord,
-    /// The record carries no `id`.
-    MissingId,
-    /// An `edit` op could not apply and the node's `on_unapplied` is `drop`.
-    EditUnapplied,
-}
-
-impl DropReason {
-    /// Every reason, for checks against the spec's closed set.
-    pub const ALL: [Self; 11] = [
-        Self::Filter,
-        Self::RouteDefaultDrop,
-        Self::Sample,
-        Self::Dedupe,
-        Self::LuaDrop,
-        Self::LuaError,
-        Self::RegexLimit,
-        Self::StateError,
-        Self::InvalidRecord,
-        Self::MissingId,
-        Self::EditUnapplied,
-    ];
-
-    /// The metric label value.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Filter => "filter",
-            Self::RouteDefaultDrop => "route_default_drop",
-            Self::Sample => "sample",
-            Self::Dedupe => "dedupe",
-            Self::LuaDrop => "lua_drop",
-            Self::LuaError => "lua_error",
-            Self::RegexLimit => "regex_limit",
-            Self::StateError => "state_error",
-            Self::InvalidRecord => "invalid_record",
-            Self::MissingId => "missing_id",
-            Self::EditUnapplied => "edit_unapplied",
-        }
-    }
-}
-
-impl fmt::Display for DropReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+closed_set! {
+    /// Why a record was intentionally dropped. Closed set: adding one is a spec amendment, and
+    /// [`DropReason::ALL`] lists them all. It is the `reason` label on `records_dropped_total`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum DropReason {
+        /// A `filter` node dropped it.
+        Filter = "filter",
+        /// A `route` node's default was `drop`.
+        RouteDefaultDrop = "route_default_drop",
+        /// A `sample` node did not select it.
+        Sample = "sample",
+        /// A `dedupe` node saw it before.
+        Dedupe = "dedupe",
+        /// A Lua script returned `nil`.
+        LuaDrop = "lua_drop",
+        /// A Lua script errored with `on_error: drop`.
+        LuaError = "lua_error",
+        /// A regex limit tripped.
+        RegexLimit = "regex_limit",
+        /// The state store failed and the node's policy is `drop`.
+        StateError = "state_error",
+        /// The record is malformed or of an unsupported kind.
+        InvalidRecord = "invalid_record",
+        /// The record carries no `id`.
+        MissingId = "missing_id",
+        /// An `edit` op could not apply and the node's `on_unapplied` is `drop`.
+        EditUnapplied = "edit_unapplied",
     }
 }
 
@@ -141,7 +108,7 @@ pub struct State {
     store: Arc<dyn StateStore>,
     metrics: Metrics,
     prefix: String,
-    tenant: String,
+    tenant: Arc<str>,
     node: String,
     /// The node's `engine` label, so its state-store series carry it like every other
     /// per-node metric.
@@ -166,13 +133,13 @@ impl State {
     /// (`engine` is the stage's [`Stage::engine_label`]), and `declared` is the node's
     /// [`Stage::uses_state`]. `tenant` and `node` are taken apart rather than as a
     /// [`Labels`] so a handle without a node id is unrepresentable: the key prefix is an
-    /// invariant, not a convention.
+    /// invariant, not a convention. Built only by [`StageEnvironment::context`].
     #[must_use]
-    pub fn new(
+    fn new(
         store: Arc<dyn StateStore>,
         metrics: Metrics,
         pipeline: &str,
-        tenant: &str,
+        tenant: Arc<str>,
         node: &str,
         engine: Option<EngineLabel>,
         declared: bool,
@@ -180,8 +147,8 @@ impl State {
         Self {
             store,
             metrics,
-            prefix: format!("{pipeline}:{}:{node}:", escape_segment(tenant)),
-            tenant: tenant.to_owned(),
+            prefix: format!("{pipeline}:{}:{node}:", escape_segment(&tenant)),
+            tenant,
             node: node.to_owned(),
             engine,
             declared,
@@ -317,9 +284,9 @@ pub struct StageMetrics<'a> {
 
 impl<'a> StageMetrics<'a> {
     /// A handle emitting through `metrics` under `labels`, the node's labels as the engine
-    /// built them.
+    /// built them. Built only by [`StageEnvironment::context`].
     #[must_use]
-    pub const fn new(metrics: &'a Metrics, labels: Labels<'a>) -> Self {
+    const fn new(metrics: &'a Metrics, labels: Labels<'a>) -> Self {
         Self { metrics, labels }
     }
 
@@ -342,18 +309,71 @@ impl<'a> StageMetrics<'a> {
     }
 }
 
-/// Per-record context handed to a stage alongside the record.
+/// Per-record context handed to a stage alongside the record. Built only by core, from the
+/// worker's stage environment, the record's [`Meta`] and the node.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Context<'a> {
     /// Id of the node being run.
     pub node_id: &'a str,
-    /// Id of the record being processed.
-    pub record_id: RecordId,
+    /// The pipeline's view of the record being processed: its id, tenant, ingestion time
+    /// and delivery count. Read-only; every decision reads these, never the payload.
+    pub meta: &'a Meta,
     /// The state handle: the worker's store connection, scoped to this pipeline, tenant
     /// and node.
     pub state: State,
     /// The metrics a stage emits for itself, under the node's labels.
     pub metrics: StageMetrics<'a>,
+}
+
+/// What a worker holds for every stage it runs: the pipeline's name, the worker's state-store
+/// connection and the metrics handle. Built once per worker at engine start.
+pub(crate) struct StageEnvironment {
+    pipeline: String,
+    store: Arc<dyn StateStore>,
+    metrics: Metrics,
+}
+
+impl StageEnvironment {
+    pub(crate) const fn new(
+        pipeline: String,
+        store: Arc<dyn StateStore>,
+        metrics: Metrics,
+    ) -> Self {
+        Self {
+            pipeline,
+            store,
+            metrics,
+        }
+    }
+
+    /// The context for `stage`, the node `node_id`, running over the record whose `Meta` is
+    /// `meta`: the state handle and the metric labels both take the tenant from `meta`.
+    pub(crate) fn context<'a>(
+        &'a self,
+        meta: &'a Meta,
+        node_id: &'a str,
+        stage: &dyn Stage,
+    ) -> Context<'a> {
+        let engine = stage.engine_label();
+        Context {
+            node_id,
+            meta,
+            state: State::new(
+                Arc::clone(&self.store),
+                self.metrics.clone(),
+                &self.pipeline,
+                Arc::clone(&meta.tenant),
+                node_id,
+                engine,
+                stage.uses_state(),
+            ),
+            metrics: StageMetrics::new(
+                &self.metrics,
+                Labels::new(&meta.tenant, node_id).with_engine(engine),
+            ),
+        }
+    }
 }
 
 /// A pipeline stage. Shared across worker threads, so it must be `Send + Sync`; per-worker

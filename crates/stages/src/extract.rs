@@ -85,7 +85,7 @@ impl Extract {
 
 impl Stage for Extract {
     fn process(&self, mut record: Record, ctx: &Context<'_>) -> StageOutput {
-        let FieldValue::Str(haystack) = self.field.read(&record) else {
+        let FieldValue::Str(haystack) = self.field.read(&record, ctx.meta) else {
             ctx.metrics.regex_nonmatch();
             return StageOutput::Pass(record);
         };

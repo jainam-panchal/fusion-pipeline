@@ -2,8 +2,10 @@
 # End-to-end check of the NATS source and sink against the compose stack (issue #3).
 #
 # Brings up deploy/compose.yaml, runs `pipelined --config deploy/pipeline.yaml`, and checks:
-#   1. a record published to logs.acme.syslog appears on processed.logs with
-#      resource["tenant.id"] stamped as "acme" and the consumer shows it acknowledged;
+#   1. a record published to logs.acme.syslog appears on processed.logs exactly as
+#      published, with the pipeline headers Fusion-Tenant: acme, a decimal
+#      Fusion-Ingestion-Time and Fusion-Ingestion-Time-Kind: reported, and the consumer shows
+#      it acknowledged;
 #   2. with the PROCESSED stream deleted, the record is nak'd and JetStream redelivers it;
 #   3. NATS_URL overrides the YAML URL for both the source and the sink (a bogus NATS_URL
 #      makes startup fail fast; bogus YAML URLs with a real NATS_URL start fine).
@@ -14,7 +16,7 @@ cd "$(dirname "$0")/.."
 COMPOSE=(docker compose -f deploy/compose.yaml)
 CONFIG=deploy/pipeline.yaml
 LOG=$(mktemp -t pipelined.XXXXXX.log)
-SUB_OUT=$(mktemp -t nats-sub.XXXXXX.json)
+SUB_OUT=$(mktemp -d -t nats-sub.XXXXXX)
 PIPELINED_PID=""
 unset NATS_URL
 
@@ -26,7 +28,7 @@ cleanup() {
         kill -INT "$PIPELINED_PID" 2>/dev/null || true
         wait "$PIPELINED_PID" 2>/dev/null || true
     fi
-    rm -f "$SUB_OUT"
+    rm -rf "$SUB_OUT"
 }
 trap cleanup EXIT
 
@@ -76,20 +78,31 @@ step "clean streams"
 nats stream purge LOGS -f >/dev/null
 nats stream purge PROCESSED -f >/dev/null
 
-step "1. pub logs.acme.syslog -> sub processed.logs, tenant stamped, consumer acked"
+step "1. pub logs.acme.syslog -> sub processed.logs, record untouched, Meta in headers, consumer acked"
 start_pipelined
-timeout 20 nats sub processed.logs --count 1 --raw >"$SUB_OUT" &
+# --dump writes each message as JSON: {"Subject", "Header": {name: [values]}, "Data": base64}.
+timeout 20 nats sub processed.logs --count 1 --dump="$SUB_OUT" >/dev/null &
 SUB_PID=$!
 sleep 1
 nats pub logs.acme.syslog '{"id": 1, "body": "disk full", "severity_text": "ERROR"}'
 wait "$SUB_PID" || fail "nats sub processed.logs saw no record"
-cat "$SUB_OUT"
-jq -e '.id == 1' "$SUB_OUT" >/dev/null || fail "record on processed.logs has the wrong id"
-jq -e '.resource["tenant.id"] == "acme"' "$SUB_OUT" >/dev/null \
-    || fail 'record on processed.logs lacks resource["tenant.id"] == "acme"'
+MSG="$SUB_OUT/1.json"
+[[ -f "$MSG" ]] || fail "nats sub wrote no message to $SUB_OUT"
+jq . "$MSG"
+RECORD=$(jq -r '.Data | @base64d' "$MSG")
+echo "$RECORD"
+jq -e '.id == 1' <<<"$RECORD" >/dev/null || fail "record on processed.logs has the wrong id"
+jq -e '.resource["tenant.id"] == null and .observed_time_unix_nano == null' <<<"$RECORD" >/dev/null \
+    || fail "the pipeline wrote a tenant or a time into the record on processed.logs"
+jq -e '.Header["Fusion-Tenant"] == ["acme"]' "$MSG" >/dev/null \
+    || fail 'message on processed.logs lacks Fusion-Tenant: acme'
+jq -e '.Header["Fusion-Ingestion-Time"][0] | test("^[0-9]+$")' "$MSG" >/dev/null \
+    || fail 'message on processed.logs lacks a decimal Fusion-Ingestion-Time'
+jq -e '.Header["Fusion-Ingestion-Time-Kind"] == ["reported"]' "$MSG" >/dev/null \
+    || fail 'message on processed.logs lacks Fusion-Ingestion-Time-Kind: reported'
 wait_for 10 "the consumer to show 0 pending" consumer_settled
 [[ "$(consumer_field num_redelivered)" == 0 ]] || fail "consumer shows redeliveries after a clean run"
-echo "ok: delivered, tenant stamped, 0 pending, 0 redelivered"
+echo "ok: delivered untouched, Meta in headers, 0 pending, 0 redelivered"
 
 step "2. sink stream deleted -> record nak'd -> JetStream redelivers"
 nats stream rm PROCESSED -f >/dev/null

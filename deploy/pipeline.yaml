@@ -8,23 +8,25 @@
 # `url` here and on the sink is overridden by NATS_URL when set; the state store comes from
 # DRAGONFLY_URL (default redis://127.0.0.1:6379, the compose port). The filter is the one
 # stage every record crosses, so stage latency and drops by reason are on the dashboard from
-# the first record; a record without `severity_text` is not TRACE and passes. The dedupe
-# node gives the state-store panels a producer; its window is measured in ingestion time,
-# so a redelivered record is never mistaken for a repeat. `on_state_error: nak` (the default
-# is `pass`) because in the chaos test a paused Dragonfly must hold records back, not let
-# duplicates through: the redelivery lands after the pause is over. The extract node gives
-# the regex panels a producer: a body that is not a syslog line is a non-match and passes
+# the first record; a record without `severity_text` is not TRACE and passes. The dedupe node
+# gives the state-store panels a producer; its window is measured in ingestion time, so a
+# redelivered record is never mistaken for a repeat. `on_state_error: nak` (the default is
+# `pass`) because in the chaos test a paused Dragonfly must hold records back, not let
+# duplicates through: the redelivery lands after the pause is over. The extract node gives the
+# regex panels a producer: a body that is not a syslog line is a non-match and passes
 # unchanged. The edit node gives `edit_unapplied_total` a producer: it copies the extracted
-# component into `attributes.service`, which is unapplied on a body that was not a syslog line,
-# and stamps the pipeline name. The redact node masks IPv4 addresses in the body and the
+# component into `attributes.service`, which is unapplied on a body that was not a syslog
+# line, and sets the pipeline name. The redact node masks IPv4 addresses in the body and the
 # extracted content. The lua node gives `lua_errors_total` a producer: it derives
 # `attributes.http.status_class` from `attributes.http.status` and splits a multi-line body
-# into one record per line, and a record whose status is not a number makes it raise, a
-# `runtime` error that `on_error: pass` forwards unchanged so the main sink still sees every
-# record. The parsed branch fans out from the extract node: its edit node runs
-# with `on_unapplied: drop`, so a record the pattern did not parse is dropped there with
-# reason `edit_unapplied` (the live producer of that reason) while the main branch still
-# delivers it; a parsed record reaches processed.parsed with `Content` renamed `message`.
+# into one record per line. A body of only newlines passes whole. A present status makes it
+# raise unless it is null or a number (or a numeric string, which Lua converts) whose hundreds
+# fit a 64-bit integer; that is a `runtime` error, which `on_error: pass` forwards unchanged
+# so the main sink still sees every record. The parsed branch fans out from the extract node:
+# its edit node runs with `on_unapplied: drop`, so a record the pattern did not parse is
+# dropped there with reason `edit_unapplied` (the live producer of that reason) while the main
+# branch still delivers it; a parsed record reaches processed.parsed with `Content` renamed
+# `message`.
 name: compose
 source:
   type: nats
@@ -62,7 +64,7 @@ nodes:
     limits: { instructions: 1000000, memory_kib: 16384, output_kib: 1024 }
     source: |
       local function class_of(status)
-        if status == nil then return nil end
+        if status == nil or status == json.null then return nil end
         return string.format("%dxx", status // 100)
       end
 
@@ -74,16 +76,11 @@ nodes:
         end
         local out = {}
         for line in record.body:gmatch("[^\n]+") do
-          out[#out + 1] = {
-            id = record.id,
-            kind = record.kind,
-            body = line,
-            severity_text = record.severity_text,
-            attributes = record.attributes,
-            resource = record.resource,
-            scope = record.scope,
-          }
+          local copy = record:copy()
+          copy.body = line
+          out[#out + 1] = copy
         end
+        if #out == 0 then return record end   -- only newlines: nothing to split
         return out
       end
   - id: out

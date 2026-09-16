@@ -15,7 +15,7 @@ Cargo workspace under `crates/`:
 | `core` | record model, field paths (read, write, remove), config loader, DAG validation, engine, `Source`/`Sink`/`AckHandle` traits, in-memory fakes, condition grammar |
 | `stages` | built-in stages: `filter`, `route`, `dedupe`, `extract`, `redact`, `sample`, `edit` (`lua` has its own crate) |
 | `regex` | two-engine regex facade: linear `regex` first, PCRE2 fallback with configurable limits, load-time ReDoS lint and canary; the only crate with `unsafe` |
-| `nats` | NATS JetStream source (pull consumer, explicit ack) and sink (returns after `PubAck`); tenant stamped from the subject; `NATS_URL` overrides configured URLs |
+| `nats` | NATS JetStream source (pull consumer, explicit ack) and sink (returns after `PubAck`); `Meta` in and out as `Fusion-*` headers, never in the record; `NATS_URL` overrides configured URLs |
 | `state` | Dragonfly state store over the Redis protocol: one sync connection per worker, timeouts and reconnect, `DRAGONFLY_URL` |
 | `otel` | OTLP metrics exporter: one instrument per spec metric behind core's `Recorder` boundary, HTTP/protobuf to the collector, configured by `OTEL_EXPORTER_OTLP_*` |
 | `lua` | the `lua` stage: Lua 5.4 through `mlua` (vendored), one sandboxed VM per worker per node, instruction budget, memory cap, output check, `state`/`log`/`now_ns` API |
@@ -43,7 +43,15 @@ nats pub logs.acme.syslog '{"id": 1, "body": "disk full"}'
 nats consumer info LOGS pipeline        # 0 pending, 0 redelivered
 ```
 
-The record arrives with `resource.tenant.id` set to `acme`, read from the subject. A sink
+The record arrives exactly as published, and the message carries the pipeline's view of it
+as headers: `Fusion-Tenant: acme` (from the subject), `Fusion-Ingestion-Time` (the JetStream
+publish time, in nanoseconds) and `Fusion-Ingestion-Time-Kind: reported`. The pipeline never
+writes those into the record; a config that wants the tenant in the payload says so with
+`edit copy {from: meta.tenant, to: resource.tenant.id}`. A pipeline reading `processed.logs`
+takes the tenant and ingestion time back from the headers (the subject's tenant, when the
+subject names one, wins over the header). Only a subject of the form
+`{tenant_prefix}.{tenant}.>` names a tenant; the source's `tenant_prefix` is `logs` unless the
+config says otherwise, so `processed.logs` names none. A sink
 that cannot get its `PubAck` (delete `PROCESSED` to see it) makes the engine nak the source
 message and JetStream redeliver it. `NATS_URL` overrides the `url` of the source and every
 sink. The compose pipeline has a `dedupe` node, so it also needs the compose Dragonfly:
@@ -82,7 +90,8 @@ variable) is set and records nothing otherwise, so `cargo run` against the compo
 as before; point it at the compose collector with `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`.
 `OTEL_METRIC_EXPORT_INTERVAL` (milliseconds) sets the cadence; compose uses 5000.
 
-Every metric carries `tenant`; per-node metrics carry `stage` (the node id, `source` for the
+Every metric carries `tenant`, the record's `Meta` tenant (the subject's, else the
+`Fusion-Tenant` header, else `unknown`; never the record's `resource.tenant.id`); per-node metrics carry `stage` (the node id, `source` for the
 engine's own decisions), the metrics of a regex node carry `engine`, and
 `records_dropped_total` carries `reason` from the spec's closed set, and the collector adds `job="fusion-pipeline"` and `instance=<hostname>` from the
 resource, so `--scale pipeline=3` gives three series that the dashboard sums. NATS is scraped through `prometheus-nats-exporter`
@@ -149,10 +158,12 @@ passes; a different record with the same content inside the window drops with re
 records behind it dedupe against the new window even while the old key's TTL is still
 running. The takeover is a compare-and-set against the holder the record read, so two
 workers past the window at once agree on one new holder and the other drops as its
-repeat. The window is measured in ingestion time (`observed_time_unix_nano`, which the NATS source
-fills from the JetStream publish time when a record has no timestamp), so a record
-redelivered after a crash carries the same time it had before and is recognised as itself
-however long the redelivery took, even if a newer duplicate claimed the key meanwhile.
+repeat. The window is measured in the record's ingestion time, which the engine fixes at
+intake from the transport (for NATS, the JetStream publish time, or an upstream pipeline's
+`Fusion-Ingestion-Time`), not from the producer's clock, so a record redelivered after a crash carries the same time
+it had before and is recognised as itself however long the redelivery took, even if a newer
+duplicate claimed the key meanwhile. A stage upstream rewriting the time fields changes what
+the sink writes, not the window (ADR 0005).
 
 When Dragonfly cannot answer (2 s per operation, then the connection is reopened on the
 next call) the stage hands the record back and the engine applies `on_state_error`: `pass`
@@ -211,8 +222,12 @@ its own `edit` node. An op whose source reads as null or whose target refuses th
 that op and the op counts on `edit_unapplied_total{op, field, cause}`, then `on_unapplied`
 says whether the record goes on (`skip`, the default) or drops with reason `edit_unapplied`.
 The node never naks: the outcome is fixed by the record's shape. What load can check, it
-refuses, naming the node and the op's position: paths, `id`, `kind` and the tenant, a `set`
-literal of the wrong type, a `hash` target that takes no string, `from` equal to `to`.
+refuses, naming the node and the op's position: paths, a `set` literal of the wrong type,
+a `hash` target that takes no string, `from` equal to `to`, any write to a `meta.*` path.
+Any record field may be edited, `id`, `kind` and `resource.tenant.id` included: the pipeline
+decides from the record's `Meta`, fixed at intake, so an edit changes what the sink writes
+and nothing else (ADR 0005). `copy` may read a `meta.*` path, which is how a pipeline value
+enters a record: `copy {from: meta.tenant, to: resource.tenant.id}`.
 
 ```yaml
 nodes:
@@ -249,59 +264,65 @@ nodes:
 ```lua
 local seen = 0                           -- upvalues persist across records on one worker
 
-function process(record)
+function process(record, meta)   -- meta: id, tenant, ingestion_time, delivery_count
   seen = seen + 1
   local status = record.attributes["http.status"]
-  if status then
+  if status ~= nil and status ~= json.null then
     record.attributes["http.status_class"] = string.format("%dxx", status // 100)
   end
   if type(record.body) ~= "string" or not record.body:find("\n") then return record end
   local out = {}
   for line in record.body:gmatch("[^\n]+") do
-    out[#out + 1] = { id = record.id, kind = record.kind, body = line,
-                      attributes = record.attributes, resource = record.resource }
+    local r = record:copy()              -- a deep copy of every field
+    r.body = line
+    out[#out + 1] = r
   end
+  if #out == 0 then return record end    -- only newlines: nothing to split
   return out
 end
 ```
 
-A script may write the time fields, and they are ingestion time for every stateful node
-downstream: a `dedupe` window is measured against them. Writing a value derived from the
-record is fine; writing `now_ns()` is not, because a redelivered record then gets a later
-ingestion time than the delivery before and a different dedupe verdict. Stamp an attribute
-instead.
-
-Every returned record keeps the original `id` and `resource.tenant.id`, `kind` is `log`
-(filled in when left out), typed fields keep their types (`severity_number` an integer, the
-time fields non-negative integers; `18 / 2` counts as one), a key that is not a record
-field is refused, and the strings together stay under `output_kib`. Anything else is a Lua
-error of kind `output`. A script that loops is stopped by the instruction budget
-(`instructions`, per record), one that allocates without bound by the memory cap
-(`memory_kib`, at least 64, on the worker's VM as a whole, upvalues included), a script that
-raises is `runtime`; each counts on `lua_errors_total{kind}` and then `on_error` decides:
-`pass` forwards the record as it came in, `drop` drops it with reason `lua_error`, `nak`
-fails it so JetStream redelivers. `nak` is for failures a retry can cure; a `runtime` or
-`output` error repeats on redelivery until the consumer's `max_deliver`, so under `nak` a
-bad script poisons its records until the dead-letter queue (#10) takes them. The next record
-is served either way: the VM survives a budget or runtime error, and a `memory` error
-rebuilds it, upvalues included, since a script whose upvalues grow would otherwise fail
-every record from then on. `pcall` and `xpcall` catch the script's own errors and nothing else: a budget
-or cap trip and a state error go through them.
+A script may change or drop any field, `id`, `kind`, the tenant and the time fields
+included; every returned record continues under the incoming record's `Meta`, so labels,
+state keys and windows do not move. Every returned field goes through core's write rules,
+the same ones `edit` uses (`id`, `severity_number` and the time fields integers, `18 / 2`
+counting as one and an `id` given as decimal text too; `kind` one of `log`, `metric`,
+`span`, and `log` when left out), a key that is not a record field is refused, and the
+strings together stay under `output_kib`. `meta` is read-only: writing to it is a `runtime`
+error. Anything else is a Lua error of kind `output`. A record the script leaves alone, or
+copies, comes back unchanged: a JSON list stays a list even when empty, and a JSON `null` in
+a list or a map is `json.null`, which is truthy, so test it with `== json.null`.
+`json.list(t)` makes a table the script builds a list, so a field set to `json.list()`
+leaves as `[]`; returned as the whole result, an empty list is refused like an empty table.
+A list, the one `process` returns for a split included, may hold only its positions `1..n`:
+write `json.null`, not `nil`, for a null entry. A field set to `json.null` is left out, as
+with `nil`. A script that loops is stopped by the instruction budget (`instructions`, per
+record), one that allocates without bound by the memory cap (`memory_kib`, at least 64, on
+the worker's VM as a whole, upvalues included), a script that raises is `runtime`; each
+counts on `lua_errors_total{kind}` and then `on_error` decides: `pass` forwards the record
+as it came in, `drop` drops it with reason `lua_error`, `nak` fails it so JetStream
+redelivers. `nak` is for failures a retry can cure; a `runtime` or `output` error repeats on
+redelivery until the consumer's `max_deliver`, so under `nak` a bad script poisons its
+records until the dead-letter queue (#10) takes them. The next record is served either way:
+the VM survives a budget or runtime error, and a `memory` error rebuilds it, upvalues
+included, since a script whose upvalues grow would otherwise fail every record from then on.
+`pcall` and `xpcall` catch the script's own errors and nothing else: a budget or cap trip
+and a state error go through them.
 
 The sandbox has `string`, `table`, `math` and `utf8`, plus `state.get(key)`,
 `state.set_nx(key, value, ttl_ms)` (`true`, or `false` and the holder), `state.incr(key, by,
 ttl_ms)` and `state.del(key)` on the node's state handle (every key under
-`{pipeline}:{tenant}:{node}:`, every call on the `state_*` metrics), `log.info`, `log.warn`
-and `now_ns()`. `os`, `io`, `package`, `require`, `load`, `debug` and `print` are not there,
-and a script that names one of them anywhere is refused when the config loads, with the
-line; so is a script that does not parse or does not define `process`. A `state.*` call the
-store cannot answer is handled by `on_state_error`, not `on_error`; its default is `nak`
-where `dedupe` and `sample` default to `pass`, because a record forwarded past a script
-that did not run may be unredacted, whereas an un-deduped one is only a copy. One VM per
-worker per node, the script loaded once, so a counter in its upvalues persists across the
-records that worker sees; with `workers: 4` there are four counters, and a redelivered
-record may land on another. A `script:` path is read relative to the process working
-directory, not the config file.
+`{pipeline}:{tenant}:{node}:`, every call on the `state_*` metrics), `log.info`, `log.warn`,
+`now_ns()`, a read-only `json` (`json.null`, `json.list(t)`) and `record:copy()`. `os`,
+`io`, `package`, `require`, `load`, `debug` and `print` are not there, and a script that
+names one of them anywhere is refused when the config loads, with the line; so is a script
+that does not parse or does not define `process`. A `state.*` call the store cannot answer
+is handled by `on_state_error`, not `on_error`; its default is `nak` where `dedupe` and
+`sample` default to `pass`, because a record forwarded past a script that did not run may be
+unredacted, whereas an un-deduped one is only a copy. One VM per worker per node, the script
+loaded once, so a counter in its upvalues persists across the records that worker sees; with
+`workers: 4` there are four counters, and a redelivered record may land on another. A
+`script:` path is read relative to the process working directory, not the config file.
 
 ## Field paths
 
@@ -311,10 +332,13 @@ joined with dots, are the flat map key, so `attributes.http.status` reads the `h
 key. A segment is letters, digits, `_` and `-`; quote it for anything else:
 `attributes."Event ID".code`. `body` and the scalar fields take no segments. Brackets are
 not accepted; every path error is a load-time error that names the node and says what to
-write instead.
+write instead. `meta.id`, `meta.tenant`, `meta.ingestion_time` and `meta.delivery_count` read
+the pipeline's view of the record rather than the record: a condition on the tenant reads
+`meta.tenant`, since `resource.tenant.id` is whatever the producer or a stage put there. A
+`meta.*` path can be read anywhere and written nowhere.
 
 ```yaml
-condition: attributes.http.status >= 500 and resource.tenant.id == "acme"
+condition: attributes.http.status >= 500 and meta.tenant == "acme"
 condition: resource.k8s.pod-name == "web-0" and attributes."something something" == 1
 ```
 

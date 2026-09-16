@@ -20,15 +20,16 @@
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::config::SOURCE_ID;
 use crate::dag::NodeIndex;
-use crate::io::{Envelope, Intake, Source, SourceError};
+use crate::io::{Envelope, Intake, Outgoing, Source, SourceError};
+use crate::meta::{IngestionTime, Meta, Rejection, unix_nanos_now};
 use crate::metrics::{Labels, Metrics};
 use crate::pipeline::{CompiledNode, Pipeline};
-use crate::record::{Kind, Record, RecordId};
-use crate::stage::{Context, DropReason, StageMetrics, StageOutput, State};
+use crate::record::Record;
+use crate::stage::{DropReason, StageEnvironment, StageOutput};
 use crate::state::{StateError, StateErrorPolicy, StateStore, StateStoreFactory};
 
 /// Envelopes buffered between the source and the workers, per worker.
@@ -125,10 +126,12 @@ impl Engine {
             let handle = thread::Builder::new()
                 .name(format!("pipeline-worker-{i}"))
                 .spawn(move || {
+                    let environment =
+                        StageEnvironment::new(pipeline.name().to_owned(), store, metrics.clone());
                     let walker = Walker {
                         pipeline: &pipeline,
                         metrics: &metrics,
-                        store,
+                        environment: &environment,
                     };
                     for envelope in rx {
                         walker.handle(envelope);
@@ -174,14 +177,13 @@ impl Engine {
     }
 }
 
-/// One record's walk through the graph: its id, its tenant, the node it is in, and whether
-/// any branch has failed. `SOURCE_ID` is the `stage` label for decisions the engine takes
-/// before any node runs.
+/// One record's walk through the graph: its [`Meta`], the node it is in, and whether any
+/// branch has failed. `SOURCE_ID` is the `stage` label for decisions the engine takes before
+/// any node runs.
 struct Walk<'p: 't, 't> {
-    record_id: RecordId,
-    /// Borrowed from the handling call, not owned, so labels built on it never borrow the
-    /// walk itself and `fail` can take them while the walk is mutated.
-    tenant: &'t str,
+    /// Borrowed from the handling call, not owned, so labels built on its tenant never
+    /// borrow the walk itself and `fail` can take them while the walk is mutated.
+    meta: &'t Meta,
     /// The labels of the node whose stage or sink is running, so a panic is charged to it.
     at: Option<Labels<'t>>,
     failed: bool,
@@ -194,7 +196,7 @@ impl Walk<'_, '_> {
         // at least visible on stderr rather than swallowed.
         eprintln!(
             "pipeline: record {} failed at node `{}`: {error}",
-            self.record_id,
+            self.meta.record_id,
             labels.stage().unwrap_or(SOURCE_ID)
         );
         self.metrics.errored(labels);
@@ -246,44 +248,59 @@ fn no_state_store() -> StateError {
 struct Walker<'p> {
     pipeline: &'p Pipeline,
     metrics: &'p Metrics,
-    /// This worker's connection to the shared state store.
-    store: Arc<dyn StateStore>,
+    /// What every stage this worker runs is given: the pipeline name, this worker's
+    /// connection to the shared state store, the metrics.
+    environment: &'p StageEnvironment,
 }
 
 impl<'p> Walker<'p> {
     fn handle(&self, envelope: Envelope) {
-        let Envelope { record, ack } = envelope;
-        let tenant = Metrics::tenant_of(&record).to_owned();
+        let Envelope {
+            record,
+            arrival,
+            ack,
+        } = envelope;
+        let resolved = Meta::resolve(&record, &arrival);
+        let tenant = Arc::clone(match &resolved {
+            Ok(meta) => &meta.tenant,
+            Err(rejected) => &rejected.tenant,
+        });
         // `source` is a node like any other on the metrics: every record the source hands
         // over counts in, every record that enters the graph counts out, and the engine's
         // own rejections are its drops. Intake is then one series whatever the first node
         // is called.
         let source = Labels::new(&tenant, SOURCE_ID);
         self.metrics.records_in(&source);
-
-        let Some(record_id) = record.id else {
-            // Spec: the idempotency guarantee has no unguarded path, so a record without an
-            // id is nak'd. The record was not forwarded, which is the drop the spec counts
-            // under `missing_id`; the message is nak'd, which is the nak it counts.
-            self.metrics.dropped(&source, DropReason::MissingId);
-            self.metrics.source_nak(&tenant);
-            ack.nak(None);
-            return;
-        };
-        if record.kind != Kind::Log {
-            // Spec: metric and span are rejected by the engine (reason `invalid_record`).
-            // Rejection is a drop, and drops are acked.
-            self.metrics.dropped(&source, DropReason::InvalidRecord);
-            ack.ack();
-            return;
+        if arrival.delivery_count > 1 {
+            self.metrics.source_redelivery(&tenant);
         }
-
+        let meta = match resolved {
+            Ok(meta) => meta,
+            Err(rejected) => {
+                match rejected.reason {
+                    // Spec: the idempotency guarantee has no unguarded path, so a record
+                    // without an id is nak'd. The record was not forwarded, which is the
+                    // drop the spec counts under `missing_id`; the message is nak'd, which
+                    // is the nak it counts.
+                    Rejection::MissingId => {
+                        self.metrics.dropped(&source, DropReason::MissingId);
+                        self.metrics.source_nak(&tenant);
+                        ack.nak(None);
+                    }
+                    // Spec: metric and span are rejected by the engine (reason
+                    // `invalid_record`). Rejection is a drop, and drops are acked.
+                    Rejection::NotLog => {
+                        self.metrics.dropped(&source, DropReason::InvalidRecord);
+                        ack.ack();
+                    }
+                }
+                return;
+            }
+        };
         self.metrics.records_out(&source, 1);
 
-        let observed = record.observed_time_unix_nano.or(record.time_unix_nano);
         let mut walk = Walk {
-            record_id,
-            tenant: &tenant,
+            meta: &meta,
             at: None,
             failed: false,
             metrics: self.metrics,
@@ -295,19 +312,20 @@ impl<'p> Walker<'p> {
             self.fan_out(targets, Arc::new(record), &mut walk);
         }));
         if outcome.is_err() {
-            let labels = walk
-                .at
-                .unwrap_or_else(|| Labels::new(walk.tenant, SOURCE_ID));
+            let labels = walk.at.unwrap_or(source);
             walk.fail(&labels, &"stage or sink panicked");
         }
         if walk.failed {
-            self.metrics.source_nak(walk.tenant);
+            self.metrics.source_nak(&tenant);
             ack.nak(None);
         } else {
             // End to end is measured on the ack only: a nakked record comes back and is
-            // measured when it finally settles.
-            if let Some(elapsed) = observed.and_then(since_unix_nanos) {
-                self.metrics.end_to_end(walk.tenant, elapsed);
+            // measured when it finally settles. A worker-clock ingestion time says nothing
+            // about how long the record has been on its way.
+            if let IngestionTime::Reported(nanos) = meta.ingestion_time {
+                if let Some(elapsed) = since_unix_nanos(nanos) {
+                    self.metrics.end_to_end(&tenant, elapsed);
+                }
             }
             ack.ack();
         }
@@ -340,13 +358,17 @@ impl<'p> Walker<'p> {
             CompiledNode::Sink(_) => None,
             CompiledNode::Stage(stage) => stage.engine_label(),
         };
-        let labels = Labels::new(walk.tenant, node_id).with_engine(engine);
+        let meta = walk.meta;
+        let labels = Labels::new(&meta.tenant, node_id).with_engine(engine);
         walk.at = Some(labels);
         metrics.records_in(&labels);
         match node {
             CompiledNode::Sink(sink) => {
                 let started = Instant::now();
-                let written = sink.write(std::slice::from_ref(&*record));
+                let written = sink.write(&[Outgoing {
+                    meta,
+                    record: &record,
+                }]);
                 metrics.sink_publish_duration(&labels, started.elapsed());
                 match written {
                     Ok(()) => metrics.records_out(&labels, 1),
@@ -357,20 +379,7 @@ impl<'p> Walker<'p> {
                 }
             }
             CompiledNode::Stage(stage) => {
-                let ctx = Context {
-                    node_id,
-                    record_id: walk.record_id,
-                    state: State::new(
-                        Arc::clone(&self.store),
-                        metrics.clone(),
-                        self.pipeline.name(),
-                        walk.tenant,
-                        node_id,
-                        engine,
-                        stage.uses_state(),
-                    ),
-                    metrics: StageMetrics::new(metrics, labels),
-                };
+                let ctx = self.environment.context(meta, node_id, stage.as_ref());
                 // Copies only if another branch still shares the record.
                 let owned = Arc::unwrap_or_clone(record);
                 let started = Instant::now();
@@ -420,6 +429,7 @@ impl<'p> Walker<'p> {
 /// How long ago `nanos` (nanoseconds since the Unix epoch) was; `None` if it is in the future
 /// or the clock is before the epoch.
 fn since_unix_nanos(nanos: u64) -> Option<Duration> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
-    now.checked_sub(Duration::from_nanos(nanos))
+    unix_nanos_now()
+        .checked_sub(nanos)
+        .map(Duration::from_nanos)
 }

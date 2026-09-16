@@ -10,12 +10,22 @@
 //!   on_state_error: nak                # nak (default) | pass, when the script uses `state`
 //! ```
 //!
-//! The script defines `process(record)`. It gets the record as a plain table with OTLP
-//! field names (`record.attributes["http.path"]`) and returns it to pass, `nil` to drop
-//! (reason `lua_drop`), or a list of records to split. Every returned record keeps the
-//! original `id` and `resource.tenant.id`, `kind` stays `log`, typed fields keep their
-//! types, the maps stay flat, and the strings together stay under `output_kib`; anything
-//! else is refused and counts as an error of kind `output`.
+//! The script defines `process(record, meta)`. It gets the record as a plain table with
+//! OTLP field names (`record.attributes["http.path"]`) and a read-only `meta` table (`id`,
+//! `tenant`, `ingestion_time`, `delivery_count`), and returns the record to pass, `nil` to
+//! drop (reason `lua_drop`), or a list of records to split; `record:copy()` makes a deep
+//! copy for a split. Every field is payload: a script may change or drop any of them, `id`,
+//! `kind`, the tenant and the time fields included, and the pipeline keeps deciding with the
+//! record's `Meta` (ADR 0005), which every split record inherits. Every returned field goes
+//! through core's write rules (`kind` is `log` when left out), every key must be a record
+//! field, and the strings together stay under `output_kib`; anything else is refused and
+//! counts as an error of kind `output`.
+//!
+//! A record the script leaves alone, or copies, comes back unchanged. A JSON list is a table
+//! marked as a list, so `[]` stays a list, and `json.list(t)` marks a table the script
+//! builds; a table read as a list may hold only its positions `1..n`, so a `null` entry is
+//! written as `json.null`, never `nil`. A JSON `null` in a list or a map is `json.null`,
+//! which is truthy like any value; a field set to `json.null` is left out, as with `nil`.
 //!
 //! A script that loops is stopped by the instruction budget (`instructions`), one that
 //! allocates without bound by the memory cap (`memory_kib`), each per record; a runtime
@@ -24,11 +34,13 @@
 //! `lua_error`, `nak` fails it so the source message redelivers.
 //!
 //! The sandbox has `string`, `table`, `math` and `utf8`, plus `state.get/set_nx/incr/del`
-//! on the node's state handle, `log.info/warn` and `now_ns()`. `os`, `io`, `package`,
-//! `require`, `load` and `debug` are not there, and a script that names one of them is
-//! refused at load, as is one that does not parse (the message carries the line) or does
-//! not define `process`. One VM per worker per node, the script loaded once, so a counter
-//! in its upvalues persists across the records that worker sees.
+//! on the node's state handle, `log.info/warn`, `now_ns()`, a read-only `json` with `null`
+//! and `list` (the global rebuilt before every run, like `meta`, so a `rawset` on it does
+//! not reach the next record), and `record:copy()`. `os`, `io`, `package`, `require`,
+//! `load` and `debug` are not there, and a script that names one of them is refused at
+//! load, as is one that does not parse (the message carries the line) or does not define
+//! `process`. One VM per worker per node, the script loaded once, so a counter in its
+//! upvalues persists across the records that worker sees.
 
 mod convert;
 mod scan;
@@ -232,7 +244,7 @@ impl Lua {
 impl Stage for Lua {
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
         let run = match self.vm() {
-            Ok(vm) => vm.run(&record, &ctx.state),
+            Ok(vm) => vm.run(&record, ctx),
             Err(error) => Err(Stopped::Lua(error)),
         };
         let error = match run {
@@ -251,7 +263,7 @@ impl Stage for Lua {
         let message = error.describe();
         eprintln!(
             "pipeline: lua `{}` record {}: {message}",
-            ctx.node_id, ctx.record_id
+            ctx.node_id, ctx.meta.record_id
         );
         match self.on_error {
             OnError::Pass => StageOutput::Pass(record),

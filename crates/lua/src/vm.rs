@@ -1,20 +1,23 @@
 //! One worker's VM for one `lua` node: the sandbox, the API a script sees (`state`, `log`,
-//! `now_ns`), the guardrails, and one run of `process` over one record.
+//! `now_ns`, `json`, `record:copy()`, the read-only `meta` argument), the guardrails,
+//! and one run of `process` over one record.
 
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use fusion_core::meta::{Meta, MetaField, unix_nanos_now};
 use fusion_core::metrics::LuaErrorKind;
-use fusion_core::record::{Record, RecordId};
-use fusion_core::stage::State;
+use fusion_core::record::Record;
+use fusion_core::stage::{Context, State};
 use fusion_core::state::StateError;
 use mlua::{
-    Function, HookTriggers, LuaOptions, LuaString, MultiValue, StdLib, Value as LuaValue, VmState,
+    Function, HookTriggers, LuaOptions, LuaString, MultiValue, StdLib, Table, Value as LuaValue,
+    VmState,
 };
 
-use crate::convert::{self, Expected, OutputError, type_name};
+use crate::convert::{self, ListMark, OutputError, type_name};
 
 /// The globals a script may not name, and the names the sandbox leaves undefined. `load`
 /// and its siblings come with the base library and are removed; `os`, `io`, `package`
@@ -156,13 +159,23 @@ impl std::error::Error for BudgetExceeded {}
 /// What the API functions need about the record being processed: set before each run.
 struct Current {
     state: State,
-    record_id: RecordId,
+    meta: Meta,
 }
 
 /// One worker's VM for one node.
 pub(crate) struct Vm {
     lua: mlua::Lua,
     process: Function,
+    /// The metatable of every `meta` table `process` receives: reads come from the current
+    /// record's `Meta`, writes raise.
+    meta_metatable: Table,
+    /// The metatable of every record table `process` receives: it gives the table `copy`.
+    record_metatable: Table,
+    /// The metatable of the `json` table each run gets: reads come from the API, writes
+    /// raise.
+    json_metatable: Table,
+    /// The mark of a table that is a JSON list, so an empty one stays a list.
+    list: ListMark,
     /// Instructions used by the current run, counted by the hook in steps of the trigger.
     used: Rc<Cell<u64>>,
     script: Arc<Script>,
@@ -183,6 +196,10 @@ impl Vm {
         }
         install_api(&lua, &script.node).map_err(runtime)?;
         install_pcall(&lua).map_err(runtime)?;
+        let meta_metatable = meta_metatable(&lua).map_err(runtime)?;
+        let list = ListMark::new(&lua).map_err(runtime)?;
+        let json_metatable = json_metatable(&lua, &list).map_err(runtime)?;
+        let record_metatable = record_metatable(&lua, &list).map_err(runtime)?;
         lua.set_memory_limit(script.memory_bytes).map_err(runtime)?;
 
         let used = Rc::new(Cell::new(0));
@@ -205,7 +222,8 @@ impl Vm {
         )
         .map_err(runtime)?;
 
-        // The top level runs under the same budget and cap as a record.
+        // The top level runs under the same budget and cap as a record, and sees `json` too.
+        install_json(&lua, &json_metatable).map_err(runtime)?;
         lua.load(script.source.as_str())
             .set_name(script.chunk_name.clone())
             .exec()
@@ -214,7 +232,7 @@ impl Vm {
             Ok(LuaValue::Function(f)) => f,
             Ok(_) => {
                 return Err(LuaError::Runtime(format!(
-                    "{}: the script must define a function `process(record)`",
+                    "{}: the script must define a function `process(record, meta)`",
                     script.display_name()
                 )));
             }
@@ -223,53 +241,72 @@ impl Vm {
         Ok(Self {
             lua,
             process,
+            meta_metatable,
+            record_metatable,
+            json_metatable,
+            list,
             used,
             script,
         })
     }
 
-    /// Run `process` over `record` with `state` as the record's handle.
-    pub(crate) fn run(&self, record: &Record, state: &State) -> Result<Returned, Stopped> {
-        let Some(record_id) = record.id else {
-            return Err(Stopped::Lua(LuaError::Runtime(
-                "record has no id".to_owned(),
-            )));
-        };
+    /// Run `process(record, meta)` over `record` with `ctx`'s state handle and `Meta`.
+    pub(crate) fn run(&self, record: &Record, ctx: &Context<'_>) -> Result<Returned, Stopped> {
         self.lua.set_app_data(Current {
-            state: state.clone(),
-            record_id,
+            state: ctx.state.clone(),
+            meta: ctx.meta.clone(),
         });
         self.used.set(0);
-        let table = convert::to_table(&self.lua, record).map_err(classify)?;
-        let returned: LuaValue = self.process.call(table).map_err(classify)?;
+        let table = convert::to_table(&self.lua, record, &self.list).map_err(classify)?;
+        table
+            .set_metatable(Some(self.record_metatable.clone()))
+            .map_err(classify)?;
+        // A fresh table per run, so a `rawset` on one run's `meta` is gone by the next;
+        // nothing a script does to it reaches the pipeline either way.
+        let meta = self.lua.create_table().map_err(classify)?;
+        meta.set_metatable(Some(self.meta_metatable.clone()))
+            .map_err(classify)?;
+        // The same for `json`, which lives in the globals: a `rawset` on it, or a script
+        // assigning the global, is gone by the next run.
+        install_json(&self.lua, &self.json_metatable).map_err(classify)?;
+        let returned: LuaValue = self.process.call((table, meta)).map_err(classify)?;
         if self.used.get() > self.script.instructions {
             // Cannot happen while `pcall` re-raises the budget; kept so a run that somehow
             // swallowed the trip is still refused.
             return Err(Stopped::Lua(LuaError::Instructions));
         }
-        let expected = Expected {
-            id: record_id,
-            tenant: record.resource.get("tenant.id"),
-            output_bytes: self.script.output_bytes,
-        };
+        let output_bytes = self.script.output_bytes;
         match returned {
             LuaValue::Nil => Ok(Returned::Drop),
             LuaValue::Table(t) => {
-                if t.raw_len() == 0 {
-                    // A record, or an empty table, which is neither a record nor a list.
-                    return convert::from_table(&t, &expected)
+                if t.raw_len() == 0 && !self.list.is_list(&t) {
+                    if t.is_empty() {
+                        return Err(output(OutputError(
+                            "an empty table is neither a record nor a list".to_owned(),
+                        )));
+                    }
+                    return convert::from_table(&t, output_bytes, &self.list)
                         .map(|record| Returned::Record(Box::new(record)))
                         .map_err(output);
                 }
-                let mut records = Vec::with_capacity(t.raw_len());
-                for item in t.sequence_values::<LuaValue>() {
-                    let item = item.map_err(classify)?;
+                let len = convert::list_len(&t, "the returned list").map_err(output)?;
+                if len == 0 {
+                    return Err(output(OutputError(
+                        "an empty list splits the record into nothing; return nil to drop it"
+                            .to_owned(),
+                    )));
+                }
+                let mut records = Vec::with_capacity(len);
+                for i in 1..=len {
+                    let item: LuaValue = t.raw_get(i).map_err(classify)?;
                     let LuaValue::Table(item) = item else {
                         return Err(output(OutputError(
                             "every entry of a returned list must be a record table".to_owned(),
                         )));
                     };
-                    records.push(convert::from_table(&item, &expected).map_err(output)?);
+                    records.push(
+                        convert::from_table(&item, output_bytes, &self.list).map_err(output)?,
+                    );
                 }
                 Ok(Returned::Split(records))
             }
@@ -446,7 +483,7 @@ fn install_api(lua: &mlua::Lua, node: &str) -> mlua::Result<()> {
             level,
             lua.create_function(move |lua, message: String| {
                 let record = current(lua)
-                    .map(|c| c.record_id.to_string())
+                    .map(|c| c.meta.record_id.to_string())
                     .unwrap_or_default();
                 // Structured logging over OTLP lands with the logs ticket; stderr until then,
                 // as the engine does.
@@ -459,15 +496,150 @@ fn install_api(lua: &mlua::Lua, node: &str) -> mlua::Result<()> {
 
     globals.raw_set(
         "now_ns",
-        lua.create_function(|_, ()| {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            Ok(i64::try_from(nanos).unwrap_or(i64::MAX))
-        })?,
+        lua.create_function(|_, ()| Ok(i64::try_from(unix_nanos_now()).unwrap_or(i64::MAX)))?,
     )?;
     Ok(())
+}
+
+/// The metatable of `json`, read-only: `json.null`, the value a JSON `null` is while a
+/// script holds it, and `json.list(t)`, which marks `t` (a new table when omitted) as a list
+/// and returns it, so a script can make a list that stays one when empty. A table with a
+/// metatable other than the list mark is refused, so a record table or `meta` cannot lose
+/// theirs; a list is returned as it is.
+fn json_metatable(lua: &mlua::Lua, list: &ListMark) -> mlua::Result<Table> {
+    let fields = lua.create_table()?;
+    fields.raw_set("null", LuaValue::NULL)?;
+    let list = list.clone();
+    fields.raw_set(
+        "list",
+        lua.create_function(move |lua, table: Option<Table>| {
+            let table = match table {
+                Some(table) => table,
+                None => lua.create_table()?,
+            };
+            if !list.accepts(&table) {
+                return Err(mlua::Error::runtime(
+                    "`json.list` takes a plain table or a list, not a table with a metatable",
+                ));
+            }
+            list.mark(&table)?;
+            Ok(table)
+        })?,
+    )?;
+    let metatable = lua.create_table()?;
+    metatable.raw_set("__index", fields)?;
+    metatable.raw_set(
+        "__newindex",
+        lua.create_function(|_, _: MultiValue| -> mlua::Result<()> {
+            Err(mlua::Error::runtime("`json` is read-only"))
+        })?,
+    )?;
+    metatable.raw_set("__metatable", "json")?;
+    Ok(metatable)
+}
+
+/// A fresh `json` global behind `metatable`.
+fn install_json(lua: &mlua::Lua, metatable: &Table) -> mlua::Result<()> {
+    let json = lua.create_table()?;
+    json.set_metatable(Some(metatable.clone()))?;
+    lua.globals().raw_set("json", json)
+}
+
+/// `record:copy()`: a deep copy of the table, shared structure and cycles kept as they are,
+/// every list still marked as one, with the record metatable so the copy can be copied too.
+/// Written in Lua so it runs under the instruction budget and the memory cap like the
+/// script's own code. The chunk takes the metatable and a function that marks the copy of a
+/// list, and returns the method.
+const COPY: &str = r#"
+local metatable, mark = ...
+local next, type, setmetatable = next, type, setmetatable
+local function deep(value, seen)
+  if type(value) ~= "table" then return value end
+  local done = seen[value]
+  if done then return done end
+  local out = {}
+  mark(value, out)
+  seen[value] = out
+  for k, v in next, value do
+    out[deep(k, seen)] = deep(v, seen)
+  end
+  return out
+end
+return function(record)
+  return setmetatable(deep(record, {}), metatable)
+end
+"#;
+
+/// The metatable behind every record table: `__index` holds `copy`, and `__metatable` hides
+/// the table from `getmetatable` and refuses `setmetatable`, so a script cannot change
+/// `copy` for the records after it.
+fn record_metatable(lua: &mlua::Lua, list: &ListMark) -> mlua::Result<Table> {
+    let metatable = lua.create_table()?;
+    // A script cannot read the list mark, so the copy asks Rust which tables carry it.
+    let list = list.clone();
+    let mark = lua.create_function(move |_, (from, to): (Table, Table)| {
+        if list.is_list(&from) {
+            list.mark(&to)?;
+        }
+        Ok(())
+    })?;
+    let copy: Function = lua
+        .load(COPY)
+        .set_name("=record:copy")
+        .call((metatable.clone(), mark))?;
+    let methods = lua.create_table()?;
+    methods.raw_set("copy", copy)?;
+    metatable.raw_set("__index", methods)?;
+    metatable.raw_set("__metatable", "record")?;
+    Ok(metatable)
+}
+
+/// The metatable behind `meta`: `__index` reads the current record's `Meta`, `__newindex`
+/// raises, `__pairs` walks the four keys, and `__metatable` hides it from `getmetatable` and
+/// refuses `setmetatable`: `getmetatable` answers `"meta"`, as the record table's answers
+/// `"record"`.
+fn meta_metatable(lua: &mlua::Lua) -> mlua::Result<Table> {
+    let metatable = lua.create_table()?;
+    metatable.raw_set(
+        "__index",
+        lua.create_function(|lua, (_, key): (Table, LuaValue)| {
+            let LuaValue::String(key) = key else {
+                return Ok(LuaValue::Nil);
+            };
+            let Some(field) = MetaField::parse(&key.to_str()?) else {
+                return Ok(LuaValue::Nil);
+            };
+            let current = current(lua)?;
+            convert::meta_value(lua, &current.meta, field)
+        })?,
+    )?;
+    metatable.raw_set(
+        "__newindex",
+        lua.create_function(|_, (_, key): (Table, LuaValue)| -> mlua::Result<()> {
+            Err(mlua::Error::runtime(format!(
+                "`meta` is the pipeline's and read-only (writing `{}`); copy a value into the \
+                 record instead",
+                key.to_string().unwrap_or_default()
+            )))
+        })?,
+    )?;
+    metatable.raw_set(
+        "__pairs",
+        lua.create_function(|lua, _: Table| {
+            let current = current(lua)?;
+            let snapshot = lua.create_table()?;
+            for field in MetaField::ALL {
+                snapshot.raw_set(
+                    field.as_str(),
+                    convert::meta_value(lua, &current.meta, field)?,
+                )?;
+            }
+            let next: Function = lua.globals().raw_get("next")?;
+            Ok((next, snapshot, LuaValue::Nil))
+        })?,
+    )?;
+    metatable.raw_set("__metatable", "meta")?;
+    Ok(metatable)
 }
 
 fn current(lua: &mlua::Lua) -> mlua::Result<mlua::AppDataRef<'_, Current>> {
