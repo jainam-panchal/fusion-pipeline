@@ -478,3 +478,38 @@ fn empty_brackets_hint_the_shape_of_a_key() {
         "{err}"
     );
 }
+
+#[test]
+fn every_kind_round_trips_through_its_wire_name() {
+    let names: Vec<&str> = Kind::ALL.into_iter().map(Kind::as_str).collect();
+    // The spec's record model names these three; a kind added to the enum fails here, and
+    // whoever extends this list amends the spec with it.
+    assert_eq!(names, ["log", "metric", "span"], "the spec's record model");
+    for kind in Kind::ALL {
+        let name = kind.as_str();
+        assert_eq!(Kind::parse(name), Some(kind), "{name}");
+        assert_eq!(
+            serde_json::to_value(kind).expect("serializes"),
+            json!(name),
+            "serde writes as_str"
+        );
+        assert_eq!(
+            serde_json::from_value::<Kind>(json!(name)).expect("deserializes"),
+            kind,
+            "serde reads as_str"
+        );
+        let mut record = record();
+        write(&mut record, "kind", json!(name)).expect("a wire name is a kind");
+        assert_eq!(
+            FieldPath::parse("kind").expect("parses").read(&record),
+            FieldValue::Str(name)
+        );
+    }
+    for name in ["LOG", "logs", ""] {
+        assert_eq!(Kind::parse(name), None, "{name:?} is not a kind");
+        assert!(
+            serde_json::from_value::<Kind>(json!(name)).is_err(),
+            "{name:?} is not a kind on the wire either"
+        );
+    }
+}
