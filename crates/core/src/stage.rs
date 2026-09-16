@@ -337,7 +337,8 @@ impl<'a> StageMetrics<'a> {
 
     /// `lua_errors_total`: a run of the stage's script was stopped for `kind`.
     pub fn lua_error(&self, kind: LuaErrorKind) {
-        self.metrics.lua_error(&self.labels.with_kind(kind.as_str()));
+        self.metrics
+            .lua_error(&self.labels.with_kind(kind.as_str()));
     }
 }
 

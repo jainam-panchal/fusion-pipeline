@@ -9,7 +9,7 @@ The pipeline needs a sandboxed Lua stage: a per-node `process(record)` function 
 
 ## Consequences
 
-- Stages are synchronous and each worker OS thread owns one Lua VM. Tokio is used only for NATS I/O.
-- Sandboxing is manual global stripping (`os`, `io`, `package`, `require`, `load`, `debug`); `mlua::Lua::sandbox` is Luau-only and does not apply.
+- Stages are synchronous and each worker OS thread owns one Lua VM. Tokio is used only for NATS I/O. (Amended 2026-09-16, issue #8: one VM per worker per `lua` node. The memory cap is set on a VM, so per-node limits need per-node VMs, and two scripts in one VM would share globals. The VM lives in a thread-local of the worker, keyed by the compiled node, built on the first record through it.)
+- Sandboxing is manual global stripping (`os`, `io`, `package`, `require`, `load`, `debug`); `mlua::Lua::sandbox` is Luau-only and does not apply. (Amended 2026-09-16, issue #8: the forbidden libraries are never loaded rather than stripped, `load` and its siblings are removed from the base library, and a lexical scan of the source refuses a script that names any of them at load, so the failure is at deploy and not on the first record that reaches the line.)
 - No LuaJIT: the instruction hook and memory limit are only reliable on the reference interpreter.
 - The workspace carries C through `pcre2-sys` and `mlua`'s vendored Lua, which is why Miri cannot run the regex tests and AddressSanitizer on nightly is used instead.

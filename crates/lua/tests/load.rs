@@ -50,17 +50,27 @@ fn a_script_from_a_file_builds_and_a_missing_file_is_rejected() {
 fn script_and_source_are_alternatives() {
     rejects("", &["`script`", "`source`"]);
     rejects(
-        &format!("    script: x.lua\n{}", inline("function process(r) return r end")),
+        &format!(
+            "    script: x.lua\n{}",
+            inline("function process(r) return r end")
+        ),
         &["alternatives"],
     );
 }
 
 #[test]
 fn every_forbidden_global_is_rejected_at_load_with_its_line() {
-    for name in ["os", "io", "package", "require", "load", "debug", "loadfile", "dofile"] {
-        let source = format!("function process(record)\n  -- comment mentioning {name}\n  local s = \"{name}\"\n  local x = {name}\n  return record\nend");
+    for name in [
+        "os", "io", "package", "require", "load", "debug", "loadfile", "dofile",
+    ] {
+        let source = format!(
+            "function process(record)\n  -- comment mentioning {name}\n  local s = \"{name}\"\n  local x = {name}\n  return record\nend"
+        );
         let err = rejects(&inline(&source), &[&format!("`{name}`"), "sandbox"]);
-        assert!(err.contains("script:4:"), "line of the use, not the comment or string: {err}");
+        assert!(
+            err.contains("script:4:"),
+            "line of the use, not the comment or string: {err}"
+        );
     }
 }
 
@@ -88,7 +98,10 @@ fn a_script_without_process_is_rejected() {
 #[test]
 fn a_top_level_that_loops_is_rejected_by_the_budget() {
     rejects(
-        &format!("    limits: {{ instructions: 1000 }}\n{}", inline("while true do end\nfunction process(r) return r end")),
+        &format!(
+            "    limits: {{ instructions: 1000 }}\n{}",
+            inline("while true do end\nfunction process(r) return r end")
+        ),
         &["instruction budget"],
     );
 }
@@ -96,11 +109,26 @@ fn a_top_level_that_loops_is_rejected_by_the_budget() {
 #[test]
 fn limits_and_policies_outside_their_values_are_rejected() {
     let ok = inline("function process(r) return r end");
-    rejects(&format!("    limits: {{ instructions: 0 }}\n{ok}"), &["`limits.instructions`"]);
-    rejects(&format!("    limits: {{ memory_kib: 8 }}\n{ok}"), &["`limits.memory_kib`", "64"]);
-    rejects(&format!("    limits: {{ output_kib: 0 }}\n{ok}"), &["`limits.output_kib`"]);
-    rejects(&format!("    limits: {{ heap_kib: 1 }}\n{ok}"), &["heap_kib"]);
+    rejects(
+        &format!("    limits: {{ instructions: 0 }}\n{ok}"),
+        &["`limits.instructions`"],
+    );
+    rejects(
+        &format!("    limits: {{ memory_kib: 8 }}\n{ok}"),
+        &["`limits.memory_kib`", "64"],
+    );
+    rejects(
+        &format!("    limits: {{ output_kib: 0 }}\n{ok}"),
+        &["`limits.output_kib`"],
+    );
+    rejects(
+        &format!("    limits: {{ heap_kib: 1 }}\n{ok}"),
+        &["heap_kib"],
+    );
     rejects(&format!("    on_error: retry\n{ok}"), &["retry"]);
     rejects(&format!("    on_state_error: drop\n{ok}"), &["drop"]);
-    build(&format!("    on_error: nak\n    on_state_error: pass\n{ok}")).expect("builds");
+    build(&format!(
+        "    on_error: nak\n    on_state_error: pass\n{ok}"
+    ))
+    .expect("builds");
 }

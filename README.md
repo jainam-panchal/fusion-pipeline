@@ -13,11 +13,12 @@ Cargo workspace under `crates/`:
 | Crate | Contents |
 |---|---|
 | `core` | record model, field paths (read, write, remove), config loader, DAG validation, engine, `Source`/`Sink`/`AckHandle` traits, in-memory fakes, condition grammar |
-| `stages` | built-in stages: `filter`, `route`, `dedupe`, `extract`, `redact`, `sample`, `edit` |
+| `stages` | built-in stages: `filter`, `route`, `dedupe`, `extract`, `redact`, `sample`, `edit` (`lua` has its own crate) |
 | `regex` | two-engine regex facade: linear `regex` first, PCRE2 fallback with configurable limits, load-time ReDoS lint and canary; the only crate with `unsafe` |
 | `nats` | NATS JetStream source (pull consumer, explicit ack) and sink (returns after `PubAck`); tenant stamped from the subject; `NATS_URL` overrides configured URLs |
 | `state` | Dragonfly state store over the Redis protocol: one sync connection per worker, timeouts and reconnect, `DRAGONFLY_URL` |
 | `otel` | OTLP metrics exporter: one instrument per spec metric behind core's `Recorder` boundary, HTTP/protobuf to the collector, configured by `OTEL_EXPORTER_OTLP_*` |
+| `lua` | the `lua` stage: Lua 5.4 through `mlua` (vendored), one sandboxed VM per worker per node, instruction budget, memory cap, output check, `state`/`log`/`now_ns` API |
 | `pipeline` | the `pipelined` binary and the default stage registry |
 
 ```sh
@@ -228,6 +229,62 @@ nodes:
 
 `hash` is a stable join key, not anonymisation: an unsalted digest of an email is
 dictionary-reversible.
+
+## Lua scripts
+
+A `lua` node runs a script defining `process(record)`. The record is a plain table with
+OTLP field names; return it to pass, `nil` to drop (reason `lua_drop`), or a list of
+records to split. It does what `edit` cannot: derive a value, split a body, keep a counter.
+
+```yaml
+nodes:
+  - id: split_lines
+    type: lua
+    script: scripts/split_lines.lua      # or `source: |` with the script inline
+    limits: { instructions: 1000000, memory_kib: 16384, output_kib: 1024 }
+    on_error: pass                       # pass (default) | drop | nak
+    on_state_error: nak                  # nak (default) | pass; only if the script uses `state`
+```
+
+```lua
+local seen = 0                           -- upvalues persist across records on one worker
+
+function process(record)
+  seen = seen + 1
+  local status = record.attributes["http.status"]
+  if status then
+    record.attributes["http.status_class"] = string.format("%dxx", status // 100)
+  end
+  if type(record.body) ~= "string" or not record.body:find("\n") then return record end
+  local out = {}
+  for line in record.body:gmatch("[^\n]+") do
+    out[#out + 1] = { id = record.id, kind = record.kind, body = line,
+                      attributes = record.attributes, resource = record.resource }
+  end
+  return out
+end
+```
+
+Every returned record keeps the original `id` and `resource.tenant.id`, `kind` stays `log`,
+typed fields keep their types (`severity_number` an integer, the time fields non-negative
+integers), the maps stay flat, a key that is not a record field is refused, and the strings
+together stay under `output_kib`. Anything else is a Lua error of kind `output`. A script
+that loops is stopped by the instruction budget (`instructions`), one that allocates without
+bound by the memory cap (`memory_kib`, at least 64), a script that raises is `runtime`; each
+counts on `lua_errors_total{kind}` and then `on_error` decides: `pass` forwards the record as
+it came in, `drop` drops it with reason `lua_error`, `nak` fails it so JetStream redelivers.
+The next record is served either way; the VM survives its own errors.
+
+The sandbox has `string`, `table`, `math` and `utf8`, plus `state.get(key)`,
+`state.set_nx(key, value, ttl_ms)` (`true`, or `false` and the holder), `state.incr(key, by,
+ttl_ms)` and `state.del(key)` on the node's state handle (every key under
+`{pipeline}:{tenant}:{node}:`, every call on the `state_*` metrics), `log.info`, `log.warn`
+and `now_ns()`. `os`, `io`, `package`, `require`, `load` and `debug` are not there, and a
+script that names one of them anywhere is refused when the config loads, with the line; so
+is a script that does not parse or does not define `process`. A `state.*` call the store
+cannot answer is handled by `on_state_error`, not `on_error`. One VM per worker per node,
+the script loaded once, so a counter in its upvalues persists across the records that
+worker sees; with `workers: 4` there are four counters.
 
 ## Field paths
 

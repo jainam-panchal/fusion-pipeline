@@ -165,7 +165,9 @@ impl Lua {
             }
             (None, Some(source)) => (format!("={}", node.id), source),
             (None, None) => {
-                return Err(node.invalid_params("give `script` (a file path) or `source` (the script inline)"));
+                return Err(node.invalid_params(
+                    "give `script` (a file path) or `source` (the script inline)",
+                ));
             }
             (Some(_), Some(_)) => {
                 return Err(node.invalid_params("`script` and `source` are alternatives; give one"));
@@ -238,7 +240,7 @@ impl Stage for Lua {
     fn process(&self, record: Record, ctx: &Context<'_>) -> StageOutput {
         let run = self.vm().and_then(|vm| vm.run(&record, &ctx.state));
         let fault = match run {
-            Ok(Returned::Record(record)) => return StageOutput::Pass(record),
+            Ok(Returned::Record(record)) => return StageOutput::Pass(*record),
             Ok(Returned::Drop) => return StageOutput::Drop(DropReason::LuaDrop),
             Ok(Returned::Split(records)) => return StageOutput::Split(records),
             Err(Fault::State(error)) => return StageOutput::StateError { record, error },

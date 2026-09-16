@@ -142,7 +142,8 @@ pub(crate) fn from_table(table: &Table, expected: &Expected<'_>) -> Result<Recor
     let mut saw_id = false;
     let mut saw_kind = false;
     for pair in table.pairs::<LuaValue, LuaValue>() {
-        let (key, value) = pair.map_err(|e| OutputError(format!("cannot read the returned table: {e}")))?;
+        let (key, value) =
+            pair.map_err(|e| OutputError(format!("cannot read the returned table: {e}")))?;
         let LuaValue::String(key) = key else {
             return refuse(format!("key {} is not a field name", type_name(&key)));
         };
@@ -225,7 +226,11 @@ fn time(value: &LuaValue, field: &str) -> Result<Option<u64>, OutputError> {
     }
 }
 
-fn string(value: &LuaValue, field: &str, budget: &mut Budget) -> Result<Option<String>, OutputError> {
+fn string(
+    value: &LuaValue,
+    field: &str,
+    budget: &mut Budget,
+) -> Result<Option<String>, OutputError> {
     match value {
         LuaValue::Nil => Ok(None),
         LuaValue::String(s) => {
@@ -234,7 +239,10 @@ fn string(value: &LuaValue, field: &str, budget: &mut Budget) -> Result<Option<S
                 .map(|s| Some(s.to_owned()))
                 .map_err(|_| OutputError(format!("`{field}` is not valid UTF-8")))
         }
-        other => refuse(format!("`{field}` must be a string, not {}", type_name(other))),
+        other => refuse(format!(
+            "`{field}` must be a string, not {}",
+            type_name(other)
+        )),
     }
 }
 
@@ -246,7 +254,12 @@ fn map_from(
     let table = match value {
         LuaValue::Nil => return Ok(Map::new()),
         LuaValue::Table(t) => t,
-        other => return refuse(format!("`{field}` must be a table, not {}", type_name(other))),
+        other => {
+            return refuse(format!(
+                "`{field}` must be a table, not {}",
+                type_name(other)
+            ));
+        }
     };
     let mut map = Map::new();
     for pair in table.pairs::<LuaValue, LuaValue>() {
@@ -272,7 +285,11 @@ fn map_from(
 
 /// A Lua value as JSON: `nil` is absent, a table is an array when its keys are `1..n` and
 /// an object otherwise. Every string counts against the cap.
-fn lua_to_json(value: &LuaValue, field: &str, budget: &mut Budget) -> Result<Option<Value>, OutputError> {
+fn lua_to_json(
+    value: &LuaValue,
+    field: &str,
+    budget: &mut Budget,
+) -> Result<Option<Value>, OutputError> {
     Ok(Some(match value {
         LuaValue::Nil => return Ok(None),
         LuaValue::Boolean(b) => Value::Bool(*b),
@@ -293,7 +310,8 @@ fn lua_to_json(value: &LuaValue, field: &str, budget: &mut Budget) -> Result<Opt
             if len > 0 {
                 let mut items = Vec::with_capacity(len);
                 for (i, item) in t.sequence_values::<LuaValue>().enumerate() {
-                    let item = item.map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
+                    let item =
+                        item.map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
                     let at = format!("{field}[{}]", i + 1);
                     items.push(lua_to_json(&item, &at, budget)?.unwrap_or(Value::Null));
                 }
@@ -301,9 +319,13 @@ fn lua_to_json(value: &LuaValue, field: &str, budget: &mut Budget) -> Result<Opt
             } else {
                 let mut map = Map::new();
                 for pair in t.pairs::<LuaValue, LuaValue>() {
-                    let (key, item) = pair.map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
+                    let (key, item) =
+                        pair.map_err(|e| OutputError(format!("cannot read `{field}`: {e}")))?;
                     let LuaValue::String(key) = key else {
-                        return refuse(format!("`{field}` key {} is not a string", type_name(&key)));
+                        return refuse(format!(
+                            "`{field}` key {} is not a string",
+                            type_name(&key)
+                        ));
                     };
                     let key = key
                         .to_str()
@@ -316,7 +338,12 @@ fn lua_to_json(value: &LuaValue, field: &str, budget: &mut Budget) -> Result<Opt
                 Value::Object(map)
             }
         }
-        other => return refuse(format!("`{field}` is {}, which has no JSON form", type_name(other))),
+        other => {
+            return refuse(format!(
+                "`{field}` is {}, which has no JSON form",
+                type_name(other)
+            ));
+        }
     }))
 }
 

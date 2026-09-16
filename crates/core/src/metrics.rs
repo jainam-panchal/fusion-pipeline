@@ -265,7 +265,12 @@ pub enum LuaErrorKind {
 
 impl LuaErrorKind {
     /// Every kind, for checks against the spec's closed set.
-    pub const ALL: [Self; 4] = [Self::Instructions, Self::Memory, Self::Runtime, Self::Output];
+    pub const ALL: [Self; 4] = [
+        Self::Instructions,
+        Self::Memory,
+        Self::Runtime,
+        Self::Output,
+    ];
 
     /// The label value.
     #[must_use]

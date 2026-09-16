@@ -14,10 +14,7 @@ const STAGE: [(&str, &str); 2] = [("tenant", "acme"), ("stage", "script")];
 
 /// A `lua` node with inline `source` (and optional extra node lines) into one sink.
 fn config(node_lines: &str, source: &str) -> String {
-    let indented: String = source
-        .lines()
-        .map(|l| format!("      {l}\n"))
-        .collect();
+    let indented: String = source.lines().map(|l| format!("      {l}\n")).collect();
     format!(
         "name: ingest\nnodes:\n  - id: script\n    type: lua\n{node_lines}    source: |\n{indented}  - id: out\n    type: sink.memory\n"
     )
@@ -93,11 +90,18 @@ end"#,
                 record(2, json!({"severity_text": "ERROR"})),
             ],
         );
-        assert_eq!(out.iter().map(|r| r.id.map(|i| i.0)).collect::<Vec<_>>(), vec![Some(2)]);
+        assert_eq!(
+            out.iter().map(|r| r.id.map(|i| i.0)).collect::<Vec<_>>(),
+            vec![Some(2)]
+        );
         assert_eq!(
             h.counter(
                 Metric::RecordsDropped,
-                &[("tenant", "acme"), ("stage", "script"), ("reason", "lua_drop")]
+                &[
+                    ("tenant", "acme"),
+                    ("stage", "script"),
+                    ("reason", "lua_drop")
+                ]
             ),
             1,
             "workers {workers}"
@@ -127,7 +131,11 @@ end"#,
             .iter()
             .map(|r| (r.id.map(|i| i.0), r.body.clone()))
             .collect();
-        bodies.sort_by(|a, b| a.1.as_ref().map(Value::to_string).cmp(&b.1.as_ref().map(Value::to_string)));
+        bodies.sort_by(|a, b| {
+            a.1.as_ref()
+                .map(Value::to_string)
+                .cmp(&b.1.as_ref().map(Value::to_string))
+        });
         assert_eq!(
             bodies,
             vec![(Some(9), Some(json!("a"))), (Some(9), Some(json!("b")))],
@@ -135,7 +143,10 @@ end"#,
         );
         assert_eq!(h.counter(Metric::RecordsIn, &STAGE), 1);
         assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 2);
-        assert_eq!(h.counter(Metric::RecordsOut, &[("tenant", "acme"), ("stage", "out")]), 2);
+        assert_eq!(
+            h.counter(Metric::RecordsOut, &[("tenant", "acme"), ("stage", "out")]),
+            2
+        );
         h.finish();
     });
 }
@@ -152,7 +163,11 @@ fn an_infinite_loop_is_stopped_by_the_instruction_budget_and_passes_by_default()
     for_each_worker_count(|workers| {
         let yaml = config("    limits: { instructions: 10000 }\n", LOOPS);
         let (out, h) = run(&yaml, workers, vec![record(1, json!({"body": "x"}))]);
-        assert_eq!(out.len(), 1, "workers {workers}: `pass` forwards the record unchanged");
+        assert_eq!(
+            out.len(),
+            1,
+            "workers {workers}: `pass` forwards the record unchanged"
+        );
         assert_eq!(out[0].body, Some(json!("x")));
         assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
         assert_eq!(h.counter(Metric::RecordsErrored, &STAGE), 0);
@@ -163,13 +178,20 @@ fn an_infinite_loop_is_stopped_by_the_instruction_budget_and_passes_by_default()
 
 #[test]
 fn on_error_drop_drops_with_reason_lua_error_and_acks() {
-    let yaml = config("    limits: { instructions: 10000 }\n    on_error: drop\n", LOOPS);
+    let yaml = config(
+        "    limits: { instructions: 10000 }\n    on_error: drop\n",
+        LOOPS,
+    );
     let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
     assert!(out.is_empty());
     assert_eq!(
         h.counter(
             Metric::RecordsDropped,
-            &[("tenant", "acme"), ("stage", "script"), ("reason", "lua_error")]
+            &[
+                ("tenant", "acme"),
+                ("stage", "script"),
+                ("reason", "lua_error")
+            ]
         ),
         1
     );
@@ -179,7 +201,10 @@ fn on_error_drop_drops_with_reason_lua_error_and_acks() {
 
 #[test]
 fn on_error_nak_fails_the_record_so_the_source_message_is_nakked() {
-    let yaml = config("    limits: { instructions: 10000 }\n    on_error: nak\n", LOOPS);
+    let yaml = config(
+        "    limits: { instructions: 10000 }\n    on_error: nak\n",
+        LOOPS,
+    );
     let h = start(&yaml, 1);
     let probe = h.source.push(record(1, json!({"body": "x"})));
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Nak(None)));
@@ -205,7 +230,10 @@ fn the_budget_is_per_record_so_a_worker_keeps_serving_after_a_trip() {
             record(3, json!({"body": "fine"})),
         ],
     );
-    assert_eq!(out.iter().map(|r| r.id.map(|i| i.0)).collect::<Vec<_>>(), vec![Some(2), Some(3)]);
+    assert_eq!(
+        out.iter().map(|r| r.id.map(|i| i.0)).collect::<Vec<_>>(),
+        vec![Some(2), Some(3)]
+    );
     assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 1);
     h.finish();
 }
@@ -217,7 +245,14 @@ fn unbounded_table_growth_is_stopped_by_the_memory_cap() {
             "    limits: { instructions: 100000000, memory_kib: 256 }\n    on_error: drop\n",
             "function process(record)\n  local t = {}\n  while true do t[#t + 1] = string.rep(\"x\", 1024) end\nend",
         );
-        let (out, h) = run(&yaml, workers, vec![record(1, json!({"body": "x"})), record(2, json!({"body": "y"}))]);
+        let (out, h) = run(
+            &yaml,
+            workers,
+            vec![
+                record(1, json!({"body": "x"})),
+                record(2, json!({"body": "y"})),
+            ],
+        );
         assert!(out.is_empty(), "workers {workers}");
         assert_eq!(h.counter(Metric::LuaErrors, &lua_error("memory")), 2);
         assert_eq!(h.counter(Metric::LuaErrors, &lua_error("instructions")), 0);
@@ -242,9 +277,18 @@ fn a_returned_record_the_stage_refuses_counts_as_an_output_error() {
     let cases: [(&str, &str); 6] = [
         ("missing id", "record.id = nil\n  return record"),
         ("changed id", "record.id = record.id + 1\n  return record"),
-        ("wrong type", "record.severity_number = \"high\"\n  return record"),
-        ("oversized body", "record.body = string.rep(\"x\", 2048)\n  return record"),
-        ("changed tenant", "record.resource[\"tenant.id\"] = \"other\"\n  return record"),
+        (
+            "wrong type",
+            "record.severity_number = \"high\"\n  return record",
+        ),
+        (
+            "oversized body",
+            "record.body = string.rep(\"x\", 2048)\n  return record",
+        ),
+        (
+            "changed tenant",
+            "record.resource[\"tenant.id\"] = \"other\"\n  return record",
+        ),
         ("not a record", "return 42"),
     ];
     for (name, body) in cases {
@@ -254,7 +298,11 @@ fn a_returned_record_the_stage_refuses_counts_as_an_output_error() {
         );
         let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": "x"}))]);
         assert!(out.is_empty(), "{name}: refused");
-        assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 1, "{name}");
+        assert_eq!(
+            h.counter(Metric::LuaErrors, &lua_error("output")),
+            1,
+            "{name}"
+        );
         h.finish();
     }
 }
@@ -274,12 +322,18 @@ end"#,
     let (out, h) = run(
         &yaml,
         1,
-        vec![record(1, json!({"body": "disk full"})), record(2, json!({"body": "disk full"}))],
+        vec![
+            record(1, json!({"body": "disk full"})),
+            record(2, json!({"body": "disk full"})),
+        ],
     );
     assert_eq!(out.len(), 2);
     assert_eq!(out[0].attributes.get("first_seen_by"), None);
     assert_eq!(out[1].attributes.get("first_seen_by"), Some(&json!("1")));
-    assert_eq!(h.state.keys(), vec!["ingest:acme:script:seen:disk full".to_owned()]);
+    assert_eq!(
+        h.state.keys(),
+        vec!["ingest:acme:script:seen:disk full".to_owned()]
+    );
     assert_eq!(h.counter(Metric::StateOps, &STAGE), 2);
     h.finish();
 }
@@ -314,7 +368,14 @@ fn a_state_error_is_handled_by_on_state_error_not_by_on_error() {
     assert_eq!(h.counter(Metric::StateErrors, &STAGE), 1);
     assert_eq!(h.counter(Metric::LuaErrors, &lua_error("runtime")), 0);
     assert_eq!(
-        h.counter(Metric::RecordsDropped, &[("tenant", "acme"), ("stage", "script"), ("reason", "lua_error")]),
+        h.counter(
+            Metric::RecordsDropped,
+            &[
+                ("tenant", "acme"),
+                ("stage", "script"),
+                ("reason", "lua_error")
+            ]
+        ),
         0
     );
     h.finish();
@@ -334,7 +395,10 @@ fn an_upvalue_counter_persists_across_records_on_one_worker() {
         "local seen = 0\nfunction process(record)\n  seen = seen + 1\n  record.attributes[\"seen\"] = seen\n  return record\nend",
     );
     let (out, _h) = run(&yaml, 1, (1..=3).map(|id| record(id, json!({}))).collect());
-    let seen: Vec<_> = out.iter().map(|r| r.attributes.get("seen").cloned()).collect();
+    let seen: Vec<_> = out
+        .iter()
+        .map(|r| r.attributes.get("seen").cloned())
+        .collect();
     assert_eq!(seen, vec![Some(json!(1)), Some(json!(2)), Some(json!(3))]);
 }
 
@@ -374,24 +438,44 @@ fn the_demo_script_splits_lines_and_derives_the_status_class() {
             &yaml,
             workers,
             vec![
-                record(1, json!({"body": "one\ntwo\nthree", "attributes": {"http.status": 503}})),
-                record(2, json!({"body": "single", "attributes": {"http.status": 200}})),
+                record(
+                    1,
+                    json!({"body": "one\ntwo\nthree", "attributes": {"http.status": 503}}),
+                ),
+                record(
+                    2,
+                    json!({"body": "single", "attributes": {"http.status": 200}}),
+                ),
                 record(3, json!({"body": "no status"})),
             ],
         );
         let lines: Vec<_> = out
             .iter()
             .filter(|r| r.id == Some(fusion_core::record::RecordId(1)))
-            .map(|r| (r.body.clone(), r.attributes.get("http.status_class").cloned()))
+            .map(|r| {
+                (
+                    r.body.clone(),
+                    r.attributes.get("http.status_class").cloned(),
+                )
+            })
             .collect();
         assert_eq!(lines.len(), 3, "workers {workers}");
         for (body, class) in &lines {
             assert!(matches!(body, Some(Value::String(_))));
             assert_eq!(class, &Some(json!("5xx")));
         }
-        let single = out.iter().find(|r| r.id == Some(fusion_core::record::RecordId(2))).expect("record 2");
-        assert_eq!(single.attributes.get("http.status_class"), Some(&json!("2xx")));
-        let none = out.iter().find(|r| r.id == Some(fusion_core::record::RecordId(3))).expect("record 3");
+        let single = out
+            .iter()
+            .find(|r| r.id == Some(fusion_core::record::RecordId(2)))
+            .expect("record 2");
+        assert_eq!(
+            single.attributes.get("http.status_class"),
+            Some(&json!("2xx"))
+        );
+        let none = out
+            .iter()
+            .find(|r| r.id == Some(fusion_core::record::RecordId(3)))
+            .expect("record 3");
         assert_eq!(none.attributes.get("http.status_class"), None);
         assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 5);
         assert_eq!(h.counter(Metric::LuaErrors, &lua_error("output")), 0);

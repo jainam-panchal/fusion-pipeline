@@ -122,6 +122,32 @@ _Avoid_: miss, extraction failure
 A regex limit (match, depth, heap, work, input size) exceeded on one record. A drop with reason `regex_limit`; the pattern keeps serving the next record.
 _Avoid_: timeout
 
+### Lua
+
+**Script**:
+The Lua source a `lua` node runs: a file named by `script` or text given inline by `source`, defining `process(record)`. Loaded once per worker per node.
+_Avoid_: plugin, handler, hook (the instruction counter, not the script)
+
+**Guardrail**:
+One of the per-record limits on a script: the instruction budget (`limits.instructions`), the memory cap (`limits.memory_kib`) and the output cap (`limits.output_kib`). A tripped guardrail is a Lua error of its kind, never a crash of the worker.
+_Avoid_: quota, timeout (nothing is measured in time)
+
+**Lua error**:
+A run of `process` that produced no records: the budget or cap tripped, the script raised, or the returned record was refused. Counted on `lua_errors_total{kind}` with `kind` from the closed set `instructions`, `memory`, `runtime`, `output`, then handled by the node's `on_error`. A `state.*` call the store could not answer is a state error, not a Lua error.
+_Avoid_: exception, script failure, crash
+
+**Error policy**:
+A `lua` node's `on_error`: `pass` forwards the record as it entered the node (the default), `drop` drops it with reason `lua_error`, `nak` fails it. Applied by the stage after the error is counted.
+_Avoid_: fallback, on_fail
+
+**Output check**:
+The validation of what `process` returned before it leaves the stage: `id` and the tenant unchanged, `kind` still `log`, typed fields typed, the maps flat, no key that is not a record field, strings under the output cap. A refusal is a Lua error of kind `output`.
+_Avoid_: schema validation, sanitising
+
+**Sandbox**:
+The VM a script runs in: `string`, `table`, `math` and `utf8`, plus `state`, `log` and `now_ns()`; no `os`, `io`, `package`, `require`, `load` or `debug`. A script that names one of those is refused at load.
+_Avoid_: jail, container
+
 ### Telemetry
 
 **Metric**:
@@ -187,4 +213,4 @@ The one number behind `every_nth`: per tenant in the state store, advanced by on
 _Avoid_: counter (an instrument kind), ticket machine (the explanation, not the term), sequence
 
 **Worker**:
-One OS thread that owns a Lua VM and a state-store connection and runs stages synchronously.
+One OS thread that owns a state-store connection and one Lua VM per `lua` node it has seen a record for, and runs stages synchronously.

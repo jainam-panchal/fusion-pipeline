@@ -17,7 +17,15 @@ use crate::convert::{self, Expected, OutputError};
 /// and its siblings come with the base library and are removed; `os`, `io`, `package`
 /// (and so `require`) and `debug` are never loaded.
 pub(crate) const FORBIDDEN: [&str; 9] = [
-    "os", "io", "package", "require", "load", "loadfile", "dofile", "loadstring", "debug",
+    "os",
+    "io",
+    "package",
+    "require",
+    "load",
+    "loadfile",
+    "dofile",
+    "loadstring",
+    "debug",
 ];
 
 /// The base library's loaders, removed from the globals after the VM is built.
@@ -81,7 +89,8 @@ impl Fault {
 
 /// What `process` returned, once checked.
 pub(crate) enum Returned {
-    Record(Record),
+    /// Boxed so the enum stays the size of its other variants.
+    Record(Box<Record>),
     Drop,
     Split(Vec<Record>),
 }
@@ -134,7 +143,7 @@ impl Vm {
             .map_err(|e| Fault::Runtime(e.to_string()))?;
 
         let used = Rc::new(Cell::new(0));
-        let every = script.instructions.min(HOOK_EVERY).max(1);
+        let every = script.instructions.clamp(1, HOOK_EVERY);
         let budget = script.instructions;
         let counter = Rc::clone(&used);
         lua.set_hook(
@@ -199,7 +208,7 @@ impl Vm {
                 if t.raw_len() == 0 {
                     // A record, or an empty table, which is neither a record nor a list.
                     return convert::from_table(&t, &expected)
-                        .map(Returned::Record)
+                        .map(|record| Returned::Record(Box::new(record)))
                         .map_err(Fault::Output);
                 }
                 let mut records = Vec::with_capacity(t.raw_len());
@@ -308,7 +317,9 @@ fn install_api(lua: &mlua::Lua, node: &str) -> mlua::Result<()> {
         log.raw_set(
             level,
             lua.create_function(move |lua, message: String| {
-                let record = current(lua).map(|c| c.record_id.to_string()).unwrap_or_default();
+                let record = current(lua)
+                    .map(|c| c.record_id.to_string())
+                    .unwrap_or_default();
                 // Structured logging over OTLP lands with the logs ticket; stderr until then,
                 // as the engine does.
                 eprintln!("pipeline: lua `{node}` record {record} {level}: {message}");
