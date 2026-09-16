@@ -527,6 +527,9 @@ fn intern(name: &str) -> &'static str {
         "engine" => "engine",
         "reason" => "reason",
         "kind" => "kind",
+        "op" => "op",
+        "field" => "field",
+        "cause" => "cause",
         other => panic!("`{other}` is not a label any metric carries"),
     }
 }
