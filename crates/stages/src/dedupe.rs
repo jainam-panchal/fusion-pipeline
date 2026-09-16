@@ -18,6 +18,7 @@
 use std::time::Duration;
 
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::meta::Meta;
 use fusion_core::path::FieldPath;
 use fusion_core::record::{Record, RecordId};
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
@@ -103,8 +104,11 @@ impl Dedupe {
     }
 
     /// The state key for `record`'s content: `dedupe:` plus the hash of its key fields.
-    fn state_key(&self, record: &Record) -> String {
-        format!("{PURPOSE}:{:016x}", hash_key_fields(&self.key, record))
+    fn state_key(&self, record: &Record, meta: &Meta) -> String {
+        format!(
+            "{PURPOSE}:{:016x}",
+            hash_key_fields(&self.key, record, meta)
+        )
     }
 }
 
@@ -114,7 +118,7 @@ impl Stage for Dedupe {
             id: ctx.meta.record_id,
             ingestion_time: ctx.meta.ingestion_time.unix_nanos(),
         };
-        let key = self.state_key(&record);
+        let key = self.state_key(&record, ctx.meta);
         let existing = match ctx.state.set_nx(&key, &incoming.to_bytes(), self.window) {
             Ok(existing) => existing,
             Err(error) => return StageOutput::StateError { record, error },

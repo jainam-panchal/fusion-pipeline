@@ -1,6 +1,7 @@
 //! Field paths: one dotted path names one record field. Under `attributes`, `resource` and
 //! `scope` the rest of the path, joined with dots, is the flat map key.
 
+use fusion_core::meta::{IngestionTime, Meta};
 use fusion_core::path::{FieldPath, FieldValue, Num, PathError};
 use fusion_core::record::{Kind, Record, RecordId};
 use serde_json::{Value, json};
@@ -87,10 +88,24 @@ fn record() -> Record {
     .expect("record parses")
 }
 
-/// Read `path` from `record` as an owned JSON value, `None` when absent, so assertions can
-/// use `json!` literals.
+/// The `Meta` the reads below see: a different id and tenant from the record's, so a test
+/// can tell which one a path read.
+fn meta() -> Meta {
+    Meta {
+        record_id: RecordId(99),
+        tenant: "from-meta".into(),
+        ingestion_time: IngestionTime::Reported(9_000_000_000),
+        delivery_count: 2,
+    }
+}
+
+/// Read `path` from `record` (and [`meta`]) as an owned JSON value, `None` when absent, so
+/// assertions can use `json!` literals.
 fn read_from(record: &Record, path: &str) -> Option<Value> {
-    match FieldPath::parse(path).expect("parses").read(record) {
+    match FieldPath::parse(path)
+        .expect("parses")
+        .read(record, &meta())
+    {
         FieldValue::Null => None,
         FieldValue::Bool(b) => Some(json!(b)),
         FieldValue::Num(Num::Int(i)) => Some(json!(i)),
@@ -104,13 +119,17 @@ fn read_from(record: &Record, path: &str) -> Option<Value> {
 #[test]
 fn read_borrows_strings_and_views_a_structured_body() {
     let mut r = record();
-    let FieldValue::Str(text) = FieldPath::parse("severity_text").expect("parses").read(&r) else {
+    let meta = meta();
+    let FieldValue::Str(text) = FieldPath::parse("severity_text")
+        .expect("parses")
+        .read(&r, &meta)
+    else {
         panic!("severity_text is a string");
     };
     assert!(std::ptr::eq(text, r.severity_text.as_deref().expect("set")));
 
     r.body = Some(json!({"raw": "x"}));
-    let FieldValue::Json(body) = FieldPath::parse("body").expect("parses").read(&r) else {
+    let FieldValue::Json(body) = FieldPath::parse("body").expect("parses").read(&r, &meta) else {
         panic!("structured body is a view");
     };
     assert_eq!(body, &json!({"raw": "x"}));
@@ -345,8 +364,12 @@ fn write_of_typed_fields_with_the_right_type_reads_back() {
 #[test]
 fn remove_deletes_the_field_and_returns_the_old_value() {
     let mut record = record();
-    let remove =
-        |record: &mut Record, path: &str| FieldPath::parse(path).expect("parses").remove(record);
+    let remove = |record: &mut Record, path: &str| {
+        FieldPath::parse(path)
+            .expect("parses")
+            .remove(record)
+            .expect("a record field can always be removed")
+    };
 
     assert_eq!(
         remove(&mut record, "attributes.http.path"),
@@ -501,7 +524,9 @@ fn every_kind_round_trips_through_its_wire_name() {
         let mut record = record();
         write(&mut record, "kind", json!(name)).expect("a wire name is a kind");
         assert_eq!(
-            FieldPath::parse("kind").expect("parses").read(&record),
+            FieldPath::parse("kind")
+                .expect("parses")
+                .read(&record, &meta()),
             FieldValue::Str(name)
         );
     }
@@ -521,6 +546,85 @@ fn an_unknown_field_is_refused_listing_every_root_in_reading_order() {
         err.to_string(),
         "`nonsense` is not a record field; instead use one of id, kind, body, severity_text, \
          severity_number, time_unix_nano, observed_time_unix_nano, trace_id, span_id, \
-         attributes.<key>, resource.<key>, scope.<key>"
+         attributes.<key>, resource.<key>, scope.<key>, meta.<field>"
     );
+}
+
+#[test]
+fn meta_paths_read_the_records_meta_not_the_record() {
+    assert_eq!(read("meta.id"), Some(json!(99)));
+    assert_eq!(read("meta.tenant"), Some(json!("from-meta")));
+    assert_eq!(read("meta.ingestion_time"), Some(json!(9_000_000_000_u64)));
+    assert_eq!(read("meta.delivery_count"), Some(json!(2)));
+    assert_eq!(
+        read("id"),
+        Some(json!(7)),
+        "the record's own id is still there"
+    );
+    assert_eq!(read("resource.tenant.id"), Some(json!("acme")));
+}
+
+#[test]
+fn a_meta_path_is_one_field_and_displays_as_written() {
+    for text in [
+        "meta.id",
+        "meta.tenant",
+        "meta.ingestion_time",
+        "meta.delivery_count",
+    ] {
+        let path = FieldPath::parse(text).expect("parses");
+        assert!(path.is_meta(), "{text}");
+        assert_eq!(path.map_key(), None, "{text}");
+        assert_eq!(path.to_string(), text);
+    }
+    assert!(
+        !FieldPath::parse("resource.tenant.id")
+            .expect("parses")
+            .is_meta()
+    );
+}
+
+#[test]
+fn meta_alone_or_with_an_unknown_field_lists_the_meta_fields() {
+    for text in ["meta", "meta.nope", "meta.tenant.id", "meta.Tenant"] {
+        let err = FieldPath::parse(text).expect_err(text);
+        match &err {
+            PathError::UnknownMetaField { path } => assert_eq!(path, text),
+            other => panic!("{text}: {other:?}"),
+        }
+        assert!(
+            err.to_string()
+                .contains("`meta.id`, `meta.tenant`, `meta.ingestion_time`, `meta.delivery_count`"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn a_meta_path_refuses_every_write_and_removal() {
+    let path = FieldPath::parse("meta.tenant").expect("parses");
+    let mut record = record();
+    let before = record.clone();
+    let err = path
+        .write(&mut record, json!("beta"))
+        .expect_err("read-only");
+    assert_eq!(
+        err,
+        PathError::ReadOnly {
+            path: "meta.tenant".to_owned()
+        }
+    );
+    assert!(
+        err.to_string().contains(
+            "instead copy it into a record field: `copy {from: meta.tenant, to: <field>}`"
+        ),
+        "{err}"
+    );
+    assert_eq!(
+        path.remove(&mut record),
+        Err(PathError::ReadOnly {
+            path: "meta.tenant".to_owned()
+        })
+    );
+    assert_eq!(record, before, "the record is unchanged");
 }

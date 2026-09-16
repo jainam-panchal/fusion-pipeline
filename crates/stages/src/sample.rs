@@ -249,7 +249,9 @@ impl Stage for Sample {
             }
             // No salt: the same key value must get the same answer on every node and every
             // pipeline, and a key kept at a lower percent is kept at any higher one.
-            Mode::Consistent { share, key } => share.keeps(mix(hash_key_fields(key, &record))),
+            Mode::Consistent { share, key } => {
+                share.keeps(mix(hash_key_fields(key, &record, ctx.meta)))
+            }
         };
         if keep {
             StageOutput::Pass(record)

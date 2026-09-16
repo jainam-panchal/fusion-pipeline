@@ -26,17 +26,20 @@
 //! text `sample consistent` hashes). It is a stable join key, not anonymisation: an
 //! unsalted digest of a low-entropy field is dictionary-reversible.
 //!
-//! Every field is payload (ADR 0005), `id`, `kind` and `resource.tenant.id` included: the
-//! pipeline decides from the record's `Meta`, so an op may write or remove any of them.
-//! What load can check, it refuses: every path parses, a `set` literal is a scalar the
-//! field takes, a `hash` target takes a string, `from` and `to` differ. Every refusal names the node and the op's
-//! position.
+//! Every record field is payload (ADR 0005), `id`, `kind` and `resource.tenant.id` included:
+//! the pipeline decides from the record's `Meta`, so an op may write or remove any of them.
+//! A `meta.*` path is the pipeline's: an op may read it (`copy` from it is how a pipeline
+//! value enters a record) and never write or remove it. What load can check, it refuses:
+//! every path parses, a `set` literal is a scalar the field takes, a `hash` target takes a
+//! string, `from` and `to` differ, no op writes or removes a `meta.*` path. Every refusal
+//! names the node and the op's position.
 
 use std::collections::BTreeMap;
 
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::meta::Meta;
 use fusion_core::metrics::{EditCause, EditOp};
-use fusion_core::path::{FieldPath, FieldValue, Num};
+use fusion_core::path::{FieldPath, FieldValue, Num, PathError};
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use serde::Deserialize;
@@ -184,10 +187,22 @@ impl At<'_> {
         }
     }
 
-    /// `text` parsed as a path. Every field is payload (ADR 0005): an op may read, write or
-    /// remove any of them, within the field's type.
+    /// `text` parsed as a path an op reads. Every path may be read, `meta.*` included.
     fn path(&self, key: &str, text: &str) -> Result<FieldPath, ConfigError> {
         FieldPath::parse(text).map_err(|e| self.error(format!("`{key}`: {e}")))
+    }
+
+    /// `text` parsed as a path an op writes or removes: any record field, within its type,
+    /// and no `meta.*` path.
+    fn target(&self, key: &str, text: &str) -> Result<FieldPath, ConfigError> {
+        let path = self.path(key, text)?;
+        if path.is_meta() {
+            let refused = PathError::ReadOnly {
+                path: path.to_string(),
+            };
+            return Err(self.error(format!("`{key}`: {refused}")));
+        }
+        Ok(path)
     }
 
     fn params<T: serde::de::DeserializeOwned>(&self, body: Value) -> Result<T, ConfigError> {
@@ -255,7 +270,7 @@ fn parse_op(
             if matches!(p.value, Value::Array(_) | Value::Object(_)) {
                 return Err(at.error("`value` must be a string, number, bool or null"));
             }
-            let field = at.path("field", &p.field)?;
+            let field = at.target("field", &p.field)?;
             // Core's own write rules, on an empty record: the field's type, refused here
             // rather than on every record.
             field
@@ -268,8 +283,12 @@ fn parse_op(
         }
         EditOp::Rename | EditOp::Copy => {
             let p: MoveParams = at.params(body)?;
-            let from = at.path("from", &p.from)?;
-            let to = at.path("to", &p.to)?;
+            let from = if kind == EditOp::Rename {
+                at.target("from", &p.from)?
+            } else {
+                at.path("from", &p.from)?
+            };
+            let to = at.target("to", &p.to)?;
             if from == to {
                 return Err(at.error("`from` and `to` are the same field"));
             }
@@ -282,7 +301,7 @@ fn parse_op(
         }
         EditOp::Hash => {
             let p: HashParams = at.params(body)?;
-            let field = at.path("field", &p.field)?;
+            let field = at.target("field", &p.field)?;
             field
                 .write(&mut Record::default(), Value::String(String::new()))
                 .map_err(|e| at.error(format!("{e}; hash writes a string")))?;
@@ -298,7 +317,7 @@ fn parse_op(
             let fields = p
                 .fields
                 .iter()
-                .map(|f| at.path("fields", f))
+                .map(|f| at.target("fields", f))
                 .collect::<Result<Vec<_>, _>>()?;
             Op::Delete { fields }
         }
@@ -317,8 +336,9 @@ impl Op {
         }
     }
 
-    /// Apply to `record`, or say why it could not; the record is unchanged on `Err`.
-    fn apply(&self, record: &mut Record) -> Result<(), Unapplied<'_>> {
+    /// Apply to `record`, whose `Meta` is `meta`, or say why it could not; the record is
+    /// unchanged on `Err`.
+    fn apply(&self, record: &mut Record, meta: &Meta) -> Result<(), Unapplied<'_>> {
         match self {
             // The literal was written to an empty record at load and `write` never reads
             // the record, so this cannot refuse. The arm still needs an answer, and the
@@ -331,21 +351,23 @@ impl Op {
                 .write(record, value.clone())
                 .map_err(|_| field.unapplied(EditCause::Type)),
             Self::Rename { from, to } => {
-                let value = owned(from.path.read(record))
+                let value = owned(from.path.read(record, meta))
                     .ok_or_else(|| from.unapplied(EditCause::Absent))?;
                 to.write(record, value)
                     .map_err(|_| from.unapplied(EditCause::Type))?;
-                from.path.remove(record);
+                // Load refuses a `meta.*` source for `rename`, and removing a record field
+                // cannot fail.
+                let _removed = from.path.remove(record);
                 Ok(())
             }
             Self::Copy { from, to } => {
-                let value = owned(from.path.read(record))
+                let value = owned(from.path.read(record, meta))
                     .ok_or_else(|| from.unapplied(EditCause::Absent))?;
                 to.write(record, value)
                     .map_err(|_| from.unapplied(EditCause::Type))
             }
             Self::Hash { field } => {
-                let digest = match field.path.read(record) {
+                let digest = match field.path.read(record, meta) {
                     FieldValue::Null => return Err(field.unapplied(EditCause::Absent)),
                     FieldValue::Str(s) => sha256_hex(s.as_bytes()),
                     value @ (FieldValue::Bool(_) | FieldValue::Num(_)) => {
@@ -364,9 +386,10 @@ impl Op {
                     .map_err(|_| field.unapplied(EditCause::Type))
             }
             Self::Delete { fields } => {
-                // An absent field is nothing to do, not an unapplied op.
+                // An absent field is nothing to do, not an unapplied op. Load refuses a
+                // `meta.*` field, and removing a record field cannot fail.
                 for field in fields {
-                    field.remove(record);
+                    let _removed = field.remove(record);
                 }
                 Ok(())
             }
@@ -401,7 +424,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 impl Stage for Edit {
     fn process(&self, mut record: Record, ctx: &Context<'_>) -> StageOutput {
         for op in &self.ops {
-            if let Err(unapplied) = op.apply(&mut record) {
+            if let Err(unapplied) = op.apply(&mut record, ctx.meta) {
                 ctx.metrics
                     .edit_unapplied(op.kind(), unapplied.field(), unapplied.cause());
                 if self.on_unapplied == OnUnapplied::Drop {

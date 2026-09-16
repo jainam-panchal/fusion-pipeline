@@ -271,3 +271,47 @@ fn an_unknown_node_key_is_rejected() {
         "{err}"
     );
 }
+
+#[test]
+fn every_op_that_writes_or_removes_a_meta_path_is_rejected() {
+    for (op, key) in [
+        ("set: { field: meta.tenant, value: beta }", "`field`"),
+        ("hash: { field: meta.tenant }", "`field`"),
+        ("delete: { fields: [meta.tenant] }", "`fields`"),
+        (
+            "rename: { from: meta.tenant, to: resource.tenant.id }",
+            "`from`",
+        ),
+        (
+            "rename: { from: resource.tenant.id, to: meta.tenant }",
+            "`to`",
+        ),
+        (
+            "copy: { from: resource.tenant.id, to: meta.tenant }",
+            "`to`",
+        ),
+    ] {
+        rejects(
+            &format!("    ops:\n      - {op}\n"),
+            "op 0",
+            &[
+                key,
+                "`meta.tenant` is the pipeline's",
+                "copy {from: meta.tenant, to: <field>}",
+            ],
+        );
+    }
+}
+
+#[test]
+fn copy_from_a_meta_path_is_how_a_pipeline_value_enters_a_record() {
+    build(
+        "    ops:
+      - copy: { from: meta.tenant, to: resource.tenant.id }
+      - copy: { from: meta.ingestion_time, to: observed_time_unix_nano }
+      - copy: { from: meta.delivery_count, to: attributes.delivery }
+      - copy: { from: meta.id, to: id }
+",
+    )
+    .expect("reading meta is allowed");
+}

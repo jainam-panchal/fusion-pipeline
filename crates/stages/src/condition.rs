@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use fusion_core::condition::Condition;
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::meta::Meta;
 use fusion_core::metrics::EngineLabel;
 use fusion_core::record::Record;
 use fusion_regex::{Engine, MatchError, Regex};
@@ -50,17 +51,18 @@ impl CompiledCondition {
         })
     }
 
-    /// Evaluate against `record`.
+    /// Evaluate against `record` and its `meta`.
     ///
     /// # Errors
     ///
     /// The first [`MatchError`] a pattern returns: a tripped limit, or an engine failure.
-    pub(crate) fn matches(&self, record: &Record) -> Result<bool, MatchError> {
-        self.condition.matches_with(record, &mut |pattern, text| {
-            self.patterns
-                .get(pattern)
-                .map_or(Ok(false), |regex| regex.is_match(text))
-        })
+    pub(crate) fn matches(&self, record: &Record, meta: &Meta) -> Result<bool, MatchError> {
+        self.condition
+            .matches_with(record, meta, &mut |pattern, text| {
+                self.patterns
+                    .get(pattern)
+                    .map_or(Ok(false), |regex| regex.is_match(text))
+            })
     }
 
     /// The engine a node running this condition reports: `None` without regex operators;

@@ -101,7 +101,7 @@ impl Stage for Redact {
         // field cannot leave the first half-redacted on a record that is then dropped.
         let mut rewrites: Vec<(&FieldPath, String)> = Vec::new();
         for path in &self.fields {
-            let FieldValue::Str(text) = path.read(&record) else {
+            let FieldValue::Str(text) = path.read(&record, ctx.meta) else {
                 continue;
             };
             match self.regex.replace_all(text, &self.replace) {

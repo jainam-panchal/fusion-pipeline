@@ -357,6 +357,12 @@ fn redact_rejects_fields_that_take_no_string_and_malformed_fields_at_load_naming
         );
     }
 
+    let message = load_error(&REDACT.replace("[body, attributes.msg]", "[meta.tenant]"));
+    assert!(
+        message.contains("mask_phones") && message.contains("`meta.tenant` is the pipeline's"),
+        "{message}"
+    );
+
     let message = load_error(&REDACT.replace("[body, attributes.msg]", "[attributes]"));
     assert!(
         message.contains("mask_phones") && message.contains("attributes"),

@@ -8,6 +8,10 @@
 //! and `\\` as the only escapes: `attributes."Event ID".code` names the `Event ID.code` key.
 //! The three maps are flat: values are scalars and nothing below a key is addressable.
 //! `body` is addressed only as a whole, and the scalar fields take no segments.
+//!
+//! A fourth root, `meta`, names the pipeline's view of the record rather than the record:
+//! `meta.id`, `meta.tenant`, `meta.ingestion_time`, `meta.delivery_count` (ADR 0005). A meta
+//! path reads the record's [`Meta`] and refuses every write and removal.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -16,6 +20,7 @@ use std::sync::LazyLock;
 use serde_json::{Map, Value};
 
 use crate::closed_set::closed_set;
+use crate::meta::Meta;
 use crate::record::{Kind, Record, RecordId};
 
 /// Errors from parsing a path or writing through one. Each message says what is wrong and
@@ -60,6 +65,21 @@ pub enum PathError {
         /// The segment text.
         name: String,
     },
+    /// `meta` was named without a field, or with one that is not a meta field.
+    #[error("`{path}` is not a meta field; instead use one of {}", META_FIELDS.as_str())]
+    UnknownMetaField {
+        /// The path text.
+        path: String,
+    },
+    /// A write or removal named a meta path.
+    #[error(
+        "`{path}` is the pipeline's and cannot be written or removed; instead copy it into a \
+         record field: `copy {{from: {path}, to: <field>}}`"
+    )]
+    ReadOnly {
+        /// The meta path.
+        path: String,
+    },
     /// A field that is addressed only as a whole was given further segments.
     #[error("`{field}` is one value and has no fields; instead use `{field}`{hint}")]
     NotAMap {
@@ -87,7 +107,7 @@ pub enum PathError {
 }
 
 /// The roots a path may start at, as the unknown-field error lists them: every [`Field`],
-/// then every [`MapField`] with `.<key>`.
+/// then every [`MapField`] with `.<key>`, then `meta.<field>`.
 static FIELDS: LazyLock<String> = LazyLock::new(|| {
     let fields = Field::ALL
         .into_iter()
@@ -95,8 +115,25 @@ static FIELDS: LazyLock<String> = LazyLock::new(|| {
     let maps = MapField::ALL
         .into_iter()
         .map(|map| format!("{}.<key>", map.as_str()));
-    fields.chain(maps).collect::<Vec<_>>().join(", ")
+    let meta = std::iter::once(format!("{META_ROOT}.<field>"));
+    fields
+        .chain(maps)
+        .chain(meta)
+        .collect::<Vec<_>>()
+        .join(", ")
 });
+
+/// Every meta path, as the unknown-meta-field error lists them.
+static META_FIELDS: LazyLock<String> = LazyLock::new(|| {
+    MetaField::ALL
+        .into_iter()
+        .map(|field| format!("`{META_ROOT}.{}`", field.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+});
+
+/// The root of the meta paths.
+const META_ROOT: &str = "meta";
 
 closed_set! {
     /// A top-level field that is addressed as a whole, by its path spelling, in the order the
@@ -116,6 +153,17 @@ closed_set! {
 }
 
 closed_set! {
+    /// A value of the record's `Meta`, by its spelling after `meta.`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum MetaField {
+        Id = "id",
+        Tenant = "tenant",
+        IngestionTime = "ingestion_time",
+        DeliveryCount = "delivery_count",
+    }
+}
+
+closed_set! {
     /// One of the three flat maps, by its path spelling.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum MapField {
@@ -125,11 +173,12 @@ closed_set! {
     }
 }
 
-/// A top-level record field a path may start at: a field or a map, each a closed set.
+/// What a path may start at: a record field or a map, each a closed set, or `meta`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Root {
     Field(Field),
     Map(MapField),
+    Meta,
 }
 
 impl Root {
@@ -139,12 +188,14 @@ impl Root {
         Field::parse(name)
             .map(Self::Field)
             .or_else(|| MapField::parse(name).map(Self::Map))
+            .or_else(|| (name == META_ROOT).then_some(Self::Meta))
     }
 
     const fn name(self) -> &'static str {
         match self {
             Self::Field(field) => field.as_str(),
             Self::Map(map) => map.as_str(),
+            Self::Meta => META_ROOT,
         }
     }
 }
@@ -173,6 +224,8 @@ enum Target {
     Field(Field),
     /// A key of one of the maps.
     Key(MapField, String),
+    /// A value of the record's `Meta`.
+    Meta(MetaField),
 }
 
 /// A number as read from a record. Two integers compare exactly; when either side is a
@@ -304,8 +357,12 @@ fn unbracket(path: &str) -> String {
         }
     }
     let mut out: Vec<String> = segments.iter().map(|s| display_segment(s)).collect();
-    if out.len() == 1 && Root::parse(&out[0]).is_some_and(|root| matches!(root, Root::Map(_))) {
-        out.push("<key>".to_owned());
+    if out.len() == 1 {
+        match Root::parse(&out[0]) {
+            Some(Root::Map(_)) => out.push("<key>".to_owned()),
+            Some(Root::Meta) => out.push("<field>".to_owned()),
+            Some(Root::Field(_)) | None => {}
+        }
     }
     out.join(".")
 }
@@ -526,7 +583,8 @@ impl FieldPath {
     /// # Errors
     ///
     /// A [`PathError`] when the text is not `root ("." segment)*`, the root is not a record
-    /// field, a scalar or `body` is given segments, or a map is named without a key.
+    /// field or `meta`, a scalar or `body` is given segments, a map is named without a key,
+    /// or `meta` is not followed by exactly one meta field.
     pub fn parse(path: &str) -> Result<Self, PathError> {
         let segments = split_segments(path)?;
         let (name, keys) = segments
@@ -546,6 +604,18 @@ impl FieldPath {
             (Root::Field(field), true) => Ok(Self {
                 target: Target::Field(field),
             }),
+            (Root::Meta, _) => match keys {
+                [field] => MetaField::parse(field)
+                    .map(|field| Self {
+                        target: Target::Meta(field),
+                    })
+                    .ok_or_else(|| PathError::UnknownMetaField {
+                        path: path.to_owned(),
+                    }),
+                _ => Err(PathError::UnknownMetaField {
+                    path: path.to_owned(),
+                }),
+            },
             (Root::Field(field), false) => Err(PathError::NotAMap {
                 field: name.clone(),
                 hint: if field == Field::Body {
@@ -562,13 +632,20 @@ impl FieldPath {
     pub fn map_key(&self) -> Option<&str> {
         match &self.target {
             Target::Key(_, key) => Some(key),
-            Target::Field(_) => None,
+            Target::Field(_) | Target::Meta(_) => None,
         }
     }
 
-    /// Read the field as a borrowed view. An absent field is [`FieldValue::Null`].
+    /// Whether the path names a value of the record's `Meta` rather than of the record.
     #[must_use]
-    pub fn read<'a>(&self, record: &'a Record) -> FieldValue<'a> {
+    pub const fn is_meta(&self) -> bool {
+        matches!(self.target, Target::Meta(_))
+    }
+
+    /// Read the field as a borrowed view: from `record`, or from `meta` for a meta path. An
+    /// absent field is [`FieldValue::Null`].
+    #[must_use]
+    pub fn read<'a>(&self, record: &'a Record, meta: &'a Meta) -> FieldValue<'a> {
         fn num(n: impl Into<i128>) -> FieldValue<'static> {
             FieldValue::Num(Num::Int(n.into()))
         }
@@ -581,6 +658,14 @@ impl FieldPath {
                     .get(record)
                     .get(key)
                     .map_or(FieldValue::Null, FieldValue::from_json);
+            }
+            Target::Meta(field) => {
+                return match field {
+                    MetaField::Id => num(meta.record_id.0),
+                    MetaField::Tenant => FieldValue::Str(&meta.tenant),
+                    MetaField::IngestionTime => num(meta.ingestion_time.unix_nanos()),
+                    MetaField::DeliveryCount => num(meta.delivery_count),
+                };
             }
             Target::Field(field) => *field,
         };
@@ -612,8 +697,8 @@ impl FieldPath {
     /// [`PathError::WrongType`] when a typed field is offered the wrong JSON type (`id` and
     /// the time fields take an integer in `u64`, `kind` one of `log`, `metric` or `span`,
     /// `severity_number` an integer in `i32`, `severity_text`, `trace_id` and `span_id` a
-    /// string) or a map key is offered an array or object. The record is unchanged on
-    /// error.
+    /// string) or a map key is offered an array or object; [`PathError::ReadOnly`] for a meta
+    /// path. The record is unchanged on error.
     pub fn write(&self, record: &mut Record, value: Value) -> Result<(), PathError> {
         let field = match &self.target {
             Target::Key(map, key) => {
@@ -623,6 +708,7 @@ impl FieldPath {
                 map.get_mut(record).insert(key.clone(), value);
                 return Ok(());
             }
+            Target::Meta(_) => return Err(self.read_only()),
             Target::Field(field) => *field,
         };
         match field {
@@ -641,14 +727,20 @@ impl FieldPath {
         Ok(())
     }
 
-    /// Remove the field, returning the old value, or `None` when it was absent. Every field
-    /// can be removed. `kind` is never absent: removing it leaves the wire default, `log`.
-    pub fn remove(&self, record: &mut Record) -> Option<Value> {
+    /// Remove the field, returning the old value, or `None` when it was absent. Every record
+    /// field can be removed. `kind` is never absent: removing it leaves the wire default,
+    /// `log`.
+    ///
+    /// # Errors
+    ///
+    /// [`PathError::ReadOnly`] for a meta path. The record is unchanged on error.
+    pub fn remove(&self, record: &mut Record) -> Result<Option<Value>, PathError> {
         let field = match &self.target {
-            Target::Key(map, key) => return map.get_mut(record).remove(key),
+            Target::Key(map, key) => return Ok(map.get_mut(record).remove(key)),
+            Target::Meta(_) => return Err(self.read_only()),
             Target::Field(field) => *field,
         };
-        match field {
+        Ok(match field {
             Field::Id => record.id.take().map(|id| Value::from(id.0)),
             Field::Kind => Some(Value::from(std::mem::take(&mut record.kind).as_str())),
             Field::TimeUnixNano => record.time_unix_nano.take().map(Value::from),
@@ -658,6 +750,12 @@ impl FieldPath {
             Field::Body => record.body.take(),
             Field::TraceId => record.trace_id.take().map(Value::from),
             Field::SpanId => record.span_id.take().map(Value::from),
+        })
+    }
+
+    fn read_only(&self) -> PathError {
+        PathError::ReadOnly {
+            path: self.to_string(),
         }
     }
 
@@ -712,6 +810,7 @@ impl fmt::Display for FieldPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.target {
             Target::Field(field) => f.write_str(Root::Field(*field).name()),
+            Target::Meta(field) => write!(f, "{}.{}", Root::Meta.name(), field.as_str()),
             Target::Key(map, key) => {
                 f.write_str(Root::Map(*map).name())?;
                 if key.split('.').any(str::is_empty) {
