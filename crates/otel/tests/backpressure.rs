@@ -152,13 +152,13 @@ fn a_stuck_trace_exporter_neither_blocks_the_caller_nor_queues_without_bound() {
     stuck.release();
     sink.force_flush().expect("flushes once released");
 
-    // Two spans per trace. What survives is the export that was stuck (one batch), the
-    // queue behind it, and the batch the processor was filling from that queue: three
-    // queue-sized lots at most, since a batch is the queue's size. The rest was dropped.
+    // Two spans per trace. While an export is stuck the processor holds nothing but that
+    // batch (taken off before exporting) and the channel behind it, one queue's worth each,
+    // so at most twice the queue arrives once released. The rest was dropped.
     let spans = usize::try_from(traces * 2).expect("fits");
     let exported = stuck.exported();
     assert!(exported >= QUEUE, "the stuck batch arrives: {exported}");
-    assert!(exported <= 3 * QUEUE, "{exported} of {spans} spans kept");
+    assert!(exported <= 2 * QUEUE, "{exported} of {spans} spans kept");
     assert!(exported < spans, "nothing was dropped");
     sink.shutdown().expect("shuts down");
 }
@@ -180,11 +180,11 @@ fn a_stuck_log_exporter_neither_blocks_the_caller_nor_queues_without_bound() {
     stuck.release();
     log.force_flush().expect("flushes once released");
 
-    // As for spans: the stuck batch, the queue and the batch being filled, at most.
+    // As for spans: the stuck batch and the queue behind it, at most.
     let events = usize::try_from(events).expect("fits");
     let exported = stuck.exported();
     assert!(exported >= QUEUE, "the stuck batch arrives: {exported}");
-    assert!(exported <= 3 * QUEUE, "{exported} of {events} records kept");
+    assert!(exported <= 2 * QUEUE, "{exported} of {events} records kept");
     assert!(exported < events, "nothing was dropped");
     log.shutdown().expect("shuts down");
 }
