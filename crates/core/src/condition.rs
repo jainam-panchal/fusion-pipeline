@@ -182,8 +182,8 @@ impl Condition {
         }
     }
 
-    /// Evaluate against `record` and its `meta` with regex operators treated as false. For a condition
-    /// that uses them, see [`Condition::matches_with`].
+    /// Evaluate against `record` and its `meta` with regex operators treated as false. For a
+    /// condition that uses them, see [`Condition::matches_with`].
     ///
     /// A missing field equals `null` and nothing else; comparisons between mismatched types
     /// are false (so `!=` is true); ordering applies to numbers and to strings.

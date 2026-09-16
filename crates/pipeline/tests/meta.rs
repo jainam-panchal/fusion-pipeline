@@ -335,7 +335,7 @@ fn push_through(yaml: &str, record: Record, arrival: Arrival) -> common::Harness
 
 fn acme_arrival() -> Arrival {
     Arrival {
-        tenant: Some("acme".to_owned()),
+        tenant: Some(common::TENANT.to_owned()),
         ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
         delivery_count: 2,
     }

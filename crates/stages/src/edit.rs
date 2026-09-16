@@ -351,8 +351,11 @@ impl Op {
                     .ok_or_else(|| from.unapplied(EditCause::Absent))?;
                 to.write(record, value)
                     .map_err(|_| from.unapplied(EditCause::Type))?;
-                // Load refuses a `meta.*` source for `rename`, and removing a record field
-                // cannot fail.
+                // `remove` refuses only `meta.*` today, and this stage's load refuses a
+                // `meta.*` source for `rename`. Unlike `set`, the error is discarded: a
+                // refusal core adds to `remove` later would go silent here. The risk is
+                // accepted because `to` is already written, and `apply` promises an
+                // unchanged record on `Err`, which this arm could no longer keep.
                 let _removed = from.path.remove(record);
                 Ok(())
             }
@@ -382,8 +385,8 @@ impl Op {
                     .map_err(|_| field.unapplied(EditCause::Type))
             }
             Self::Delete { fields } => {
-                // An absent field is nothing to do, not an unapplied op. Load refuses a
-                // `meta.*` field, and removing a record field cannot fail.
+                // An absent field is nothing to do, not an unapplied op. The discarded
+                // error is the same accepted risk as in `rename`; load refuses `meta.*`.
                 for field in fields {
                     let _removed = field.remove(record);
                 }

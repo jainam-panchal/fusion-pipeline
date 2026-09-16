@@ -47,10 +47,12 @@ macro_rules! metrics {
              [`HistogramMetric::ALL`]."
             [] $($(#[doc = $doc])* $kind $variant = $wire,)+);
     };
-    // The subset `$name` of the metrics tagged `$want`: every metric is looked at once, and
-    // `@keep` or `@skip` decides whether it joins the accumulator. Once the list is empty the
+    // The subset `$name` of the metrics tagged `$want`, as a fold: `@subset` takes the next
+    // metric and hands it to `@pick`, which sends it to `@keep` (joins the accumulator) when
+    // its instrument is `$want` and otherwise drops it. Once the list is empty the
     // accumulator is the subset, declared as a closed set with each metric's own docs.
-    (@subset $want:ident $name:ident $about:literal [$($(#[doc = $d:literal])* $v:ident = $w:literal,)*]) => {
+    (@subset $want:ident $name:ident $about:literal
+        [$($(#[doc = $d:literal])* $v:ident = $w:literal,)*]) => {
         closed_set! {
             #[doc = $about]
             #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -75,6 +77,7 @@ macro_rules! metrics {
     };
     (@pick counter counter $($t:tt)*) => { metrics!(@keep counter $($t)*); };
     (@pick histogram histogram $($t:tt)*) => { metrics!(@keep histogram $($t)*); };
+    // Any other instrument: the metric in `[$($item)*]` is not in this subset and is dropped.
     (@pick $want:ident $other:ident $name:ident $about:literal [$($acc:tt)*] [$($item:tt)*]
         $($rest:tt)*) => {
         metrics!(@subset $want $name $about [$($acc)*] $($rest)*);
