@@ -9,7 +9,8 @@
 //!
 //! Labels are `tenant` on everything, `stage` (the node id, or the reserved `source` for
 //! decisions the engine takes before any node runs) where the spec gives one, `reason` on
-//! `records_dropped_total` and `kind` on `lua_errors_total`.
+//! `records_dropped_total`, `kind` on `lua_errors_total`, and `op`, `field` and `cause` on
+//! `edit_unapplied_total`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -44,6 +45,9 @@ pub enum Metric {
     /// `regex_nonmatch_total{tenant, stage, engine}`: records a regex stage's pattern did not
     /// match, passed on unchanged. Emitted by the regex stages.
     RegexNonmatch,
+    /// `edit_unapplied_total{tenant, stage, op, field, cause}`: `edit` ops that could not
+    /// apply to a record. Emitted by the edit stage.
+    EditUnapplied,
     /// `source_naks_total{tenant}`: messages the engine negatively acknowledged.
     SourceNaks,
     /// `source_redeliveries_total{tenant}`: messages the source saw more than once.
@@ -69,7 +73,7 @@ pub enum MetricKind {
 
 impl Metric {
     /// Every metric, for an exporter that creates its instruments up front.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::RecordsIn,
         Self::RecordsOut,
         Self::RecordsDropped,
@@ -80,6 +84,7 @@ impl Metric {
         Self::StateErrors,
         Self::LuaErrors,
         Self::RegexNonmatch,
+        Self::EditUnapplied,
         Self::SourceNaks,
         Self::SourceRedeliveries,
         Self::Dlq,
@@ -102,6 +107,7 @@ impl Metric {
             Self::StateErrors => "state_errors_total",
             Self::LuaErrors => "lua_errors_total",
             Self::RegexNonmatch => "regex_nonmatch_total",
+            Self::EditUnapplied => "edit_unapplied_total",
             Self::SourceNaks => "source_naks_total",
             Self::SourceRedeliveries => "source_redeliveries_total",
             Self::Dlq => "dlq_total",
@@ -123,6 +129,7 @@ impl Metric {
             | Self::StateErrors
             | Self::LuaErrors
             | Self::RegexNonmatch
+            | Self::EditUnapplied
             | Self::SourceNaks
             | Self::SourceRedeliveries
             | Self::Dlq
@@ -163,9 +170,87 @@ impl std::fmt::Display for EngineLabel {
     }
 }
 
+/// The `op` label of `edit_unapplied_total`: the kind of an `edit` op. Closed set, so the
+/// label cannot drift from the five ops the spec defines; the stages crate maps its own op
+/// onto it. [`EditOp::ALL`] lists them in the spec's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EditOp {
+    /// `set {field, value}`.
+    Set,
+    /// `rename {from, to}`.
+    Rename,
+    /// `copy {from, to}`.
+    Copy,
+    /// `hash {field}`.
+    Hash,
+    /// `delete {fields}`.
+    Delete,
+}
+
+impl EditOp {
+    /// Every op, for checks against the spec's closed set.
+    pub const ALL: [Self; 5] = [
+        Self::Set,
+        Self::Rename,
+        Self::Copy,
+        Self::Hash,
+        Self::Delete,
+    ];
+
+    /// The label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Set => "set",
+            Self::Rename => "rename",
+            Self::Copy => "copy",
+            Self::Hash => "hash",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+impl std::fmt::Display for EditOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The `cause` label of `edit_unapplied_total`: why an `edit` op could not apply. Closed
+/// set; [`EditCause::ALL`] lists both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EditCause {
+    /// The source field read as null: absent, or JSON `null`.
+    Absent,
+    /// The target refused the value: a composite into a map key, a string into a typed
+    /// field.
+    Type,
+}
+
+impl EditCause {
+    /// Every cause, for checks against the spec's closed set.
+    pub const ALL: [Self; 2] = [Self::Absent, Self::Type];
+
+    /// The label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Type => "type",
+        }
+    }
+}
+
+impl std::fmt::Display for EditCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The labels of one measurement. `tenant` is always set; the rest as the metric requires.
 /// `engine` is set on every per-node metric of a node whose stage runs a regex, and on no
 /// other node, so `sum by (stage)` is unchanged and a regex node can be split by engine.
+/// The three `edit` labels are set together or not at all, through [`Labels::with_edit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Labels<'a> {
     tenant: &'a str,
@@ -173,6 +258,15 @@ pub struct Labels<'a> {
     engine: Option<EngineLabel>,
     reason: Option<DropReason>,
     kind: Option<&'a str>,
+    edit: Option<EditLabels<'a>>,
+}
+
+/// The three labels of `edit_unapplied_total`, set together through [`Labels::with_edit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EditLabels<'a> {
+    op: EditOp,
+    field: &'a str,
+    cause: EditCause,
 }
 
 impl<'a> Labels<'a> {
@@ -185,6 +279,7 @@ impl<'a> Labels<'a> {
             engine: None,
             reason: None,
             kind: None,
+            edit: None,
         }
     }
 
@@ -197,6 +292,7 @@ impl<'a> Labels<'a> {
             engine: None,
             reason: None,
             kind: None,
+            edit: None,
         }
     }
 
@@ -227,6 +323,15 @@ impl<'a> Labels<'a> {
         self
     }
 
+    /// Add the `op`, `field` and `cause` labels of `edit_unapplied_total`, as one, so a
+    /// series with an `op` and no `cause` cannot be built. `field` is the op's source path
+    /// (for `set`, the field it writes), in canonical form.
+    #[must_use]
+    pub const fn with_edit(mut self, op: EditOp, field: &'a str, cause: EditCause) -> Self {
+        self.edit = Some(EditLabels { op, field, cause });
+        self
+    }
+
     /// The set labels as `(name, value)` pairs, in a fixed order.
     pub fn pairs(&self) -> impl Iterator<Item = (&'static str, &'a str)> {
         [
@@ -235,6 +340,9 @@ impl<'a> Labels<'a> {
             self.engine.map(|e| ("engine", e.as_str())),
             self.reason.map(|r| ("reason", r.as_str())),
             self.kind.map(|k| ("kind", k)),
+            self.edit.map(|e| ("op", e.op.as_str())),
+            self.edit.map(|e| ("field", e.field)),
+            self.edit.map(|e| ("cause", e.cause.as_str())),
         ]
         .into_iter()
         .flatten()
@@ -341,6 +449,11 @@ impl Metrics {
         self.recorder.count(Metric::RegexNonmatch, labels, 1);
     }
 
+    /// `edit_unapplied_total`. `labels` carries the node's labels plus [`Labels::with_edit`].
+    pub fn edit_unapplied(&self, labels: &Labels<'_>) {
+        self.recorder.count(Metric::EditUnapplied, labels, 1);
+    }
+
     /// `source_naks_total`.
     pub fn source_nak(&self, tenant: &str) {
         self.recorder
@@ -428,6 +541,9 @@ fn intern(name: &str) -> &'static str {
         "engine" => "engine",
         "reason" => "reason",
         "kind" => "kind",
+        "op" => "op",
+        "field" => "field",
+        "cause" => "cause",
         other => panic!("`{other}` is not a label any metric carries"),
     }
 }

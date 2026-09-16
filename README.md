@@ -13,7 +13,7 @@ Cargo workspace under `crates/`:
 | Crate | Contents |
 |---|---|
 | `core` | record model, field paths (read, write, remove), config loader, DAG validation, engine, `Source`/`Sink`/`AckHandle` traits, in-memory fakes, condition grammar |
-| `stages` | built-in stages: `filter`, `route`, `dedupe`, `extract`, `redact` |
+| `stages` | built-in stages: `filter`, `route`, `dedupe`, `extract`, `redact`, `sample`, `edit` |
 | `regex` | two-engine regex facade: linear `regex` first, PCRE2 fallback with configurable limits, load-time ReDoS lint and canary; the only crate with `unsafe` |
 | `nats` | NATS JetStream source (pull consumer, explicit ack) and sink (returns after `PubAck`); tenant stamped from the subject; `NATS_URL` overrides configured URLs |
 | `state` | Dragonfly state store over the Redis protocol: one sync connection per worker, timeouts and reconnect, `DRAGONFLY_URL` |
@@ -199,6 +199,35 @@ cost a state key per record, which is why the guard is not there (issue #7 recor
 decision). Do not fan the same record into an `every_nth` node twice: each arrival counts.
 The count lives 24 h, refreshed on every record, so a tenant quieter than that restarts at 1
 and its first record back is kept.
+
+## Editing fields
+
+An `edit` node runs a short list of plain ops in order on one record: `set` a literal,
+`rename` or `copy` a value (both overwrite `to`), `hash` a value to lowercase hex SHA-256,
+`delete` fields. No templates, no conditions: a conditional edit is a `route` branch with
+its own `edit` node. An op whose source reads as null or whose target refuses the value
+(`copy body -> severity_number` with a string body) is unapplied: the record is unchanged by
+that op and the op counts on `edit_unapplied_total{op, field, cause}`, then `on_unapplied`
+says whether the record goes on (`skip`, the default) or drops with reason `edit_unapplied`.
+The node never naks: the outcome is fixed by the record's shape. What load can check, it
+refuses, naming the node and the op's position: paths, `id`, `kind` and the tenant, a `set`
+literal of the wrong type, a `hash` target that takes no string, `from` equal to `to`.
+
+```yaml
+nodes:
+  - id: normalise
+    type: edit
+    on_unapplied: skip         # skip (default) | drop
+    ops:
+      - set:    { field: resource.env, value: prod }
+      - rename: { from: attributes.http.path, to: attributes.http.route }
+      - copy:   { from: body, to: attributes.raw }
+      - hash:   { field: attributes.user.email }
+      - delete: { fields: [attributes.debug] }
+```
+
+`hash` is a stable join key, not anonymisation: an unsalted digest of an email is
+dictionary-reversible.
 
 ## Field paths
 

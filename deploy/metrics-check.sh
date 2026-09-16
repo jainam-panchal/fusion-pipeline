@@ -94,11 +94,13 @@ SPEC_METRICS=(
     'records_dropped_total{tenant="acme",stage="source",reason="missing_id"}'
     'records_dropped_total{tenant="acme",stage="drop_trace",reason="filter"}'
     'records_dropped_total{tenant="acme",stage="dedupe_body",reason="dedupe"}'
+    'records_dropped_total{tenant="acme",stage="only_parsed",reason="edit_unapplied"}'
     'records_errored_total{tenant="acme",stage="out"}'
     'stage_duration_seconds_bucket{tenant="acme",stage="drop_trace"}'
     'records_in_total{tenant="acme",stage="parse_syslog",engine="linear"}'
     'regex_nonmatch_total{tenant="acme",stage="parse_syslog",engine="linear"}'
     'records_out_total{tenant="acme",stage="mask_ips",engine="linear"}'
+    'edit_unapplied_total{tenant="acme",stage="tag_service",op="copy",field="attributes.Component",cause="absent"}'
     'state_ops_total{tenant="acme",stage="dedupe_body"}'
     'state_op_duration_seconds_bucket{tenant="acme",stage="dedupe_body"}'
     'source_naks_total{tenant="acme"}'
@@ -123,7 +125,7 @@ for name in "${PENDING_METRICS[@]}"; do
 done
 
 step "4. records_dropped_total reasons within the closed set"
-CLOSED_SET="filter route_default_drop sample dedupe lua_drop lua_error regex_limit state_error invalid_record missing_id"
+CLOSED_SET="filter route_default_drop sample dedupe lua_drop lua_error regex_limit state_error invalid_record missing_id edit_unapplied"
 seen=$(curl -sf --get "$PROM/api/v1/label/reason/values" --data-urlencode 'match[]=records_dropped_total' | jq -r '.data[]')
 for reason in $seen; do
     [[ " $CLOSED_SET " == *" $reason "* ]] || fail "reason \`$reason\` is not in the spec's closed set"

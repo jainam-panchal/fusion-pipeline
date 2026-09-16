@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use common::{WAIT, acme_host_record, for_each_worker_count, start_with};
 use fusion_core::config::Config;
 use fusion_core::memory::{AckOutcome, MemorySinks};
+use fusion_core::metrics::Metric;
 use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_nats::config::SinkParams;
@@ -115,6 +116,85 @@ fn every_deploy_config_compiles_with_the_types_the_binary_registers() {
         fusion_core::pipeline::Pipeline::from_yaml(&deploy_config(name), &registry(&sinks))
             .unwrap_or_else(|err| panic!("{name} compiles: {err}"));
     }
+}
+
+/// A Linux syslog line the compose extract pattern parses: `Component` is
+/// `sshd(pam_unix)`, `Content` the text after the colon.
+const SYSLOG_LINE: &str = "Jun 14 15:16:01 combo sshd(pam_unix)[19939]: authentication failure";
+
+#[test]
+fn the_compose_pipeline_delivers_every_record_and_keeps_only_parsed_lines_on_the_parsed_branch() {
+    for_each_worker_count(|workers| {
+        let sinks = MemorySinks::new();
+        let h = start_with(
+            &deploy_config("pipeline.yaml"),
+            workers,
+            sinks.clone(),
+            registry(&sinks),
+        );
+        let parsed = h.source.push(common::acme_record(1, SYSLOG_LINE));
+        let plain = h.source.push(common::acme_record(2, "disk full"));
+        assert_eq!(
+            parsed.wait(WAIT),
+            Some(AckOutcome::Ack),
+            "workers={workers}"
+        );
+        assert_eq!(plain.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
+
+        assert_eq!(h.ids("out"), [1, 2], "the main sink sees every record");
+        assert_eq!(
+            h.ids("parsed_out"),
+            [1],
+            "the parsed branch keeps only the line the pattern parsed"
+        );
+        let on_parsed = &h.sinks.records("parsed_out")[0];
+        assert_eq!(
+            on_parsed.attributes.get("message"),
+            Some(&serde_json::json!("authentication failure"))
+        );
+        assert_eq!(on_parsed.attributes.get("Content"), None);
+        let on_main: Vec<_> = h.sinks.records("out");
+        let main_parsed = on_main
+            .iter()
+            .find(|r| r.id.map(|id| id.0) == Some(1))
+            .expect("record 1 on the main sink");
+        assert_eq!(
+            main_parsed.attributes.get("Content"),
+            Some(&serde_json::json!("authentication failure")),
+            "the main branch is untouched by the parsed branch's rename"
+        );
+        assert_eq!(
+            main_parsed.attributes.get("service"),
+            Some(&serde_json::json!("sshd(pam_unix)"))
+        );
+        assert_eq!(
+            h.counter(
+                Metric::RecordsDropped,
+                &[
+                    ("tenant", "acme"),
+                    ("stage", "only_parsed"),
+                    ("reason", "edit_unapplied")
+                ]
+            ),
+            1,
+            "the plain body is the drop reason's producer"
+        );
+        assert_eq!(
+            h.counter(
+                Metric::EditUnapplied,
+                &[
+                    ("tenant", "acme"),
+                    ("stage", "tag_service"),
+                    ("op", "copy"),
+                    ("field", "attributes.Component"),
+                    ("cause", "absent")
+                ]
+            ),
+            1,
+            "the plain body is the metric's producer, under skip"
+        );
+        h.finish();
+    });
 }
 
 #[test]

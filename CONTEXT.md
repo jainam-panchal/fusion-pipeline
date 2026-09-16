@@ -71,6 +71,14 @@ _Avoid_: selector, accessor, bracket path
 A `field op literal` expression with `and`, `or`, `not` and parentheses, evaluated against a record. Used by `filter` and `route`.
 _Avoid_: predicate, rule, expression language
 
+**Op**:
+One entry of an `edit` node's `ops` list: `set`, `rename`, `copy`, `hash` or `delete`, with its fields. Ops run in order on one record. The `op` label of `edit_unapplied_total` is the op's kind.
+_Avoid_: operation, action, transform, mutation
+
+**Unapplied op**:
+An `edit` op that could not apply to a record: its source read as null (`cause: absent`) or the target refused the value (`cause: type`). The record is unchanged by that op and the op is counted; the node's `on_unapplied` then skips it or drops the record with reason `edit_unapplied`. Never a stage error.
+_Avoid_: miss, skip (the policy value, not the event), failure, error
+
 ### Outcomes
 
 **Ack**:
