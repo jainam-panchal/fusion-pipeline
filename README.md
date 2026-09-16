@@ -265,6 +265,12 @@ function process(record)
 end
 ```
 
+A script may write the time fields, and they are ingestion time for every stateful node
+downstream: a `dedupe` window is measured against them. Writing a value derived from the
+record is fine; writing `now_ns()` is not, because a redelivered record then gets a later
+ingestion time than the delivery before and a different dedupe verdict. Stamp an attribute
+instead.
+
 Every returned record keeps the original `id` and `resource.tenant.id`, `kind` is `log`
 (filled in when left out), typed fields keep their types (`severity_number` an integer, the
 time fields non-negative integers; `18 / 2` counts as one), a key that is not a record

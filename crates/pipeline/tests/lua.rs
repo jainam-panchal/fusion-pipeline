@@ -450,7 +450,7 @@ fn now_ns_reads_the_clock_and_log_info_and_warn_are_callable() {
         r#"function process(record)
   log.info("handling " .. record.body)
   log.warn("nearly done")
-  record.observed_time_unix_nano = now_ns()
+  record.attributes["stamped_at"] = now_ns()
   return record
 end"#,
     );
@@ -459,8 +459,11 @@ end"#,
         .duration_since(std::time::UNIX_EPOCH)
         .expect("after the epoch")
         .as_nanos() as u64;
-    let stamped = out[0]
-        .observed_time_unix_nano
+    // Deliberately an attribute, not `observed_time_unix_nano`: that field is ingestion
+    // time for every downstream stateful node, and a clock reading there would move a
+    // redelivered record into a different window. The spec says so beside the `edit` rule.
+    let stamped = out[0].attributes["stamped_at"]
+        .as_u64()
         .expect("now_ns() was written");
     assert!(
         (before..=after).contains(&stamped),
