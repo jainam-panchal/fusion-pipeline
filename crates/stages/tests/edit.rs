@@ -127,7 +127,7 @@ fn copy_from_id_is_allowed_since_it_only_reads() {
 }
 
 #[test]
-fn every_op_naming_the_tenant_is_rejected() {
+fn every_op_naming_the_tenant_is_accepted_since_it_is_payload() {
     for op in [
         "set: { field: resource.tenant.id, value: acme }",
         "rename: { from: resource.tenant.id, to: resource.owner }",
@@ -136,11 +136,8 @@ fn every_op_naming_the_tenant_is_rejected() {
         "hash: { field: resource.tenant.id }",
         "delete: { fields: [resource.tenant.id] }",
     ] {
-        rejects(
-            &format!("    ops:\n      - {op}\n"),
-            "op 0",
-            &["resource.tenant.id", "tenant"],
-        );
+        let ops = format!("    ops:\n      - {op}\n");
+        assert!(build(&ops).is_ok(), "{op}");
     }
 }
 

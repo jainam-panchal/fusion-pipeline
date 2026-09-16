@@ -401,3 +401,49 @@ fn edit_never_errors_whatever_the_record_holds() {
     assert_eq!(h.counter(Metric::RecordsOut, &STAGE), 5);
     h.finish();
 }
+
+const RETENANT_THEN_DEDUPE: &str = r#"
+name: ingest
+nodes:
+  - id: normalise
+    type: edit
+    ops:
+      - set: { field: resource.tenant.id, value: other }
+  - id: dedupe_body
+    type: dedupe
+    from: normalise
+    key: [body]
+    window: 10s
+  - id: out
+    type: sink.memory
+    from: dedupe_body
+"#;
+
+#[test]
+fn a_tenant_rewritten_by_edit_is_payload_and_labels_and_state_keys_keep_the_arrival_tenant() {
+    for_each_worker_count(|workers| {
+        let (out, h) = run(
+            RETENANT_THEN_DEDUPE,
+            workers,
+            vec![record(1, json!({"body": "x"}))],
+        );
+        assert_eq!(out[0].resource.get("tenant.id"), Some(&json!("other")));
+        assert_eq!(
+            h.counter(Metric::RecordsOut, &STAGE),
+            1,
+            "workers={workers}"
+        );
+        assert_eq!(
+            h.counter(Metric::RecordsOut, &[("tenant", "acme"), ("stage", "out")]),
+            1,
+            "workers={workers}"
+        );
+        let keys = h.state.keys();
+        assert_eq!(keys.len(), 1, "workers={workers}");
+        assert!(
+            keys[0].starts_with("ingest:acme:dedupe_body:"),
+            "{keys:?} workers={workers}"
+        );
+        h.finish();
+    });
+}

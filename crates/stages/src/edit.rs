@@ -26,9 +26,8 @@
 //! text `sample consistent` hashes). It is a stable join key, not anonymisation: an
 //! unsalted digest of a low-entropy field is dictionary-reversible.
 //!
-//! What load can check, it refuses: every path parses, no op writes or removes `id`, `kind`
-//! or `resource.tenant.id` (the engine fixes the tenant once per record for metrics and
-//! state keys; `copy` may read them), a `set` literal is a scalar the field takes, a `hash`
+//! What load can check, it refuses: every path parses, no op writes or removes `id` or
+//! `kind` (`copy` may read them), a `set` literal is a scalar the field takes, a `hash`
 //! target takes a string, `from` and `to` differ. Every refusal names the node and the op's
 //! position.
 
@@ -167,18 +166,12 @@ mod label {
 /// The op kinds as an error message lists them.
 const OP_NAMES: &str = "set, rename, copy, hash or delete";
 
-/// The tenant's path, which no op may write or remove: the engine reads the tenant once
-/// per record for every label and state key, so an edit changing it would leave them
-/// disagreeing.
-const TENANT: &str = "resource.tenant.id";
-
 /// Where in the config an error is: the node, the op's position, and the op's kind once
-/// that is known. `tenant` is [`TENANT`] parsed once, at load.
+/// that is known.
 struct At<'a> {
     node: &'a NodeConfig,
     index: usize,
     kind: Option<EditOp>,
-    tenant: &'a FieldPath,
 }
 
 impl At<'_> {
@@ -193,17 +186,12 @@ impl At<'_> {
         }
     }
 
-    /// `text` parsed as a path the op may write or remove: it parses, is not `id` or
-    /// `kind`, and is not the tenant.
+    /// `text` parsed as a path the op may write or remove: it parses and is not `id` or
+    /// `kind`.
     fn editable(&self, key: &str, text: &str) -> Result<FieldPath, ConfigError> {
         let path = self.readable(key, text)?;
         if !path.is_writable() {
             return Err(self.error(format!("`{key}`: `{path}` is read-only")));
-        }
-        if path == *self.tenant {
-            return Err(self.error(format!(
-                "`{key}`: `{path}` is the tenant and cannot be edited"
-            )));
         }
         Ok(path)
     }
@@ -225,8 +213,7 @@ impl Edit {
     ///
     /// [`ConfigError::InvalidParams`] naming the node and the op's position when `ops` is
     /// empty, an entry does not hold exactly one op, the op is unknown, a key is missing
-    /// or unknown, a path does not parse, an op writes or removes `id`, `kind` or
-    /// `resource.tenant.id`,
+    /// or unknown, a path does not parse, an op writes or removes `id` or `kind`,
     /// a `set` literal is not a scalar or not of the field's type, a `hash` target does not
     /// take a string, `from` equals `to`, or `on_unapplied` is not `skip` or `drop`.
     pub fn from_node(node: &NodeConfig) -> Result<Self, ConfigError> {
@@ -234,15 +221,11 @@ impl Edit {
         if params.ops.is_empty() {
             return Err(node.invalid_params("`ops` needs at least one op"));
         }
-        // Fails closed: a tenant path that did not parse would be a bug in core, and is
-        // reported as a config error rather than silently dropping the guard.
-        let tenant = FieldPath::parse(TENANT)
-            .map_err(|e| node.invalid_params(format!("tenant path `{TENANT}`: {e}")))?;
         let ops = params
             .ops
             .into_iter()
             .enumerate()
-            .map(|(index, entry)| parse_op(node, index, entry, &tenant))
+            .map(|(index, entry)| parse_op(node, index, entry))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             ops,
@@ -264,13 +247,11 @@ fn parse_op(
     node: &NodeConfig,
     index: usize,
     mut entry: BTreeMap<String, Value>,
-    tenant: &FieldPath,
 ) -> Result<Op, ConfigError> {
     let mut at = At {
         node,
         index,
         kind: None,
-        tenant,
     };
     let Some((name, body)) = entry.pop_first().filter(|_| entry.is_empty()) else {
         return Err(at.error(format!("one op per entry, one of {OP_NAMES}")));
