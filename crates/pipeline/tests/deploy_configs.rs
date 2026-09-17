@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use common::{WAIT, arrival_as, deploy_config, for_each_worker_count, host_record, start_with};
 use fusion_core::config::Config;
 use fusion_core::memory::{AckOutcome, MemorySinks};
-use fusion_core::meta::Arrival;
+use fusion_core::meta::{Arrival, IngestionTime};
 use fusion_core::metrics::CounterMetric;
 use fusion_core::record::{Record, RecordId};
 use fusion_core::registry::Registry;
@@ -373,28 +373,43 @@ fn the_poc_pipeline_treats_each_loghub_set_as_the_harness_expects() {
     let sinks = MemorySinks::new();
     let h = start_with(&yaml, 4, sinks.clone(), registry(&sinks));
     let mut expectations = Vec::new();
-    let mut probes = Vec::new();
+    let mut lines = Vec::new();
     for set in &SETS {
-        let lines = loghub::load(&loghub::testdata(), set).expect("set loads");
-        for line in lines.iter().step_by(LOGHUB_STRIDE) {
-            let original = expectations.len() as u64 + 1;
-            for dup_of in [None, Some(original)] {
-                let id = expectations.len() as u64 + 1;
-                // As the producer sends it: the id in `Fusion-Record-Id` only, not in the
-                // payload.
-                let record = Record::from_json(&loghub::payload(set, line, 0).to_string())
-                    .expect("record parses");
-                let arrival = Arrival {
-                    record_id: Some(RecordId(id)),
-                    ..arrival_as(set.tenant)
-                };
-                probes.push(h.source.push_arrival(record, arrival));
-                expectations.push(expectation(id, set, line, 0, dup_of));
-            }
-        }
+        let loaded = loghub::load(&loghub::testdata(), set).expect("set loads");
+        lines.extend(
+            loaded
+                .into_iter()
+                .step_by(LOGHUB_STRIDE)
+                .map(|line| (set, line)),
+        );
     }
-    for probe in &probes {
-        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    // As the producer sends them: every original, then each duplicate after its original,
+    // stored later. Only then is which copy `dedupe` keeps fixed with four workers: a
+    // duplicate handled before its original would hold the key, and the original, older than
+    // the holder, would pass too.
+    for dup in [false, true] {
+        let mut probes = Vec::new();
+        for (index, (set, line)) in lines.iter().enumerate() {
+            let original = index as u64 + 1;
+            let (id, dup_of) = if dup {
+                (lines.len() as u64 + original, Some(original))
+            } else {
+                (original, None)
+            };
+            // The id in `Fusion-Record-Id` only, not in the payload.
+            let record = Record::from_json(&loghub::payload(set, line, 0).to_string())
+                .expect("record parses");
+            let arrival = Arrival {
+                record_id: Some(RecordId(id)),
+                ingestion_time: Some(IngestionTime::Reported(1_000_000_000 + id)),
+                ..arrival_as(set.tenant)
+            };
+            probes.push(h.source.push_arrival(record, arrival));
+            expectations.push(expectation(id, set, line, 0, dup_of));
+        }
+        for probe in &probes {
+            assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+        }
     }
 
     let written: Vec<Written> = subjects
@@ -413,6 +428,10 @@ fn the_poc_pipeline_treats_each_loghub_set_as_the_harness_expects() {
     assert_eq!(report.edit_mismatch, 0, "{report}");
     let groups = expectations.len() as u64 / 2;
     assert_eq!(report.duplicates_planned, groups, "{report}");
+    assert_eq!(
+        report.duplicates_dropped, groups,
+        "one copy in memory, so dedupe drops every duplicate: {report}"
+    );
     let linux = expectations.iter().filter(|e| e.set == "Linux").count() as u64 / 2;
     assert_eq!(
         report.received - report.extra_copies,

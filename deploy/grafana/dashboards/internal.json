@@ -1416,7 +1416,7 @@
       "id": 1101,
       "type": "stat",
       "title": "Did every record arrive?  (published, received, missing, unexpected, dead-lettered, wrongly edited, duplicates dropped, extra copies)",
-      "description": "The verifier's last report (loghub-verifier, issue #13). missing: a line's duplicate group reached none of its subjects. unexpected: a record nobody published, on a subject its set never routes to, or under the wrong tenant. dead-lettered: a published record in DLQ. edit mismatch: a main-subject record without what the edit node writes. A run passes when these four are 0 and dedupe dropped at least half the planned duplicates (duplicates dropped of duplicates planned). extra copies: a second copy of a group on one subject, which at-least-once delivery allows. Gauges are exported once per run and go stale 5 minutes after it.",
+      "description": "The verifier's last report (loghub-verifier, issue #13). missing: a line's duplicate group reached none of its subjects. unexpected: a record nobody published, on a subject its set never routes to, or under the wrong tenant. dead-lettered: a published record in DLQ. edit mismatch: a main-subject record without what the edit node writes. A run passes when these four are 0 and dedupe dropped at least 80% of the planned duplicates (duplicates dropped of duplicates planned). extra copies: a second copy of a group on one subject, which at-least-once delivery allows. Gauges are exported once per run and go stale 5 minutes after it.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

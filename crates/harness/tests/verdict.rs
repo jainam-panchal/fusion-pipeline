@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 
 use fusion_core::stage::DropReason;
-use fusion_harness::expect::{AUDIT, Expectation, MAIN, expectation};
-use fusion_harness::loghub::{self, Line};
+use fusion_harness::expect::{Expectation, expectation};
+use fusion_harness::loghub::{self, AUDIT, Line, MAIN};
 use fusion_harness::verdict::{DeadLetter, Written, judge};
 use serde_json::{Map, Value, json};
 
@@ -133,51 +133,72 @@ fn a_written_duplicate_satisfies_its_group_and_its_original_counts_as_the_drop()
     );
 }
 
+/// `groups` Apache lines, each sent as an original and one planned duplicate.
+fn duplicated_groups(groups: u64) -> Vec<Expectation> {
+    (0..groups)
+        .flat_map(|group| {
+            let original = 10 * group + 1;
+            let line_id = usize::try_from(group).expect("small") + 1;
+            [
+                apache(original, line_id, None),
+                apache(original + 1, line_id, Some(original)),
+            ]
+        })
+        .collect()
+}
+
+/// Every original written to the main subject, and the duplicates of the first `undropped`
+/// groups too.
+fn written_with_undropped(expectations: &[Expectation], undropped: usize) -> Vec<Written> {
+    expectations
+        .iter()
+        .filter(|e| {
+            e.dup_of
+                .is_none_or(|original| original <= 10 * undropped as u64)
+        })
+        .map(|e| written(e, MAIN))
+        .collect()
+}
+
 #[test]
 fn both_copies_written_is_an_extra_copy_and_an_undropped_duplicate() {
-    let expectations = [
-        apache(1, 1, None),
-        apache(2, 1, Some(1)),
-        apache(3, 2, None),
-        apache(4, 2, Some(3)),
-    ];
-    let written = [
-        written(&expectations[0], MAIN),
-        written(&expectations[1], MAIN),
-        written(&expectations[2], MAIN),
-    ];
-    let report = judge(&expectations, &written, &[]);
-    assert!(report.passed(), "half the duplicates dropped: {report}");
+    let expectations = duplicated_groups(5);
+    let report = judge(
+        &expectations,
+        &written_with_undropped(&expectations, 1),
+        &[],
+    );
+    assert!(report.passed(), "80% of the duplicates dropped: {report}");
     assert_eq!(report.extra_copies, 1);
     assert_eq!(
         (report.duplicates_planned, report.duplicates_dropped),
-        (2, 1)
+        (5, 4)
+    );
+    assert!(
+        report.to_string().contains("at least 80%: held"),
+        "{report}"
     );
 }
 
 #[test]
-fn a_dedupe_that_drops_under_half_the_duplicates_fails_the_run() {
-    let mut expectations = Vec::new();
-    for group in 0..4_u64 {
-        let original = 10 * group + 1;
-        let line_id = usize::try_from(group).expect("small") + 1;
-        expectations.push(apache(original, line_id, None));
-        expectations.push(apache(original + 1, line_id, Some(original)));
-    }
-    // Every copy arrives but one duplicate: 1 of 4 dropped.
-    let written: Vec<_> = expectations
-        .iter()
-        .filter(|e| e.id != 2)
-        .map(|e| written(e, MAIN))
-        .collect();
-    let report = judge(&expectations, &written, &[]);
+fn a_dedupe_that_drops_under_80_percent_of_the_duplicates_fails_the_run() {
+    let expectations = duplicated_groups(5);
+    // Two duplicates of five arrive: 3 of 5 dropped, 60%.
+    let report = judge(
+        &expectations,
+        &written_with_undropped(&expectations, 2),
+        &[],
+    );
     assert_eq!((report.missing, report.unexpected), (0, 0));
     assert_eq!(
         (report.duplicates_planned, report.duplicates_dropped),
-        (4, 1)
+        (5, 3)
     );
     assert!(!report.passed(), "{report}");
-    assert!(report.to_string().contains("dedupe"), "{report}");
+    assert!(
+        report.to_string().contains("at least 80%: FAILED"),
+        "{report}"
+    );
 }
 
 #[test]

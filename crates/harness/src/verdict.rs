@@ -9,9 +9,9 @@
 //! dead letter fails the run even when a duplicate of it arrived.
 //!
 //! `dedupe` is judged by the share of planned duplicates (expectations with `drop: dedupe`)
-//! that never reached the main subject: under [`MIN_DUPLICATES_DROPPED`] fails the run, so a
-//! `dedupe` that drops nothing cannot pass, while the copies a race or a paused state store
-//! lets through (chaos, #14) can.
+//! that never reached the main subject: under [`MIN_DUPLICATES_DROPPED_PERCENT`] fails the run, so a
+//! `dedupe` that drops nothing, or only some, cannot pass, while the copies a race or a
+//! paused state store lets through (chaos, #14: about 5s of a 60s run) can.
 //!
 //! Extraction and `edit` are judged once per group, on the first copy that reached the main
 //! subject. Extraction compares the set's CSV columns, an absent attribute equal to an empty
@@ -24,11 +24,11 @@ use std::fmt;
 
 use serde_json::{Map, Value};
 
-use crate::expect::{Expectation, Group, MAIN};
-use crate::loghub;
+use crate::expect::{Expectation, Group};
+use crate::loghub::{self, MAIN};
 
-/// The share of planned duplicates `dedupe` must drop for a run to pass.
-pub const MIN_DUPLICATES_DROPPED: f64 = 0.5;
+/// The share of planned duplicates, in percent, `dedupe` must drop for a run to pass.
+pub const MIN_DUPLICATES_DROPPED_PERCENT: u64 = 80;
 
 /// How many examples of each finding the summary lists.
 const SHOWN: usize = 20;
@@ -144,13 +144,12 @@ impl Report {
             && self.dedupe_held()
     }
 
-    /// Whether `dedupe` dropped at least [`MIN_DUPLICATES_DROPPED`] of the planned
+    /// Whether `dedupe` dropped at least [`MIN_DUPLICATES_DROPPED_PERCENT`] of the planned
     /// duplicates; true when none was planned.
     #[must_use]
     pub fn dedupe_held(&self) -> bool {
-        self.duplicates_planned == 0
-            || self.duplicates_dropped as f64
-                >= MIN_DUPLICATES_DROPPED * self.duplicates_planned as f64
+        u128::from(self.duplicates_dropped) * 100
+            >= u128::from(self.duplicates_planned) * u128::from(MIN_DUPLICATES_DROPPED_PERCENT)
     }
 
     fn example(&mut self, finding: Finding, text: impl FnOnce() -> String) {
@@ -172,10 +171,10 @@ impl fmt::Display for Report {
         writeln!(f, "extra_copies   {}", self.extra_copies)?;
         writeln!(
             f,
-            "dedupe         dropped {} of {} planned duplicates (at least {:.0}%: {})",
+            "dedupe         dropped {} of {} planned duplicates (at least {}%: {})",
             self.duplicates_dropped,
             self.duplicates_planned,
-            MIN_DUPLICATES_DROPPED * 100.0,
+            MIN_DUPLICATES_DROPPED_PERCENT,
             if self.dedupe_held() { "held" } else { "FAILED" }
         )?;
         writeln!(f, "extraction by set:")?;

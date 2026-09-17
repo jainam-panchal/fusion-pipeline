@@ -14,12 +14,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::loghub::{Line, Set};
 
-/// The subject every set's records reach, after extraction and `edit`.
-pub const MAIN: &str = "processed.loghub.main";
-
-/// The subject Linux records also reach, straight from the route, before extraction.
-pub const AUDIT: &str = "processed.loghub.audit";
-
 /// The name the POC config's `edit` node writes into `attributes.pipeline`.
 pub const PIPELINE_NAME: &str = "poc";
 

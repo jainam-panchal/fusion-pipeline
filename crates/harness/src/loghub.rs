@@ -11,7 +11,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::expect::{AUDIT, MAIN};
+/// The subject every set's records reach, after extraction and `edit`.
+pub const MAIN: &str = "processed.loghub.main";
+
+/// The subject Linux records also reach, straight from the route, before extraction.
+pub const AUDIT: &str = "processed.loghub.audit";
 
 /// A vendored set.
 #[derive(Debug)]

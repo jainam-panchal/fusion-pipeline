@@ -18,7 +18,7 @@
 //! serving a series for its `metric_expiration` (5m), and Prometheus keeps what it scraped.
 //!
 //! Exits 0 on a pass, 1 on a fail (anything missing, unexpected, dead-lettered or wrongly
-//! edited, or `dedupe` dropping under half the planned duplicates), 2 when the run could not
+//! edited, or `dedupe` dropping under 80% of the planned duplicates), 2 when the run could not
 //! be judged.
 
 use std::io::BufRead;
