@@ -26,6 +26,8 @@ OpenTelemetry's log data model does expect a collector to fill `observed_time_un
 - **tenant:** the arrival's, else `unknown`. A tenant is a metric label, a state-key segment and a header value, so an arrival tenant that is empty or holds a control character counts as none. The transport's word is authenticated: NATS permissions decide who may publish on `logs.acme.>`, while any producer can write any `tenant.id`. A record carrying `tenant.id: beta` on `logs.acme.x` is labelled `acme`, and its payload keeps `beta`; a record carrying `tenant.id: beta` on a subject that names no tenant, with no `Fusion-Tenant` header, is `unknown`.
 - **ingestion time:** the arrival's, else the worker clock. Ingestion time is the pipeline's reading, assigned when the message entered the transport, so the NATS source always has one and the producer's clock never decides a window. The clock is reached only from a source that gives no time, the in-memory one tests use.
 
+Amended 2026-09-17 (issue #50, ADR 0007): the record is no longer read for anything. The record id and the kind come from the arrival too, which the NATS source fills from the `Fusion-Record-Id` and `Fusion-Record-Kind` headers the producer sets: no id is `missing_id`, a kind other than `log` is `invalid_record` and is checked first, and an absent kind is `log`. `Meta::resolve` takes the arrival alone. The payload's `id` and `kind` are the producer's data, never read, not even as a fallback.
+
 `Meta.ingestion_time` is an `IngestionTime`: `Reported(nanos)` when a transport said it, `Clock(nanos)` when only the worker clock did; `TimeKind` is the closed set of the two spellings, `reported` and `clock`. The two are never combined, and the end-to-end histogram is observed only for `Reported`. An arrival carries an `IngestionTime` rather than a bare number, so a clock reading an upstream pipeline passed on stays a clock reading.
 
 "Only `kind: log` is processed" and "a record without an id is nakked" are decisions about the record as it arrived, taken once in `Meta::resolve`. They are not invariants of what the sink writes.
@@ -39,6 +41,8 @@ OpenTelemetry's log data model does expect a collector to fill `observed_time_un
 | `Fusion-Ingestion-Time-Kind` | `reported` or `clock` |
 
 The record id is not a header, since it is in the payload as it arrived or as a stage left it. The delivery count is not a header, since it counts this pipeline's own consumer's deliveries and means nothing downstream. The `Nats-` prefix belongs to the server; `Fusion-` is ours.
+
+Amended 2026-09-17 (issue #50, ADR 0007): the record id is a header now. The sink writes `Fusion-Record-Id` from `Meta.record_id`, and the source reads it back, so a downstream pipeline keeps the first pipeline's id whatever a stage did to the payload's `id`. No kind header is written, since every record a sink writes was walked as a log.
 
 **What the NATS source trusts.** It fills the `Arrival` from the subject, the headers and the JetStream message info:
 
