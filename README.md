@@ -20,6 +20,7 @@ Cargo workspace under `crates/`:
 | `otel` | OTLP metrics exporter: one instrument per spec metric behind core's `Recorder` boundary, HTTP/protobuf to the collector, configured by `OTEL_EXPORTER_OTLP_*` |
 | `lua` | the `lua` stage: Lua 5.4 through `mlua` (vendored), one sandboxed VM per worker per node, instruction budget, memory cap, output check, `state`/`log`/`now_ns` API |
 | `pipeline` | the `pipelined` binary and the default stage registry |
+| `harness` | the loghub harness: `loghub-producer` replays the vendored loghub sets into NATS, `loghub-verifier` judges what the pipeline delivered |
 
 ```sh
 cargo test --workspace
@@ -444,6 +445,56 @@ attributes with the structured CSV:
 ```sh
 cargo test -p fusion-pipeline --test extract_loghub
 ```
+
+## Loghub harness
+
+The end-to-end check of the POC pipeline (`deploy/pipeline-poc.yaml`: route by log format,
+one extract node per format, fan-in to redact and edit, a Linux audit fan-out). It needs the
+compose stack, the `nats` CLI and cargo:
+
+```sh
+deploy/loghub-check.sh                                      # 100k records over ~60s
+PRODUCER_ARGS="--count 20000 --rate 1000" deploy/loghub-check.sh
+```
+
+The script brings the stack up with `PIPELINE_CONFIG=pipeline-poc.yaml`, purges `LOGS`,
+`PROCESSED` and `DLQ`, and runs the two binaries from `crates/harness`:
+
+- `loghub-producer` (`--rate`, `--count`, `--datasets Linux,OpenSSH,Apache,Mac`,
+  `--dup-percent`, `--seed`, `--dedupe-window`, `--expectations`) publishes each distinct
+  loghub line raw in `body` on `logs.<set>.loghub`, with `Fusion-Record-Id`, about 30% of
+  them sent twice within 500ms under a new id, and writes one expectation per acked
+  message to `target/loghub/expectations.jsonl`: which subjects, `drop: dedupe` for a
+  duplicate, and the line's row of the structured CSV.
+- `loghub-verifier` waits for the `pipeline` consumer to settle, reads
+  `processed.loghub.>` and `dlq.>`, prints the report and exports it to the collector (the
+  internal dashboard's *Loghub harness* row). A line's copies count together: it is missing
+  when none reached a subject it should have, and a second copy is an extra copy, allowed.
+
+```
+published      100000
+received       87618
+missing        0
+unexpected     0
+dead_lettered  0
+extra_copies   14
+extraction:
+  Apache   100.000% of 17521 groups, 0 mismatched
+  Linux     99.583% of 17521 groups, 73 mismatched
+    distinct LineIds: 899, 1913, 1914, 1915, 1916, 1917, 1923, 1924, 1926
+  Mac      100.000% of 17520 groups, 0 mismatched
+  OpenSSH  100.000% of 17521 groups, 0 mismatched
+verdict: PASS
+```
+
+That is the 100k run of 2026-09-17: every Linux mismatch is a line with more than one space
+after the colon (`kernel:   HighMem zone: ...`), which the Linux pattern keeps in `Content` and
+the CSV drops.
+
+It exits 0 on a pass (nothing missing, unexpected or dead-lettered), 1 on a fail, 2 when
+the run could not be judged. Extraction accuracy is reported, never gated; the mismatching
+`LineId`s are listed. The stack keeps running the POC config afterwards;
+`docker compose -f deploy/compose.yaml up -d` puts `pipeline.yaml` back.
 
 ## Routing
 

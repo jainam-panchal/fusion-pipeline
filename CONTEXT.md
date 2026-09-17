@@ -289,3 +289,18 @@ _Avoid_: counter (an instrument kind), ticket machine (the explanation, not the 
 
 **Worker**:
 One OS thread that owns a state-store connection and one Lua VM per `lua` node it has seen a record for, and runs stages synchronously.
+
+### Harness
+
+**Expectation**:
+What the loghub producer expects of one message it published: the subjects its line must reach, `dedupe` as the drop allowed for a deliberate duplicate, and the attributes the structured CSV says extraction lifts. Written only after the message's `PubAck`, one per line of the expectations file, and never computed by running the pipeline.
+_Avoid_: manifest, oracle, golden output
+
+**Duplicate group**:
+The ids the producer sent for one line in one cycle: an original and its deliberate duplicates. The verifier judges delivery per group and sink, because `dedupe` keeps whichever copy it sees first: a group is missing from a sink when none of its ids arrived there. Not `dedupe`'s repeat, which is any record whose key fields match the holder's.
+_Avoid_: duplicate set, dedupe group
+
+**Extra copy**:
+A delivery beyond the first of a duplicate group on one sink, or a second copy of one id: allowed by at-least-once delivery and by `dedupe`'s races, reported and never a failure.
+_Avoid_: duplicate delivery, unexpected
+
