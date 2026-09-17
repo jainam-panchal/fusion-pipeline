@@ -465,21 +465,26 @@ The script brings the stack up with `PIPELINE_CONFIG=pipeline-poc.yaml`, purges 
   loghub line raw in `body` on `logs.<tenant>.loghub` (one tenant per set) with
   `Fusion-Record-Id`, about 30% of them sent twice within 500ms under a new id, and writes
   one expectation per acked message to `target/loghub/expectations.jsonl`: which subjects,
-  `drop: dedupe` for a duplicate, and the line's row of the structured CSV. It fails the run
-  when a publish needed a retry or its timing fell behind the plan.
-- `loghub-verifier` waits for the `pipeline` consumer to settle, reads
-  `processed.loghub.>` and `dlq.>`, prints the report and exports it to the collector (the
+  `drop: dedupe` for a duplicate, the line's row of the structured CSV and what the config's
+  `edit` node writes. It fails the run when a publish needed a retry or its timing fell
+  behind the plan.
+- `loghub-verifier` waits for the `pipeline` consumer to settle, reads every
+  `processed.>` and `dlq.>` subject, prints the report and exports it to the collector (the
   internal dashboard's *Loghub harness* row). A line's copies count together: it is missing
-  when none reached a subject it should have, and a second copy is an extra copy, allowed.
+  when none reached a subject it should have, and a second copy is an extra copy, allowed as
+  long as `dedupe` dropped at least half the planned duplicates. `edit`'s writes are checked
+  on the main subject.
 
 ```
 published      100000
-received       87622
+received       87624
 missing        0
 unexpected     0
 dead_lettered  0
-extra_copies   18
-extraction:
+edit_mismatch  0
+extra_copies   20
+dedupe         dropped 29902 of 29917 planned duplicates (at least 50%: held)
+extraction by set:
   Apache   100.000% of 17521 groups, 0 mismatched
   Linux    100.000% of 17521 groups, 0 mismatched
   Mac      100.000% of 17520 groups, 0 mismatched
@@ -491,8 +496,8 @@ That is the 100k run of 2026-09-17. The first run found nine Linux lines with mo
 space before the component or after the colon (`kernel:   HighMem zone: ...`); the Linux
 pattern now starts `Component` and `Content` at the first non-space, as the CSV does.
 
-It exits 0 on a pass (nothing missing, unexpected or dead-lettered), 1 on a fail, 2 when
-the run could not be judged. Extraction accuracy is reported, never gated; the mismatching
+It exits 0 on a pass (nothing missing, unexpected, dead-lettered or wrongly edited, and at
+least half the planned duplicates dropped), 1 on a fail, 2 when the run could not be judged. Extraction accuracy is reported, never gated; the mismatching
 `LineId`s are listed. The stack keeps running the POC config afterwards;
 `docker compose -f deploy/compose.yaml up -d` puts `pipeline.yaml` back.
 
