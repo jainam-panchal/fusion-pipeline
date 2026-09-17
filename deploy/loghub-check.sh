@@ -18,7 +18,8 @@
 # --chaos adds the spec's chaos schedule, timed from the producer's start: at 20s the pipeline
 # container is killed (`docker kill`) and at 25s started again (`docker start`); at 40s
 # Dragonfly is paused (`docker pause`) and at 45s unpaused. The pipeline and the collector are
-# restarted before the run, so every pipeline counter read afterwards counts this run alone.
+# restarted before the run, so every pipeline counter read afterwards counts this run alone,
+# and the run waits for the restarted process's running line before it waits for its pulls.
 # After the verifier, a nak fails the run (`source_naks_total` above 0: `on_state_error: pass`
 # must forward a record the store could not answer for, never fail it), and the run must show
 # that the chaos landed, else it is not judged: the source consumer redelivered messages (its
@@ -88,6 +89,11 @@ delivered() {
         | jq -r '"\(.delivered.consumer_seq) \(.delivered.stream_seq)"')
     [[ "$out" =~ ^[0-9]+\ [0-9]+$ ]] || fail "unreadable LOGS/pipeline delivery counts: $out"
     echo "$out"
+}
+
+# started <since>: whether a pipeline process started after <since> (its running line).
+started() {
+    docker logs --since "$1" "$PIPELINE" 2>&1 | grep '^pipelined: running' >/dev/null
 }
 
 # pulling: whether a pipeline is waiting on the source consumer for messages.
@@ -160,7 +166,10 @@ PIPELINE=$("${COMPOSE[@]}" ps -q pipeline)
 DRAGONFLY=$("${COMPOSE[@]}" ps -q dragonfly)
 if ((CHAOS)); then
     step "restart the pipeline and the collector, so counters start at zero"
+    RESTARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
     "${COMPOSE[@]}" restart otel-collector pipeline 2>&1 | tail -2
+    # A pull of the stopped process can still count as waiting until it expires.
+    wait_for 60 "the restarted pipeline" started "$RESTARTED_AT"
 fi
 wait_for 30 "the LOGS/pipeline consumer" nats consumer info LOGS pipeline
 wait_for 60 "the pipeline to pull from LOGS/pipeline" pulling
