@@ -63,7 +63,7 @@ Record 1 stops at `drop_debug`, record 2 at `keep_checkout`, and record 3 reache
 
 ### Fan-out
 
-When two nodes read from the same place, each gets its own copy of the record. Here `all` and `errors` both read from `source`:
+When two nodes read from the same place, the record splits into two branches, and each gets its own copy. Here `all` and `errors` both read from `source`:
 
 ```yaml
 # config
@@ -82,11 +82,11 @@ When two nodes read from the same place, each gets its own copy of the record. H
 
 `errors_out` has no `from`, so it reads from `errors`, the node above it.
 
-Changes a stage makes on one path do not show up on another path.
+Changes a stage makes on one branch do not show up on another branch.
 
 ### Fan-in
 
-A list in `from` makes a node read from several places. The node gets a record once for each path that reaches it:
+A list in `from` makes a node read from several places. The node gets a record once for each branch that reaches it:
 
 ```yaml
 # config
@@ -105,7 +105,7 @@ A list in `from` makes a node read from several places. The node gets a record o
 
 Record 3 is an error and slow, so it passes both filters and `out` writes it twice.
 
-### A path that ends at a stage
+### A branch that ends at a stage
 
 If nothing reads from a stage, records that pass it go nowhere. The message is still acked. Here `errors` has no node after it:
 
@@ -124,13 +124,23 @@ If nothing reads from a stage, records that pass it go nowhere. The message is s
 {{#include ../examples/config/dead-end/expected.yaml}}
 ```
 
-The pipeline does not warn about this, so make sure each path you care about ends in a sink.
+The pipeline does not warn about this, so make sure each branch you care about ends in a sink.
 
 ### Routes
 
 A [`route`](stages/route.md) sends each record down one of several named outputs. Nodes read an output with `from: <route id>.<label>`, for example `from: by_level.errors`. The route page has the rules.
 
 ## What the pipeline refuses
+
+The examples in this guide often leave out the `source` block to stay short. The pipeline refuses to start without one:
+
+```yaml
+{{#include ../examples/config/rejected-no-source/pipeline.yaml}}
+```
+
+```yaml
+{{#include ../examples/config/rejected-no-source/expected.yaml}}
+```
 
 A config with no sink:
 
@@ -169,7 +179,7 @@ The pipeline prints the message after `pipelined: `. The full list:
 | No sink | `pipeline has no sink node` |
 | `from` names a node that does not exist | ``node `out` reads from `x`, which does not exist`` |
 | A node no record can reach | ``node `x` is unreachable from `source` `` |
-| Nodes that read from each other in a loop | ``node `x` is part of a cycle`` |
+| Nodes that read from each other in a loop | ``node `x` is part of a cycle``, or the unreachable message when nothing from `source` enters the loop |
 | Two nodes with one id | ``node id `x` is declared more than once`` |
 | A node called `source` | ``node id `source` is reserved`` |
 | An id with `.` or `:` | ``node id `x.y` contains a dot; ...`` or ``node id `x:y` contains a colon; ...`` |

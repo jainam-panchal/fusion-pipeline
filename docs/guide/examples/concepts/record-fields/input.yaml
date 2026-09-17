@@ -1,0 +1,7 @@
+- subject: logs.acme.checkout
+  headers: {Fusion-Record-Id: "1"}
+  payload:
+    body: payment failed
+    host: web-1
+    attributes:
+      host: web-1

@@ -1,6 +1,6 @@
 # Getting started
 
-This page runs a small config against a local NATS and sends it two log records.
+This page runs a small config against a local NATS and sends it two messages.
 
 You need Docker with Compose v2 and the [`nats` CLI](https://github.com/nats-io/natscli). Run the commands from the repository root.
 
@@ -12,7 +12,7 @@ docker compose -f deploy/compose.yaml up -d --build
 
 This starts NATS with the streams and consumer the pipeline reads from and writes to, and the pipeline itself, built from your checkout. It runs the demo config `deploy/pipeline.yaml` for now.
 
-The stack also starts Dragonfly, Grafana, Prometheus, Loki and Tempo. If one of their ports is already taken on your machine, set `GRAFANA_PORT`, `DRAGONFLY_PORT`, `LOKI_PORT` or `TEMPO_PORT` before the command.
+The stack also starts Dragonfly, Grafana, Prometheus, Loki and Tempo. If one of their ports is already taken on your machine, set `GRAFANA_PORT`, `DRAGONFLY_PORT`, `LOKI_PORT` or `TEMPO_PORT` before the command. The other ports are fixed and must be free: 4222 and 8222 (NATS), 4317, 4318 and 8889 (the collector), 7777 (the NATS exporter) and 9090 (Prometheus).
 
 ## 2. The config
 
@@ -34,11 +34,11 @@ PIPELINE_CONFIG=../docs/guide/examples/getting-started/first-pipeline/pipeline.y
 docker compose -f deploy/compose.yaml logs pipeline
 ```
 
-The log ends with a line like `pipelined: running with 8 workers ...`. If the config is wrong, the pipeline prints why and stops instead.
+The log ends with a line like `pipelined: running with 8 workers ...`. If the config is wrong, the log shows `pipelined: ` and the reason instead. The stack restarts the pipeline, so the same error repeats until you fix the file and run the command again.
 
 `PIPELINE_CONFIG` is a path relative to `deploy/`. For your own config, put the file in `deploy/` and pass its name, for example `PIPELINE_CONFIG=my-pipeline.yaml`.
 
-## 4. Send two records
+## 4. Send two messages
 
 ```sh
 nats sub processed.logs &

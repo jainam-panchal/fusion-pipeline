@@ -4,18 +4,57 @@ The exact meaning of each term is in the glossary, [`CONTEXT.md`](https://github
 
 ## Message and record
 
-A **message** is what NATS delivers: a subject, headers and a payload. The payload is a JSON **record**, one log in OTLP shape:
+A **message** is what NATS delivers: a subject, headers and a payload. The payload is a JSON **record**, one log in OTLP shape. Stages see and change the record. NATS acks or naks the message.
 
-```json
-{
-  "severity_text": "ERROR",
-  "body": "disk full",
-  "attributes": {"http.status": 500},
-  "resource": {"service.name": "checkout"}
-}
+A record has these top-level fields, all optional:
+
+| Field | Holds |
+|---|---|
+| `id` | a whole number |
+| `kind` | `log`, `metric` or `span` |
+| `time_unix_nano`, `observed_time_unix_nano` | whole numbers, nanoseconds |
+| `severity_text` | text, such as `ERROR` |
+| `severity_number` | a whole number |
+| `body` | any JSON value, usually text |
+| `attributes`, `resource`, `scope` | objects with any keys and values |
+| `trace_id`, `span_id` | text |
+
+Put your own fields under `attributes` or `resource`. Two things to know:
+
+- Any other top-level key is dropped when the message is read. It is not in the record, and the sink does not write it.
+- The sink always writes `kind`. When the payload had none, it writes `kind: log`, which means the same thing.
+
+```yaml
+# messages in
+{{#include ../examples/concepts/record-fields/input.yaml}}
 ```
 
-Stages see and change the record. NATS acks or naks the message.
+```yaml
+# config
+{{#include ../examples/concepts/record-fields/pipeline.yaml}}
+```
+
+```yaml
+# result
+{{#include ../examples/concepts/record-fields/expected.yaml}}
+```
+
+A payload that is not a JSON object, or a field that holds the wrong type, cannot be read at all. The message is nakked, and after the last delivery it becomes a dead letter:
+
+```yaml
+# messages in
+{{#include ../examples/concepts/bad-field/input.yaml}}
+```
+
+```yaml
+# config
+{{#include ../examples/concepts/bad-field/pipeline.yaml}}
+```
+
+```yaml
+# result
+{{#include ../examples/concepts/bad-field/expected.yaml}}
+```
 
 ## Meta
 
@@ -28,9 +67,9 @@ The pipeline also keeps its own facts about each record. These are called **Meta
 | ingestion time | the `Fusion-Ingestion-Time` header, else the time NATS stored the message |
 | delivery count | NATS: 1 the first time, 2 on the first redelivery, and so on |
 
-Meta never comes from the payload. A payload field called `id`, or `resource.tenant.id`, is your data, and the pipeline does not read it. The pipeline also never writes Meta into the record. It sends Meta along as headers on every message it writes.
+Meta never comes from the payload. The pipeline does not use a payload `id` or `resource.tenant.id` for anything. It also never puts Meta into the record. It sends Meta along as headers on every message it writes.
 
-Here the payload has `id: 99` and a tenant of its own. The pipeline uses id 7 from the header and tenant `acme` from the subject, and it writes the payload exactly as it arrived.
+Here the payload has `id: 99` and a tenant of its own. The pipeline uses id 7 from the header and tenant `acme` from the subject, and leaves the payload's values alone.
 
 ```yaml
 # messages in
@@ -72,7 +111,7 @@ The first word of the subject is `logs` unless the source sets `tenant_prefix`. 
 
 ## Only logs
 
-The pipeline processes logs only. A producer that sends anything else sets `Fusion-Record-Kind` to `metric` or `span`. No header means `log`. The pipeline drops other kinds before any stage runs and acks them. It does not look at their payload.
+The pipeline processes logs only. A producer that sends anything else sets `Fusion-Record-Kind` to `metric` or `span`. No header means `log`. The pipeline acks and drops every message whose header is not `log`, before any stage runs. That includes a value it cannot read and a header given twice. It does not look at the payload of those messages.
 
 ```yaml
 # messages in
@@ -89,16 +128,13 @@ The pipeline processes logs only. A producer that sends anything else sets `Fusi
 {{#include ../examples/concepts/not-a-log/expected.yaml}}
 ```
 
-A `kind` field inside the payload does not count. It is part of your data.
+A `kind` field inside the payload does not decide this. It is part of your data.
 
 ## Ack, nak, drop
 
-Each message ends in one of these:
+A message is acked when the pipeline is done with it: every sink that should have the record has stored it. A drop also counts as done. A stage such as `filter` drops a record on purpose, and the message is acked.
 
-- **ack**: the pipeline is done. Every sink that should have the record has stored it, or a stage dropped it.
-- **drop**: a stage decided not to pass the record on, for example a `filter`. A drop still ends in an ack. Every drop has a reason, which shows up in the `records_dropped_total` metric.
-- **nak**: something failed. NATS delivers the message again later.
-- **dead letter**: when the last delivery fails too, the pipeline writes the message to `dlq.<tenant>` and tells NATS to stop. The compose stack allows 5 deliveries.
+A message is nakked when something failed, and NATS delivers it again later. When the last delivery fails too, the pipeline writes the message to the dead-letter subject `dlq.<tenant>` and tells NATS to stop delivering it. The compose stack allows 5 deliveries. [NATS](nats.md) covers dead letters in full.
 
 A message without a record id is a failure, so it is nakked:
 
@@ -117,4 +153,6 @@ A message without a record id is a failure, so it is nakked:
 {{#include ../examples/concepts/missing-id/expected.yaml}}
 ```
 
-When a record goes down more than one path, the message is acked only after every path has finished. If any path fails, the message is nakked once, after all of them finish. This means a sink can get the same record again when the message comes back, so sinks should be fine with duplicates. [Writing a config](writing-a-config.md) shows how paths split.
+## Branches
+
+When a record goes down more than one branch, the message is acked only after every branch has finished. If any branch fails, the message is nakked once, after all of them finish. A sink on a branch that worked then gets the record again on the next delivery, so whatever reads the sink's stream should cope with duplicates. [Writing a config](writing-a-config.md) shows how a record splits into branches.

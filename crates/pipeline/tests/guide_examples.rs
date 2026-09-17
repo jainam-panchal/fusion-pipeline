@@ -34,6 +34,7 @@ use fusion_core::record::Record;
 use fusion_nats::SourceParams;
 use fusion_nats::config::DEFAULT_TENANT_PREFIX;
 use fusion_nats::headers::{Received, arrival, for_meta};
+use fusion_pipeline::StartError;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -66,7 +67,6 @@ struct Expected {
     acks: Vec<Settled>,
     #[serde(default)]
     sinks: BTreeMap<String, Vec<Written>>,
-    #[serde(default)]
     rejected: Option<String>,
 }
 
@@ -176,13 +176,28 @@ fn load(dir: &Path) -> Result<Loaded, String> {
     }))
 }
 
+/// The error `pipelined` gives for `yaml`, checked in the order `fusion_pipeline::run`
+/// checks it: the YAML, then the `source` block, then the graph and every node.
+fn load_error(yaml: &str) -> Option<StartError> {
+    let config = match Config::from_yaml(yaml) {
+        Ok(config) => config,
+        Err(err) => return Some(err.into()),
+    };
+    if config.source.is_none() {
+        return Some(StartError::NoSource);
+    }
+    let sinks = MemorySinks::new();
+    Pipeline::compile(&config, &nats_sink_registry(&sinks))
+        .err()
+        .map(StartError::from)
+}
+
 /// What is wrong when `yaml` does not fail to load with exactly `error`.
 fn check_rejected(yaml: &str, error: &str) -> Vec<String> {
-    let sinks = MemorySinks::new();
-    match Pipeline::from_yaml(yaml, &nats_sink_registry(&sinks)) {
-        Ok(_) => vec![format!("expected the config to be rejected with: {error}")],
-        Err(got) if got.to_string() == error => Vec::new(),
-        Err(got) => vec![format!("rejected\n  expected {error}\n  got      {got}")],
+    match load_error(yaml) {
+        None => vec![format!("expected the config to be rejected with: {error}")],
+        Some(got) if got.to_string() == error => Vec::new(),
+        Some(got) => vec![format!("rejected\n  expected {error}\n  got      {got}")],
     }
 }
 

@@ -1,3 +1,7 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
 nodes:
   - id: out
     type: sink.nats
