@@ -1,0 +1,6 @@
+acks: [ack, ack, ack]
+sinks:
+  out:
+    - payload: {kind: log, body: "ERROR checkout pid=4711: payment failed", attributes: {level: ERROR, service: checkout, pid: "4711", message: payment failed}}
+    - payload: {kind: log, body: "WARN search: slow query", attributes: {level: WARN, service: search, message: slow query}}
+    - payload: {kind: log, body: not a structured line}

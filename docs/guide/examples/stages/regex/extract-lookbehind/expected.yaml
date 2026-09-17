@@ -1,0 +1,4 @@
+acks: [ack]
+sinks:
+  out:
+    - payload: {kind: log, body: "order id=42 paid", attributes: {id: "42"}}

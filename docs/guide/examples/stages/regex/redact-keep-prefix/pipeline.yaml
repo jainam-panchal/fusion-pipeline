@@ -1,0 +1,10 @@
+nodes:
+  - id: mask_password
+    type: redact
+    fields: [body]
+    pattern: '(?<=password=)\S+'
+    replace: '***'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

@@ -1,0 +1,9 @@
+nodes:
+  - id: parse_id
+    type: extract
+    field: body
+    pattern: '(?<=id=)(?<id>\d+)'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

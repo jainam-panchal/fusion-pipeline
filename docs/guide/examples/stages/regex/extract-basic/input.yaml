@@ -1,0 +1,9 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: "ERROR checkout pid=4711: payment failed"}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: "WARN search: slow query"}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "3"}
+  payload: {body: not a structured line}

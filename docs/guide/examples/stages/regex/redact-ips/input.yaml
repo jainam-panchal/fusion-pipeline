@@ -1,0 +1,6 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: "failed login from 10.0.0.12 via 192.168.1.5", attributes: {peer: "10.0.0.12", port: 22, host: "10.9.9.9"}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: no address here}

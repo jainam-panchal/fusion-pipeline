@@ -1,0 +1,13 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: mask
+    type: redact
+    fields: [body]
+    pattern: '\d+'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
