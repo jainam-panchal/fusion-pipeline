@@ -110,7 +110,7 @@ deploy/metrics-check.sh                          # traffic in; every metric, the
 ```
 
 Ports that clash with another stack move with `GRAFANA_PORT`, `DRAGONFLY_PORT`, `LOKI_PORT` and
-`TEMPO_PORT`; `metrics-check.sh` reads the same variables.
+`TEMPO_PORT`; `metrics-check.sh` reads `GRAFANA_PORT`, `LOKI_PORT` and `TEMPO_PORT`.
 
 The pipeline exports a signal over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` (or that signal's
 `OTEL_EXPORTER_OTLP_{METRICS,LOGS,TRACES}_ENDPOINT`) is set. A signal with no endpoint is off:

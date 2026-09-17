@@ -210,7 +210,7 @@ The one handle through which the engine and a source reach all three telemetry s
 _Avoid_: telemetry (the crate), observability
 
 **Event**:
-One structured log line from the closed set `stage_error`, `nak`, `redelivery`, `dead_letter`, `dead_letter_failed`, with fixed fields: record id, tenant, node, failure kind, delivery count, message, and the record's trace. Drops are not events.
+One structured log line from the closed set `stage_error`, `nak`, `redelivery`, `dead_letter`, `dead_letter_failed`, with fixed fields: record id, tenant, node, failure kind, delivery count, stream sequence (dead letters only), message, and the record's trace. Drops are not events.
 _Avoid_: log line (its wire form), log message, audit record; "event" for a record
 
 **Event log**:
@@ -218,8 +218,12 @@ The seam an exporter implements to receive events: in-memory in tests, stderr wh
 _Avoid_: logger, log sink
 
 **Record trace**:
-One kept delivery of one record: a delivery span and one span per node the record visited, each parented on the node it came from. Its ids derive from the record id and tenant (the trace key), so every delivery of a record is in one trace. Kept when the walk failed, when the record was redelivered, or when the trace key falls in the sampled share; decided when the record settles.
+One kept delivery of one record: a delivery span and one span per node the record visited, each parented on the node it came from. Its ids derive from the trace key, so every delivery of a record is in one trace. Kept when the walk failed, when the record was redelivered, or when the trace key falls in the sampled share; decided when the record settles.
 _Avoid_: request trace, sampled trace (every failed one is kept)
+
+**Trace key**:
+The record id mixed with the tenant and a salt. Every id of a record trace derives from it, and the sampled share is chosen by it, so a record gets the same answer on every replica and every delivery.
+_Avoid_: trace id (derived from it), sampling key
 
 **Trace sink**:
 The seam an exporter implements to receive record traces: in-memory in tests, OTLP spans in deploy.
