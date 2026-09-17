@@ -49,36 +49,35 @@ A producer names each message's record id in the `Fusion-Record-Id` header (a de
 `u64`) and, for anything but a log, its kind in `Fusion-Record-Kind` (`log`, `metric` or
 `span`; absent is `log`). The pipeline reads neither from the payload: a payload `id` or
 `kind` is the producer's data (ADR 0007). A message without the id header is nakked
-(`missing_id`); one whose kind is not `log` is dropped (`invalid_record`).
+(`missing_id`); one whose kind header is not `log`, including one that does not parse or is
+given twice, is dropped (`invalid_record`) without its payload being decoded.
 
-The record arrives exactly as published, and the message carries the pipeline's view of it
-as headers: `Fusion-Record-Id: 1`, `Fusion-Tenant: acme` (from the subject),
+The record arrives exactly as published, and the message carries the pipeline's view of it as
+headers: `Fusion-Record-Id: 1`, `Fusion-Tenant: acme` (from the subject),
 `Fusion-Ingestion-Time` (the JetStream publish time, in nanoseconds) and
 `Fusion-Ingestion-Time-Kind: reported`. The pipeline never writes those into the record; a
 config that wants the tenant in the payload says so with
 `edit copy {from: meta.tenant, to: resource.tenant.id}`. A pipeline reading `processed.logs`
-takes the record id, tenant and ingestion time back from the headers (the subject's tenant, when the
-subject names one, wins over the header). Only a subject of the form
+takes the record id, tenant and ingestion time back from the headers (the subject's tenant,
+when the subject names one, wins over the header). Only a subject of the form
 `{tenant_prefix}.{tenant}.>` names a tenant; the source's `tenant_prefix` is `logs` unless the
-config says otherwise, so `processed.logs` names none. A sink
-that cannot get its `PubAck` (delete `PROCESSED` to see it) makes the engine nak the source
-message and JetStream redeliver it. `NATS_URL` overrides the `url` of the source and every
-sink.
+config says otherwise, so `processed.logs` names none. A sink that cannot get its `PubAck`
+(delete `PROCESSED` to see it) makes the engine nak the source message and JetStream redeliver
+it. `NATS_URL` overrides the `url` of the source and every sink.
 
-A message that fails its last delivery is dead-lettered: the source publishes it as it
-arrived (payload and the producer's headers, minus any `Nats-*` or `Fusion-*`) to
-`dlq.{tenant}`, waits for the `PubAck` and terminates it. The dead letter carries `Fusion-Dlq-Reason` (the node that
+A message that fails its last delivery is dead-lettered: the source publishes it as it arrived
+(payload and the producer's headers, minus any `Nats-*` or `Fusion-*`) to `dlq.{tenant}`, waits
+for the `PubAck` and terminates it. The dead letter carries `Fusion-Dlq-Reason` (the node that
 failed and its error, `source` for a payload that is not a record or a message without a
 `Fusion-Record-Id`), `Fusion-Dlq-Subject` (where it arrived), the record id, kind, tenant and
-ingestion time headers, so
-republishing it to its subject replays it with the same `Meta`, and `Nats-Msg-Id`
-(`{stream}:{sequence}`), so a second dead letter of one message is dropped. It counts
-`dlq_total{tenant, stage, reason}`, `reason` being `stage_error`, `state_error`,
+ingestion time headers, so republishing it to its subject replays it with the same `Meta`, and
+`Nats-Msg-Id` (`{stream}:{sequence}`), so a second dead letter of one message is dropped. It
+counts `dlq_total{tenant, stage, reason}`, `reason` being `stage_error`, `state_error`,
 `sink_error`, `panic`, `missing_id` or `undecodable`. `DLQ` is one stream with a subject per
-tenant, capped per subject; `dlq_prefix` on the source moves the subjects (default `dlq`).
-When the publish fails four times the message is not terminated: its last nak has no delay,
-JetStream gives up on it at once, `dlq_publish_errors_total` counts it, and the message stays
-in `LOGS` under the stream sequence the pipeline logs.
+tenant, capped per subject; `dlq_prefix` on the source moves the subjects (default `dlq`). When
+the publish fails four times the message is not terminated: its last nak has no delay, JetStream
+gives up on it at once, `dlq_publish_errors_total` counts it, and the message stays in `LOGS`
+under the stream sequence the pipeline logs.
 
 ```sh
 nats pub logs.acme.syslog '{"body": "no id header"}'   # fails every delivery

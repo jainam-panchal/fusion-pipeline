@@ -22,7 +22,7 @@ Read first, in this order:
 - **Records are copy-on-write across route branches.** Shared until a branch mutates.
 - **Reserved names.** `source` is the reserved node id. `drop` is the reserved route label. Every declared route label, the default included, must have a consumer or the config is rejected at load.
 - **`unsafe` lives only in `crates/regex`, in the PCRE2 half.** JIT is never invoked. Every pattern compiles on the linear `regex` engine first and falls back to PCRE2 only when the syntax needs it.
-- **Only `kind: log` is processed, decided at intake from `Fusion-Record-Kind`.** A message the transport says is a `metric` or `span` is counted and rejected before any stage runs, before its record id is checked. The payload's `kind` is never read: a stage may set another kind, and the sink writes it (ADR 0005, ADR 0007).
+- **Only `kind: log` is processed, decided at intake from `Fusion-Record-Kind`.** A message the transport says is a `metric` or `span`, or whose `Fusion-Record-Kind` does not parse or is given twice, is counted and rejected before any stage runs, before its record id is checked, and the NATS source does not decode its payload. The payload's `kind` is never read: a stage may set another kind, and the sink writes it (ADR 0005, ADR 0007).
 
 ## How to test
 
