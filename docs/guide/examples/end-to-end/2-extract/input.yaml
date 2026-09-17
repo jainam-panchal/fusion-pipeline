@@ -1,0 +1,9 @@
+- subject: logs.acme.auth
+  headers: {Fusion-Record-Id: "1"}
+  payload: {severity_text: DEBUG, body: "DEBUG: cache warm"}
+- subject: logs.acme.auth
+  headers: {Fusion-Record-Id: "2"}
+  payload: {severity_text: ERROR, body: "ERROR: login failed from 10.0.0.12"}
+- subject: logs.acme.auth
+  headers: {Fusion-Record-Id: "3"}
+  payload: {severity_text: INFO, body: "INFO: login from 10.0.0.7"}

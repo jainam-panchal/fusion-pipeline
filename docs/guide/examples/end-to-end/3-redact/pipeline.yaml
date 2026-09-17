@@ -1,0 +1,22 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: drop_debug
+    type: filter
+    condition: severity_text == "DEBUG"
+    action: drop
+  - id: parse
+    type: extract
+    field: body
+    pattern: '^(?<level>[A-Z]+): (?<message>.+)$'
+  - id: mask_ips
+    type: redact
+    fields: [body, attributes.message]
+    pattern: '\d+\.\d+\.\d+\.\d+'
+    replace: '[ip]'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

@@ -1,0 +1,5 @@
+acks: [ack, ack, ack]
+sinks:
+  out:
+    - payload: {kind: log, severity_text: ERROR, body: "ERROR: login failed from 10.0.0.12"}
+    - payload: {kind: log, severity_text: INFO, body: "INFO: login from 10.0.0.7"}
