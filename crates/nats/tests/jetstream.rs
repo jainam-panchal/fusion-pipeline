@@ -24,7 +24,7 @@ use fusion_core::signals::Signals;
 use fusion_core::stage::{Context, Stage, StageError, StageOutput};
 use fusion_core::trace::{InMemoryTraceSink, TraceKey, TraceSampling};
 use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
-use fusion_nats::headers::{INGESTION_TIME, INGESTION_TIME_KIND, RECORD_ID, TENANT};
+use fusion_nats::headers::{INGESTION_TIME, INGESTION_TIME_KIND, RECORD_ID, RECORD_KIND, TENANT};
 use fusion_nats::{Nats, NatsError};
 use futures::StreamExt;
 
@@ -831,6 +831,61 @@ fn undecodable_payload_is_nakd_and_the_source_keeps_going() {
         wait_until(SETTLE_TIMEOUT, || fixture.consumer_info().num_redelivered
             > 0),
         "the garbage is redelivered"
+    );
+
+    nats.shutdown();
+    engine.join().expect("clean shutdown");
+}
+
+/// A message whose `Fusion-Record-Kind` is not `log` is acked without being walked, id or
+/// not, and the log behind it reaches the sink.
+#[test]
+#[ignore = "needs a JetStream server at NATS_URL"]
+fn a_message_the_transport_says_is_not_a_log_is_acked_and_never_walked() {
+    let fixture = Fixture::new("kind");
+    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
+    let sinks = MemorySinks::new();
+    let mut registry = Registry::new();
+    registry.register_sink("sink.memory", sinks.clone());
+    let pipeline = Pipeline::from_yaml(TO_MEMORY, &registry).expect("pipeline loads");
+    let source = nats
+        .source(&fixture.source_params())
+        .expect("source builds");
+    let engine = Engine::start(pipeline, Box::new(source), 1, Metrics::noop(), no_state())
+        .expect("engine starts");
+
+    let mut metric = async_nats::HeaderMap::new();
+    metric.insert(RECORD_ID, "45");
+    metric.insert(RECORD_KIND, "metric");
+    fixture.client.publish_with_headers(
+        &fixture.in_subject("acme"),
+        metric,
+        r#"{"id": 45, "kind": "log", "body": "a metric, whatever the payload says"}"#,
+    );
+    let mut span = async_nats::HeaderMap::new();
+    span.insert(RECORD_KIND, "span");
+    fixture.client.publish_with_headers(
+        &fixture.in_subject("acme"),
+        span,
+        r#"{"body": "a span with no id"}"#,
+    );
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
+        46,
+        r#"{"id": 46, "kind": "metric", "body": "a log, whatever the payload says"}"#,
+    );
+
+    assert!(
+        wait_until(SETTLE_TIMEOUT, || fixture.consumer_settled()),
+        "every message is acknowledged"
+    );
+    let written = sinks.outgoing("out");
+    assert_eq!(written.len(), 1, "only the log is walked");
+    assert_eq!(written[0].meta.record_id, RecordId(46));
+    assert_eq!(
+        fixture.consumer_info().num_redelivered,
+        0,
+        "nothing is nak'd"
     );
 
     nats.shutdown();
