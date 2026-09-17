@@ -115,7 +115,7 @@ Replace the single sink with a `route` and two sinks.
 {{#include ../examples/end-to-end/5-route/expected.yaml}}
 ```
 
-Every label of the route has a consumer, and each message is acked once its record is stored. See [route](stages/route.md).
+Every label of the route has a consumer. The `DEBUG` message is acked when it is dropped, and the others once their record is stored. See [route](stages/route.md).
 
 This last config was also run against the compose stack. The error record arrived on `processed.errors`, the other on `processed.logs`, and the consumer had nothing left to deliver.
 
