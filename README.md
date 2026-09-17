@@ -20,7 +20,7 @@ Cargo workspace under `crates/`:
 | `otel` | OTLP metrics exporter: one instrument per spec metric behind core's `Recorder` boundary, HTTP/protobuf to the collector, configured by `OTEL_EXPORTER_OTLP_*` |
 | `lua` | the `lua` stage: Lua 5.4 through `mlua` (vendored), one sandboxed VM per worker per node, instruction budget, memory cap, output check, `state`/`log`/`now_ns` API |
 | `pipeline` | the `pipelined` binary and the default stage registry |
-| `harness` | the loghub harness: `loghub-producer` replays the vendored loghub sets into NATS, `loghub-verifier` judges what the pipeline delivered |
+| `harness` | the loghub harness: `loghub-producer` replays the vendored loghub sets into NATS, `loghub-verifier` follows the run and judges what the pipeline delivered |
 
 ```sh
 cargo test --workspace
@@ -448,57 +448,86 @@ cargo test -p fusion-pipeline --test extract_loghub
 
 ## Loghub harness
 
-The end-to-end check of the POC pipeline (`deploy/pipeline-poc.yaml`: route by log format,
-one extract node per format, fan-in to redact and edit, a Linux audit fan-out). It needs the
-compose stack, the `nats` CLI and cargo:
+The end-to-end check of the POC pipeline (`deploy/pipeline-poc.yaml`, every node type: filter,
+dedupe, route by log format, one extract node per format, fan-in to redact and edit, a
+consistent sample and a lua node before the main sink, a Linux audit fan-out). It needs the
+compose stack, the `nats` CLI, curl, jq and cargo:
 
 ```sh
-deploy/loghub-check.sh                                      # 100k records over ~60s
+make loghub                                                 # deploy/loghub-check.sh: 100k records over ~60s
+make chaos                                                  # the same with a kill and a pause
 PRODUCER_ARGS="--count 20000 --rate 1000" deploy/loghub-check.sh
 ```
 
 The script brings the stack up with `PIPELINE_CONFIG=pipeline-poc.yaml`, purges `LOGS`,
-`PROCESSED` and `DLQ`, and runs the two binaries from `crates/harness`:
+`PROCESSED` and `DLQ`, removes the last run's expectations, and runs the two binaries from
+`crates/harness` side by side:
 
 - `loghub-producer` (`--rate`, `--count`, `--datasets Linux,OpenSSH,Apache,Mac`,
   `--dup-percent`, `--seed`, `--dedupe-window`, `--expectations`) publishes each distinct
   loghub line raw in `body` on `logs.<tenant>.loghub` (one tenant per set) with
-  `Fusion-Record-Id`, about 30% of them sent twice within 500ms under a new id, and writes
-  one expectation per acked message to `target/loghub/expectations.jsonl`: which subjects,
-  `drop: dedupe` for a duplicate, the line's row of the structured CSV and what the config's
-  `edit` node writes. It fails the run when a publish needed a retry or its timing fell
-  behind the plan.
-- `loghub-verifier` waits for the `pipeline` consumer to settle, reads every
-  `processed.>` and `dlq.>` subject, prints the report and exports it to the collector (the
-  internal dashboard's *Loghub harness* row). A line's copies count together: it is missing
-  when none reached a subject it should have, and a second copy is an extra copy, allowed as
-  long as `dedupe` dropped at least 80% of the planned duplicates. `edit`'s writes are checked
-  on the main subject.
+  `Fusion-Record-Id`, its `LineId` and replay cycle in `attributes.loghub.line_id` and
+  `attributes.loghub.cycle`, about 30% of them sent twice within 500ms under a new id, and
+  writes one expectation per acked message to `target/loghub/expectations.jsonl`: which
+  subjects (no main subject for a line the `sample` node leaves out in that cycle), `drop:
+  dedupe` for a duplicate, the line's row of the structured CSV and what the config's `edit`
+  and `lua` nodes write. It fails the run when a publish needed a retry or its timing fell
+  behind the plan, and says how it ended in `expectations.jsonl.done`.
+- `loghub-verifier` follows the run: it reads the expectations as they are written and every
+  `processed.>` and `dlq.>` subject as the pipeline writes it, and every 5s judges what it has
+  and exports it to the collector (the internal dashboard's *Coverage* row, where published
+  and received converge). Once the producer is done, the `pipeline` consumer has settled and
+  both streams are read to their end, it prints the final report. A line's copies count
+  together: it is missing when none reached a subject it should have, and a second copy is an
+  extra copy, allowed as long as `dedupe` dropped at least 80% of the planned duplicates.
+  `edit`'s and `lua`'s writes are checked on the main subject; a main copy of a sampled-out
+  line is unexpected.
+
+`make chaos` (`deploy/loghub-check.sh --chaos`) kills the pipeline container at 20s after the
+producer starts and starts it at 25s, and pauses Dragonfly at 40s for 5s. Records in flight at
+the kill come back when their ack wait runs out; records `dedupe_body` handles during the pause
+pass un-deduped (`on_state_error: pass`), counted on `state_errors_total` and never as a
+`dedupe` drop or a nak. After the verdict the script checks that the chaos landed: the consumer
+redelivered messages, `dedupe_body` counted state errors, and nothing was nakked. The chaos run
+of 2026-09-17:
 
 ```
 published      100000
-received       87624
+received       80705
 missing        0
 unexpected     0
 dead_lettered  0
 edit_mismatch  0
-extra_copies   20
-dedupe         dropped 29902 of 29917 planned duplicates (at least 80%: held)
+lua_mismatch   0
+sampled_out    7091
+extra_copies   192
+repeated_on_every_subject 39
+dedupe         dropped 27542 of 27695 planned duplicates (at least 80%: held)
 extraction by set:
-  Apache   100.000% of 17521 groups, 0 mismatched
-  Linux    100.000% of 17521 groups, 0 mismatched
-  Mac      100.000% of 17520 groups, 0 mismatched
-  OpenSSH  100.000% of 17521 groups, 0 mismatched
+  Apache   100.000% of 15771 groups, 0 mismatched
+  Linux    100.000% of 15738 groups, 0 mismatched
+  Mac      100.000% of 15745 groups, 0 mismatched
+  OpenSSH  100.000% of 15738 groups, 0 mismatched
 verdict: PASS
+
+== did the chaos land?
+redelivered messages          5   (the kill at 20s: more than 0)
+dedupe_body state errors      8   (the pause at 40s: more than 0)
+naks                          0   (on_state_error: pass: 0)
+verdict: PASS under chaos
 ```
 
-That is the 100k run of 2026-09-17. The first run found nine Linux lines with more than one
-space before the component or after the colon (`kernel:   HighMem zone: ...`); the Linux
-pattern now starts `Component` and `Content` at the first non-space, as the CSV does.
+The run without chaos that day had 22 extra copies and 4 groups repeated on both Linux
+subjects (dedupe races), and dropped 27677 of the planned duplicates. The first 100k run of
+#13 found nine Linux lines with more than one space before the component or after the colon
+(`kernel:   HighMem zone: ...`); the Linux pattern now starts `Component` and `Content` at the
+first non-space, as the CSV does.
 
-It exits 0 on a pass (nothing missing, unexpected, dead-lettered or wrongly edited, and at
-least 80% of the planned duplicates dropped), 1 on a fail, 2 when the run could not be judged. Extraction accuracy is reported, never gated; the mismatching
-`LineId`s are listed. The stack keeps running the POC config afterwards;
+It exits 0 on a pass (nothing missing, unexpected, dead-lettered or wrongly written by `edit`
+or `lua`, and at least 80% of the planned duplicates dropped), 1 on a fail, 2 when the run
+could not be judged (the producer failed, the pipeline did not settle, or under `--chaos` the
+chaos did not land). Extraction accuracy is reported, never gated; the mismatching `LineId`s
+are listed. The stack keeps running the POC config afterwards;
 `docker compose -f deploy/compose.yaml up -d` puts `pipeline.yaml` back.
 
 ## Routing
