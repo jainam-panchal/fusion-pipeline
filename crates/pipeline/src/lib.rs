@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use fusion_core::config::{Config, ConfigError};
 use fusion_core::engine::{Engine, EngineError};
-use fusion_core::metrics::Metrics;
 use fusion_core::pipeline::Pipeline;
 use fusion_core::registry::Registry;
 use fusion_core::state::StateError;
@@ -94,8 +93,9 @@ fn stop_on_ctrl_c(nats: Arc<Nats>) -> Result<(), StartError> {
 /// Load `path`, connect the NATS source and sinks, and run the engine until the source is
 /// told to stop (Ctrl-C) and the workers have drained.
 ///
-/// Metrics go over OTLP to the collector `OTEL_EXPORTER_OTLP_ENDPOINT` names; with no
-/// endpoint in the environment nothing is exported. State lives in the Dragonfly
+/// Metrics, logs and record traces go over OTLP to the collector `OTEL_EXPORTER_OTLP_ENDPOINT`
+/// (or a signal's own endpoint) names; a signal with no endpoint is off, and events are then
+/// written to stderr. State lives in the Dragonfly
 /// `DRAGONFLY_URL` names (default `redis://127.0.0.1:6379`); it is contacted, one
 /// connection per worker with a ping, only when a node uses state.
 ///
@@ -115,10 +115,8 @@ pub fn run(path: &Path) -> Result<(), StartError> {
     let state = Dragonfly::from_env()?;
 
     let telemetry = fusion_otel::init()?;
-    let metrics = telemetry
-        .as_ref()
-        .map_or_else(Metrics::noop, fusion_otel::Telemetry::metrics);
-    let nats = Arc::new(Nats::new(metrics.clone())?);
+    let signals = telemetry.signals();
+    let nats = Arc::new(Nats::new(signals.clone())?);
     let mut registry = default_registry();
     nats.register(&mut registry);
 
@@ -130,14 +128,10 @@ pub fn run(path: &Path) -> Result<(), StartError> {
     let uses_state = pipeline.uses_state();
 
     stop_on_ctrl_c(Arc::clone(&nats))?;
-    let engine = Engine::start(pipeline, source, workers, metrics, Arc::new(state))?;
+    let engine = Engine::start(pipeline, source, workers, signals, Arc::new(state))?;
     eprintln!(
-        "pipelined: running with {workers} workers, metrics {}, state {}; Ctrl-C to stop",
-        if telemetry.is_some() {
-            "over OTLP"
-        } else {
-            "off"
-        },
+        "pipelined: running with {workers} workers, OTLP {}, state {}; Ctrl-C to stop",
+        telemetry.exported(),
         if uses_state {
             format!("at {state_url}")
         } else {
@@ -145,8 +139,6 @@ pub fn run(path: &Path) -> Result<(), StartError> {
         }
     );
     engine.join()?;
-    if let Some(telemetry) = telemetry {
-        telemetry.shutdown()?;
-    }
+    telemetry.shutdown()?;
     Ok(())
 }

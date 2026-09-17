@@ -69,11 +69,15 @@ impl NatsSink {
         }
     }
 
-    async fn publish_all(&self, batch: &[Outgoing<'_>]) -> Result<(), WriteError> {
+    /// Publish every record of `batch` and wait for every `PubAck`; the payload bytes
+    /// written.
+    async fn publish_all(&self, batch: &[Outgoing<'_>]) -> Result<u64, WriteError> {
         // Send every publish first, then wait for the acks, so a batch costs one round trip.
         let mut acks = Vec::with_capacity(batch.len());
+        let mut bytes = 0;
         for outgoing in batch {
             let payload = outgoing.record.to_json()?;
+            bytes += payload.len() as u64;
             let ack = self
                 .context
                 .publish_with_headers(
@@ -88,12 +92,12 @@ impl NatsSink {
         for ack in acks {
             ack.await.map_err(|e| self.publish_error(e))?;
         }
-        Ok(())
+        Ok(bytes)
     }
 }
 
 impl Sink for NatsSink {
-    fn write(&self, batch: &[Outgoing<'_>]) -> Result<(), SinkError> {
+    fn write(&self, batch: &[Outgoing<'_>]) -> Result<u64, SinkError> {
         self.runtime
             .block_on(self.publish_all(batch))
             .map_err(SinkError::new)

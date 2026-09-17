@@ -485,8 +485,8 @@ fn install_api(lua: &mlua::Lua, node: &str) -> mlua::Result<()> {
                 let record = current(lua)
                     .map(|c| c.meta.record_id.to_string())
                     .unwrap_or_default();
-                // Structured logging over OTLP lands with the logs ticket; stderr until then,
-                // as the engine does.
+                // A script's own lines are not pipeline events (spec amendment, issue #12):
+                // they stay on stderr, and shipping them to Loki is a follow-up.
                 eprintln!("pipeline: lua `{node}` record {record} {level}: {message}");
                 Ok(())
             })?,

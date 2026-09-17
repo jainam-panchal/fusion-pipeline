@@ -164,7 +164,7 @@ pub enum InvalidHeader {
     Unpaired(&'static str),
 }
 
-/// What JetStream handed the source for one message, apart from its payload.
+/// What JetStream handed the source for one message, apart from its payload's content.
 #[derive(Debug, Clone, Copy)]
 pub struct Received<'m> {
     /// The subject it was published on.
@@ -175,6 +175,8 @@ pub struct Received<'m> {
     pub published: Option<u64>,
     /// The JetStream delivery count.
     pub delivered: u64,
+    /// The payload's length in bytes.
+    pub bytes: u64,
 }
 
 /// The arrival of `received` by a source whose tenant subjects are
@@ -185,7 +187,8 @@ pub struct Received<'m> {
 ///   [`is_valid_tenant`]; the header is not read when the subject names a valid tenant;
 /// - ingestion time: `Fusion-Ingestion-Time` with its kind, else the publish time as
 ///   reported;
-/// - delivery count: the delivery count.
+/// - delivery count: the delivery count;
+/// - bytes: the payload's length.
 ///
 /// Each header is ignored and reported at most once: a time header given twice is not
 /// reported again as unpaired, and its partner is reported only if its own value does not
@@ -197,6 +200,7 @@ pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<Inv
         headers,
         published,
         delivered,
+        bytes,
     } = received;
     let mut invalid = Vec::new();
     let tenant = tenant_from_subject(subject, tenant_prefix)
@@ -212,6 +216,7 @@ pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<Inv
         tenant,
         ingestion_time: header_time.or(published.map(IngestionTime::Reported)),
         delivery_count: delivered,
+        bytes: Some(bytes),
     };
     (arrival, invalid)
 }

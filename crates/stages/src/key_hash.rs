@@ -5,6 +5,7 @@
 use std::fmt::Write as _;
 
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::hash::fnv1a64;
 use fusion_core::meta::Meta;
 use fusion_core::path::{FieldPath, FieldValue, Num};
 use fusion_core::record::Record;
@@ -61,14 +62,4 @@ pub(crate) fn write_canonical(out: &mut String, value: FieldValue<'_>) {
         FieldValue::Json(v) => out.push_str(&serde_json::to_string(v).unwrap_or_default()),
         _ => out.push_str("null"),
     }
-}
-
-/// FNV-1a, 64-bit: stable across builds and platforms, and cheap next to a store round trip.
-#[must_use]
-pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    bytes
-        .iter()
-        .fold(OFFSET, |hash, &b| (hash ^ u64::from(b)).wrapping_mul(PRIME))
 }

@@ -1,5 +1,7 @@
 //! OTLP telemetry wiring: the [`Recorder`] that turns the engine's measurements into
-//! OpenTelemetry instruments, and the exporter that ships them to the collector.
+//! OpenTelemetry instruments, the [`OtlpEventLog`] and [`OtlpTraceSink`] that turn its
+//! events and kept record traces into log records and spans, and the exporters that ship
+//! all three to the collector.
 //!
 //! Every metric becomes one instrument, created up front and named as the spec spells it: a
 //! counter for each [`CounterMetric`], an `f64` histogram in seconds with sub-second buckets
@@ -17,25 +19,42 @@
 //!
 //! Export is OTLP over HTTP/protobuf on a blocking client: the engine runs on plain threads,
 //! and the SDK's periodic reader drives the exporter from its own thread, so no async
-//! runtime is involved. Configuration is the standard OpenTelemetry environment:
-//! `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`) selects the
-//! collector and `OTEL_METRIC_EXPORT_INTERVAL` the cadence. With neither endpoint set,
-//! [`init`] reports that telemetry is off and the binary records nothing.
+//! runtime is involved; the log and span batch processors run their own threads the same
+//! way. Configuration is the standard OpenTelemetry environment:
+//! `OTEL_EXPORTER_OTLP_ENDPOINT` selects the collector for every signal, and
+//! `OTEL_EXPORTER_OTLP_{METRICS,LOGS,TRACES}_ENDPOINT` for one;
+//! `OTEL_METRIC_EXPORT_INTERVAL` sets the metrics cadence, `OTEL_BLRP_*` and `OTEL_BSP_*` the
+//! bounded log and span queues, and `OTEL_TRACES_SAMPLER_ARG` the share of passing records
+//! traced (default 0.01). A signal with no endpoint is off: no metrics are recorded, events go
+//! to stderr, and no trace is exported.
 
+mod events;
 pub mod process;
+mod traces;
 
+use fusion_core::events::StderrEventLog;
 use fusion_core::metrics::{CounterMetric, HistogramMetric, Labels, Metrics, Recorder};
+use fusion_core::signals::Signals;
+use fusion_core::trace::{DEFAULT_SAMPLE_RATIO, TraceSampling};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _};
-use opentelemetry_otlp::{MetricExporter, OTEL_EXPORTER_OTLP_ENDPOINT};
+use opentelemetry_otlp::{LogExporter, MetricExporter, OTEL_EXPORTER_OTLP_ENDPOINT, SpanExporter};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+
+pub use events::OtlpEventLog;
+pub use traces::OtlpTraceSink;
 
 /// The `service.name` resource attribute and the meter name.
 pub const SERVICE_NAME: &str = "fusion-pipeline";
 
-/// The metrics-specific endpoint variable, which takes precedence over the general one.
+/// The signal-specific endpoint variables, each taking precedence over the general one.
 const OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT";
+const OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT";
+const OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
+
+/// The share of passing records traced, as the standard sampler argument.
+pub const OTEL_TRACES_SAMPLER_ARG: &str = "OTEL_TRACES_SAMPLER_ARG";
 
 /// Histogram boundaries in seconds for stage runs and sink writes: 100µs to 10s.
 const SECONDS_BOUNDARIES: [f64; 16] = [
@@ -53,12 +72,27 @@ const END_TO_END_BOUNDARIES: [f64; 16] = [
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum OtelError {
-    /// The OTLP exporter could not be built from the environment.
-    #[error("could not build the OTLP metrics exporter: {0}")]
-    Exporter(#[source] opentelemetry_otlp::ExporterBuildError),
-    /// The meter provider could not flush or shut down.
-    #[error("could not shut down the meter provider: {0}")]
-    Shutdown(#[source] opentelemetry_sdk::error::OTelSdkError),
+    /// An OTLP exporter could not be built from the environment.
+    #[error("could not build the OTLP {signal} exporter: {source}")]
+    Exporter {
+        /// `metrics`, `logs` or `traces`.
+        signal: &'static str,
+        /// What the builder said.
+        #[source]
+        source: opentelemetry_otlp::ExporterBuildError,
+    },
+    /// `OTEL_TRACES_SAMPLER_ARG` is not a ratio.
+    #[error("`{OTEL_TRACES_SAMPLER_ARG}` is `{0}`; it needs a number from 0 to 1")]
+    SamplerArg(String),
+    /// A provider or processor could not flush or shut down.
+    #[error("could not shut down the {signal} exporter: {source}")]
+    Shutdown {
+        /// `metrics`, `logs` or `traces`.
+        signal: &'static str,
+        /// What the SDK said.
+        #[source]
+        source: opentelemetry_sdk::error::OTelSdkError,
+    },
 }
 
 /// A [`Recorder`] over OpenTelemetry instruments, one per metric, indexed by it.
@@ -108,32 +142,63 @@ impl Recorder for OtlpRecorder {
     }
 }
 
-/// A running exporter. Keep it alive for as long as the engine runs and call
-/// [`Telemetry::shutdown`] afterwards so the last interval is flushed.
+/// The running exporters. Keep it alive for as long as the engine runs and call
+/// [`Telemetry::shutdown`] afterwards so what is queued is flushed.
 #[derive(Debug)]
 pub struct Telemetry {
-    provider: SdkMeterProvider,
-    metrics: Metrics,
+    meters: Option<SdkMeterProvider>,
+    logs: Option<OtlpEventLog>,
+    traces: Option<OtlpTraceSink>,
+    signals: Signals,
 }
 
 impl Telemetry {
-    /// The engine's handle on this exporter.
+    /// The engine's and the source's handle on every signal.
     #[must_use]
-    pub fn metrics(&self) -> Metrics {
-        self.metrics.clone()
+    pub fn signals(&self) -> Signals {
+        self.signals.clone()
     }
 
-    /// Flush what has not been exported yet and stop the reader thread.
+    /// Which signals are exported, for the startup line: `metrics, logs, traces`, or `off`.
+    #[must_use]
+    pub fn exported(&self) -> String {
+        let on: Vec<&str> = [
+            self.meters.as_ref().map(|_| "metrics"),
+            self.logs.as_ref().map(|_| "logs"),
+            self.traces.as_ref().map(|_| "traces"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if on.is_empty() {
+            "off".to_owned()
+        } else {
+            on.join(", ")
+        }
+    }
+
+    /// Flush what has not been exported yet and stop every exporter thread.
     ///
     /// # Errors
     ///
-    /// [`OtelError::Shutdown`] when the final export fails.
+    /// [`OtelError::Shutdown`] for the first exporter whose final export fails; the others
+    /// are still shut down.
     pub fn shutdown(self) -> Result<(), OtelError> {
-        self.provider.shutdown().map_err(OtelError::Shutdown)
+        let meters = self
+            .meters
+            .map(|p| p.shutdown().map_err(|e| ("metrics", e)));
+        let logs = self.logs.map(|l| l.shutdown().map_err(|e| ("logs", e)));
+        let traces = self.traces.map(|t| t.shutdown().map_err(|e| ("traces", e)));
+        [meters, logs, traces]
+            .into_iter()
+            .flatten()
+            .collect::<Result<Vec<()>, _>>()
+            .map(drop)
+            .map_err(|(signal, source)| OtelError::Shutdown { signal, source })
     }
 }
 
-/// The resource every metric is exported under: the service name and an instance id.
+/// The resource every metric, log record and span is exported under: the service name and an instance id.
 ///
 /// The instance id is the hostname, or the process id when the hostname is unreadable.
 #[must_use]
@@ -150,38 +215,104 @@ pub fn resource() -> Resource {
         .build()
 }
 
-/// Whether the environment names a collector to export to.
-#[must_use]
-pub fn configured() -> bool {
-    [
-        OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
-        OTEL_EXPORTER_OTLP_ENDPOINT,
-    ]
-    .iter()
-    .any(|var| std::env::var(var).is_ok_and(|v| !v.trim().is_empty()))
+/// `value` as an OTLP integer, capped at `i64::MAX`.
+fn saturating_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-/// Start exporting to the collector the environment names, or return `None` when it names
-/// none.
+/// Whether the environment names a collector for the signal whose own endpoint variable is
+/// `specific`.
+fn configured(specific: &str) -> bool {
+    [specific, OTEL_EXPORTER_OTLP_ENDPOINT]
+        .iter()
+        .any(|var| std::env::var(var).is_ok_and(|v| !v.trim().is_empty()))
+}
+
+/// The exporter of `signal`, built by `build` when the environment names a collector for it
+/// (its own endpoint variable is `specific`), else `None`.
+fn exporter<T>(
+    signal: &'static str,
+    specific: &str,
+    build: impl FnOnce() -> Result<T, opentelemetry_otlp::ExporterBuildError>,
+) -> Result<Option<T>, OtelError> {
+    if !configured(specific) {
+        return Ok(None);
+    }
+    build()
+        .map(Some)
+        .map_err(|source| OtelError::Exporter { signal, source })
+}
+
+/// The share of passing records to trace, from the value of `OTEL_TRACES_SAMPLER_ARG`:
+/// the default when unset or blank.
 ///
 /// # Errors
 ///
-/// [`OtelError::Exporter`] when the endpoint or another `OTEL_EXPORTER_OTLP_*` variable is
-/// unusable.
-pub fn init() -> Result<Option<Telemetry>, OtelError> {
-    if !configured() {
-        return Ok(None);
+/// [`OtelError::SamplerArg`] when the value is not a number from 0 to 1.
+pub fn sampling(arg: Option<&str>) -> Result<TraceSampling, OtelError> {
+    match arg.map(str::trim).filter(|arg| !arg.is_empty()) {
+        None => Ok(TraceSampling::ratio(DEFAULT_SAMPLE_RATIO)),
+        Some(arg) => arg
+            .parse::<f64>()
+            .ok()
+            .filter(|ratio| (0.0..=1.0).contains(ratio))
+            .map(TraceSampling::ratio)
+            .ok_or_else(|| OtelError::SamplerArg(arg.to_owned())),
     }
-    let exporter = MetricExporter::builder()
-        .with_http()
-        .build()
-        .map_err(OtelError::Exporter)?;
-    let provider = SdkMeterProvider::builder()
-        .with_resource(resource())
-        .with_periodic_exporter(exporter)
-        .build();
-    let meter = provider.meter(SERVICE_NAME);
-    process::observe(&meter);
-    let metrics = Metrics::new(OtlpRecorder::new(&meter));
-    Ok(Some(Telemetry { provider, metrics }))
+}
+
+/// Start an exporter for every signal the environment names a collector for. A signal with
+/// none is off: metrics are not recorded, events are written to stderr, no trace is
+/// exported.
+///
+/// # Errors
+///
+/// [`OtelError::Exporter`] when an endpoint or another `OTEL_EXPORTER_OTLP_*` variable is
+/// unusable, [`OtelError::SamplerArg`] when traces are exported and the sampler argument is
+/// unusable.
+pub fn init() -> Result<Telemetry, OtelError> {
+    let resource = resource();
+    let meters = exporter("metrics", OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, || {
+        MetricExporter::builder().with_http().build()
+    })?
+    .map(|exporter| {
+        SdkMeterProvider::builder()
+            .with_resource(resource.clone())
+            .with_periodic_exporter(exporter)
+            .build()
+    });
+    let logs = exporter("logs", OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, || {
+        LogExporter::builder().with_http().build()
+    })?
+    .map(|exporter| OtlpEventLog::with_exporter(exporter, resource.clone()));
+    let traces = match exporter("traces", OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, || {
+        SpanExporter::builder().with_http().build()
+    })? {
+        Some(exporter) => Some((
+            OtlpTraceSink::with_exporter(exporter, resource),
+            sampling(std::env::var(OTEL_TRACES_SAMPLER_ARG).ok().as_deref())?,
+        )),
+        None => None,
+    };
+
+    let metrics = meters.as_ref().map_or_else(Metrics::noop, |provider| {
+        let meter = provider.meter(SERVICE_NAME);
+        process::observe(&meter);
+        Metrics::new(OtlpRecorder::new(&meter))
+    });
+    let mut signals = Signals::new(metrics);
+    signals = match &logs {
+        Some(log) => signals.with_events(log.clone()),
+        None => signals.with_events(StderrEventLog),
+    };
+    if let Some((sink, sampling)) = &traces {
+        signals = signals.with_traces(sink.clone(), *sampling);
+    }
+    let traces = traces.map(|(sink, _)| sink);
+    Ok(Telemetry {
+        meters,
+        logs,
+        traces,
+        signals,
+    })
 }

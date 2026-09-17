@@ -13,7 +13,14 @@ opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
 thiserror.workspace = true
 
+[features]
+# `with_queue` on the OTLP event log and trace sink, for tests that need a queue of a known
+# size; a deployment sizes the queues through the environment.
+test-util = []
+
 [dev-dependencies]
+# The crate's own integration tests use `test-util`.
+fusion-otel = { path = ".", features = ["test-util"] }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
 [lints]

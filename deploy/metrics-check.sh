@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end check of the metrics path against the compose stack (issue #11).
+# End-to-end check of the telemetry paths against the compose stack (issues #11 and #12).
 #
 # Brings up deploy/compose.yaml (pipeline included), drives traffic through it, and checks:
 #   1. every scrape target is up: the collector (pipeline metrics), NATS via
@@ -14,17 +14,23 @@
 #   5. the NATS exporter reports JetStream consumer pending, redelivered and ack floor;
 #   6. every pipeline series carries the instance id, and the pipeline, NATS and Dragonfly
 #      each report their own CPU and resident memory;
-#   7. Grafana serves the provisioned internal dashboard.
+#   7. Grafana serves the provisioned internal and tenant dashboards, and every tenant
+#      dashboard query runs in Prometheus;
+#   8. Loki has the `nak` line of the record without an id, and the `stage_error` line of the
+#      record whose sink failed, whose trace id finds its trace in Tempo.
 # The record without an id fails every delivery and is dead-lettered after the fifth, about
 # 15 s after it is published, which is what dlq_total and dlq_publish_duration_seconds
 # show; no dead-letter publish fails, so dlq_publish_errors_total is reported as pending.
 # Exits non-zero on the first failure. Needs docker compose, the `nats` CLI, curl and jq.
+# Host ports follow the compose overrides: GRAFANA_PORT, LOKI_PORT, TEMPO_PORT.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 COMPOSE=(docker compose -f deploy/compose.yaml)
 PROM=${PROM_URL:-http://127.0.0.1:9090}
 GRAFANA=${GRAFANA_URL:-http://127.0.0.1:${GRAFANA_PORT:-3000}}
+LOKI=${LOKI_URL:-http://127.0.0.1:${LOKI_PORT:-3100}}
+TEMPO=${TEMPO_URL:-http://127.0.0.1:${TEMPO_PORT:-3200}}
 RECORDS=${RECORDS:-1000}
 unset NATS_URL
 
@@ -52,11 +58,30 @@ prom_has() { [[ "$(prom_query "$1" | jq 'length')" -gt 0 ]]; }
 # prom_value <expr>: the first sample's value, or empty.
 prom_value() { prom_query "$1" | jq -r '.[0].value[1] // empty'; }
 
+# loki_lines <logql>: the matching streams of the last hour as JSON. Loki returns each line's
+# structured metadata (record_id, trace_id, ...) among its stream's labels.
+loki_lines() {
+    curl -sf --get "$LOKI/loki/api/v1/query_range" --data-urlencode "query=$1" \
+        --data-urlencode "since=1h" --data-urlencode "limit=20" | jq -c '.data.result'
+}
+
+# loki_has <logql>: whether the query matches at least one line.
+loki_has() { [[ "$(loki_lines "$1" | jq 'length')" -gt 0 ]]; }
+
+# tempo_spans <trace id>: the names of the trace's spans, one per line.
+tempo_spans() {
+    curl -sf "$TEMPO/api/traces/$1" | jq -r '.batches[].scopeSpans[].spans[].name'
+}
+
 # target_up <job>: whether Prometheus scraped the job successfully on its last attempt.
 target_up() { [[ "$(prom_value "up{job=\"$1\"}")" == 1 ]]; }
 
 step "compose up (full stack, pipeline built)"
 "${COMPOSE[@]}" up -d --build --wait --wait-timeout 300 2>&1 | tail -3
+# The collector, Loki and Tempo read their config and Grafana its provisioning only at start,
+# and `up` leaves a running container alone when only a mounted file changed.
+RESTARTED_NS=$(date +%s%N)
+"${COMPOSE[@]}" restart otel-collector loki tempo grafana >/dev/null 2>&1
 wait_for 30 "the LOGS/pipeline consumer" nats consumer info LOGS pipeline
 
 step "1. scrape targets up"
@@ -124,6 +149,8 @@ SPEC_METRICS=(
     'pipeline_end_to_end_seconds_bucket{tenant="acme"}'
     'dlq_total{tenant="acme",stage="source",reason="missing_id"}'
     'dlq_publish_duration_seconds_bucket{tenant="acme"}'
+    'bytes_in_total{tenant="acme"}'
+    'bytes_out_total{tenant="acme",stage="out"}'
 )
 # Named in the spec, with a producer, but a healthy run gives them nothing to count:
 # `state_errors_total` needs a store failure and `dlq_publish_errors_total` a dead-letter
@@ -176,11 +203,48 @@ for expr in 'process_cpu_time_seconds_total{job="fusion-pipeline"}' 'process_mem
     echo "present: $expr"
 done
 
-step "7. Grafana provisioned the internal dashboard"
+step "7. Grafana provisioned both dashboards; every tenant query runs"
 wait_for 60 "grafana" curl -sf "$GRAFANA/api/health"
-title=$(curl -sf "$GRAFANA/api/dashboards/uid/fusion-internal" | jq -r '.dashboard.title')
-[[ "$title" == "fusion-pipeline internal" ]] || fail "dashboard fusion-internal not provisioned (got \`$title\`)"
-echo "dashboard: $title ($GRAFANA/d/fusion-internal)"
+for pair in "fusion-internal|fusion-pipeline internal" "fusion-tenant|fusion-pipeline tenant"; do
+    uid=${pair%%|*} want=${pair#*|}
+    title=$(curl -sf "$GRAFANA/api/dashboards/uid/$uid" | jq -r '.dashboard.title')
+    [[ "$title" == "$want" ]] || fail "dashboard $uid not provisioned (got \`$title\`)"
+    echo "dashboard: $title ($GRAFANA/d/$uid)"
+done
+for uid in loki tempo; do
+    [[ "$(curl -sf "$GRAFANA/api/datasources/uid/$uid" | jq -r '.uid')" == "$uid" ]] \
+        || fail "datasource $uid not provisioned"
+    echo "datasource: $uid"
+done
+jq -r '.panels[].targets[]?.expr' deploy/grafana/dashboards/tenant.json | while read -r expr; do
+    query=${expr//\$tenant/acme}
+    query=${query//\$__rate_interval/1m}
+    query=${query//\$__range/1h}
+    status=$(curl -s --get "$PROM/api/v1/query" --data-urlencode "query=$query" | jq -r '.status')
+    [[ "$status" == success ]] || fail "tenant dashboard query does not run: $query"
+done
+echo "tenant dashboard: every query runs"
+echo "where did my logs go (acme): $(prom_query 'sum by (stage, reason) (increase(records_dropped_total{tenant="acme"}[1h])) > 0' | jq -c '[.[] | {stage: .metric.stage, reason: .metric.reason, records: (.value[1] | tonumber | round)}]')"
+
+step "8. logs in Loki, traces in Tempo, linked by trace id"
+wait_for 60 "loki" curl -sf "$LOKI/ready"
+wait_for 60 "tempo" curl -sf "$TEMPO/ready"
+NAK='{service_name="fusion-pipeline"} | event="nak" | reason="missing_id" | node="source"'
+wait_for 60 "the nak line of the record without an id" loki_has "$NAK"
+echo "present: $NAK"
+ERROR='{service_name="fusion-pipeline"} | event="stage_error" | record_id="1000001" | node="out" | reason="sink_error" | tenant="acme"'
+wait_for 60 "the stage_error line of the record whose sink failed" loki_has "$ERROR"
+echo "present: $ERROR"
+trace_id=$(loki_lines "$ERROR" | jq -r '[.[].stream.trace_id // empty][0] // empty')
+[[ -n "$trace_id" ]] || fail "the stage_error line carries no trace_id"
+wait_for 60 "trace $trace_id in Tempo" curl -sf "$TEMPO/api/traces/$trace_id"
+wait_for 30 "the failed sink's span in trace $trace_id" bash -c "$(declare -f tempo_spans); TEMPO='$TEMPO' tempo_spans $trace_id | grep -qx out"
+spans=$(tempo_spans "$trace_id" | sort | uniq -c | tr -s ' ' | paste -sd, -)
+[[ "$spans" == *delivery* ]] || fail "trace $trace_id has no delivery span: $spans"
+echo "trace $trace_id: $spans"
+labels=$(curl -sf --get "$LOKI/loki/api/v1/labels" --data-urlencode "start=$RESTARTED_NS" | jq -c '.data')
+[[ "$labels" == '["service_name"]' ]] || fail "Loki index labels are $labels, not only service_name"
+echo "Loki index labels: $labels"
 
 echo
-echo "OK: all metrics checks passed"
+echo "OK: all telemetry checks passed"

@@ -27,8 +27,8 @@ use async_nats::jetstream::context::{
 use async_nats::jetstream::{self, ErrorCode};
 use fusion_core::config::{NodeConfig, SourceConfig};
 use fusion_core::io::{Sink, Source};
-use fusion_core::metrics::Metrics;
 use fusion_core::registry::Registry;
+use fusion_core::signals::Signals;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
@@ -181,17 +181,18 @@ pub struct Nats {
     runtime: Arc<Runtime>,
     connections: Mutex<BTreeMap<String, jetstream::Context>>,
     shutdown: watch::Sender<bool>,
-    metrics: Metrics,
+    signals: Signals,
 }
 
 impl Nats {
-    /// Start the I/O runtime. Sources built from it count their redeliveries and their own
-    /// naks through `metrics`.
+    /// Start the I/O runtime. Sources built from it count what they settle themselves, and
+    /// log their dead letters, through `signals`; a `Metrics` converts into signals that only
+    /// measure.
     ///
     /// # Errors
     ///
     /// [`NatsError::Runtime`] when the runtime threads cannot be spawned.
-    pub fn new(metrics: Metrics) -> Result<Self, NatsError> {
+    pub fn new(signals: impl Into<Signals>) -> Result<Self, NatsError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("nats-io")
@@ -203,7 +204,7 @@ impl Nats {
             runtime: Arc::new(runtime),
             connections: Mutex::new(BTreeMap::new()),
             shutdown,
-            metrics,
+            signals: signals.into(),
         })
     }
 
@@ -294,13 +295,13 @@ impl Nats {
             context,
             params.dlq_prefix.clone(),
             limit,
-            self.metrics.clone(),
+            self.signals.clone(),
         );
         Ok(NatsSource::new(
             Arc::clone(&self.runtime),
             consumer,
             self.shutdown.subscribe(),
-            self.metrics.clone(),
+            self.signals.clone(),
             params.tenant_prefix.clone(),
             dead_letters,
         ))

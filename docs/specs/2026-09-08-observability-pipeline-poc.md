@@ -292,6 +292,54 @@ Amended 2026-09-14 (issue #5): one more metric, `regex_nonmatch_total{tenant, st
 
 Traces are head-sampled at 1% by record id, with force-sampling on any error or nak.
 
+Amended 2026-09-16 (issue #12, ADR 0006): logs, traces and bytes.
+
+**Logs.** Logs are events from a closed set, each with fixed fields, sent through core's `EventLog` seam and exported as OTLP log records. The fields are:
+
+- `record.id`: absent when the record has none;
+- `tenant` and `node`: from `Meta` and the failure;
+- `reason`: the failure kind; absent on `redelivery`;
+- `delivery_count`;
+- `stream_sequence`: dead letters only;
+- the error text as the body, never a label;
+- the record's trace context when it has one.
+
+The events are:
+
+- `stage_error` (severity error): one per node that failed, whatever the failure kind, `panic` included.
+- `nak` (warn): one per nakked record, after all branches, carrying the walk's first failure. A record without an id gets one at `node=source`, `reason=missing_id`.
+- `redelivery` (info): one per record whose delivery count is above one.
+- `dead_letter` (warn): the NATS source, on the dead letter's `PubAck`.
+- `dead_letter_failed` (error): the NATS source, when every dead-letter publish failed.
+
+Drops are not logged. A non-final nak of an undecodable payload is not an event either: it stays on stderr and its counters. A `lua` script's `log.*` lines are not events either; they stay on stderr, and shipping them is a follow-up. A redelivered payload that does not decode has no record id and no `Meta`, so it is not a `redelivery` event; the source counts it. With no log endpoint configured, events are written to stderr, one line each, from the worker; that fallback is for development and is outside the rule below that telemetry never holds up a worker. With no trace endpoint configured, the engine takes no span drafts, builds no trace, and gives no event a trace context. A `nak` line does not mean the message is dead: the NATS source decides that, and says so with its own line. The stream sequence of a message whose every dead-letter publish failed, which the issue #10 amendment sends to stderr, is now carried by the `dead_letter_failed` event instead, and reaches stderr only through the fallback above.
+
+**Traces.** Head sampling is replaced by a decision taken when the record settles. The trace of a delivery is kept when any branch failed, when the delivery count is above one, or when the record's trace key falls in the share `OTEL_TRACES_SAMPLER_ARG` gives (default `0.01`; there is still no telemetry block in the YAML; a value that is not a number from 0 to 1 stops the binary at startup when traces are exported). The share is chosen by trace key, not by a coin, so "1% of records" is the same 1% on every replica and every delivery. The trace key is `mix(record id ^ fnv1a(tenant) ^ salt)`, and the trace id is `key << 64 | record id`. So every delivery of one record lands in one trace, and a log line and its trace share the trace id. A kept trace has:
+
+- one root span `delivery` per delivery, with attributes `record.id`, `tenant`, `delivery_count` and `settlement` (`ack` or `nak`);
+- one span per node visited, named after the node id, whose parent is the span of the node the record came from. It carries `node`, `outcome` (`pass`, `routed`, `split`, `drop`, `state_error_pass`, `written` or `error`), `record.id` and `tenant` (which the Grafana link to Loki reads), and `reason` (a drop reason), `failure` (a failure kind), `label` or `records` when they apply. A failed node's span has error status and the error text, and so does a nakked delivery's span, with `nak`.
+
+Span times are the engine's own measurements, anchored on one clock reading per delivery. A record without an id has no trace.
+
+**Backpressure.** Logs and spans are exported through batch processors with bounded queues that drop when full and never block a worker. During an outage, every delivery writes a `stage_error`, a `nak` and a trace, and what does not fit in the queue is lost.
+
+**Bytes.** Two more metrics, for the tenant dashboard's bytes panel:
+
+- `bytes_in_total{tenant}`: payload bytes as the transport delivered them. It is counted at intake for every delivery, whether the record is rejected, redelivered or cannot be decoded (the NATS source counts that last case). A source reports the size on the arrival.
+- `bytes_out_total{tenant, stage}`: bytes a sink wrote with durable acceptance. A sink's write returns the count. Across a fan-out every sink counts its own copy.
+
+**Deploy.** The collector sends logs to Loki's native OTLP endpoint and traces to Tempo. Loki keeps `service_name` as its only index label (its OTLP config replaces the default list, which would also index `service.instance.id`); `record.id` is stored as the structured metadata `record_id`, beside `tenant`, `trace_id` and the others. Grafana's Loki datasource opens Tempo from `trace_id`, and its Tempo datasource opens Loki filtered on `record_id` and `tenant`.
+
+**Tenant dashboard.** It is provisioned with a `tenant` variable and has these panels:
+
+- in (`records_in_total{stage="source"}`) and out (`records_out_total` of the stages that have `bytes_out_total`, which are the sinks);
+- drops by stage and reason from `records_dropped_total` alone;
+- bytes in and out;
+- e2e p99;
+- dead letters by reason.
+
+It has no stage-duration, state-store, NATS, Lua, regex, sink-publish or process panel. `deploy/metrics-check.sh` also checks that the record without an id has a `nak` line in Loki, and that a record with an id that hits a stage error has a `stage_error` line whose trace id finds its trace in Tempo.
+
 NATS is scraped through `prometheus-nats-exporter`; Dragonfly is scraped at `:6379/metrics`.
 
 Two dashboards are provisioned. The tenant dashboard shows in/out, dropped by stage and reason, bytes, and e2e p99. The internal dashboard shows everything, plus state store, Lua, regex, NATS and sink panels and the chaos-test coverage panel.
@@ -337,6 +385,15 @@ The regex wrapper boundary gets unit tests on the safe API only: named capture e
 The compose end-to-end boundary is the chaos test above, run as a script that returns non-zero on `missing > 0` or `unexpected > 0`. It is the only test that touches real NATS or Dragonfly.
 
 Amended 2026-09-16 (issue #45, ADR 0005): the NATS transport parsers are tested below the trait boundary too, on their public functions: which subject names a tenant under `tenant_prefix`, and which `Fusion-*` pipeline header is accepted, refused or repeated. The in-memory source takes an `Arrival` as given, so neither is observable through it; the round trip of the headers through a real server is an ignored JetStream test. Harness tests that need a tenant or an ingestion time give it through the arrival, as a source does, never inside the record.
+
+Amended 2026-09-16 (issue #12, ADR 0006): the events and record traces are two more seams, `EventLog` and `TraceSink`, with in-memory fakes. What the engine logs and traces is asserted through the harness, with tracing on and with tracing off. Below the boundary are:
+
+- the closed sets of event kinds, severities, span outcomes and settlements;
+- the OTLP event log and trace sink, on the SDK's in-memory exporters, and on one test exporter that blocks until released, which shows their bounded queues drop rather than wait;
+- the `OTEL_TRACES_SAMPLER_ARG` parser, whose refusal is a startup error;
+- `TraceKey`'s id derivation for record id 0, whose trace and span ids the salt keeps non-zero. The `0 → 1` guard behind the salt is unreachable from any input and is not tested.
+
+The NATS source's dead-letter events are asserted in the ignored JetStream tests. An ignored harness test measures throughput (performance is observed, not asserted), and the deploy configs (Loki, Tempo, collector, datasources, tenant dashboard) are checked by a test that reads them, the dashboard's queries through a small PromQL scanner of its own with unit tests, with `deploy/metrics-check.sh` as the live round trip.
 
 There is no prior art in this repository; it is empty apart from the feature catalogue.
 

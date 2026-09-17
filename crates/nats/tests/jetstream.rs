@@ -12,14 +12,17 @@ use async_nats::jetstream::consumer::{AckPolicy, pull};
 use async_nats::jetstream::{self, stream};
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::engine::Engine;
-use fusion_core::io::Outgoing;
+use fusion_core::events::{EventKind, InMemoryEventLog};
+use fusion_core::io::{FailureKind, Outgoing};
 use fusion_core::memory::{MemorySinks, MemoryStateStore};
 use fusion_core::meta::{IngestionTime, Meta, unix_nanos_now};
 use fusion_core::metrics::{CounterMetric, HistogramMetric, InMemoryRecorder, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::{Record, RecordId};
 use fusion_core::registry::Registry;
+use fusion_core::signals::Signals;
 use fusion_core::stage::{Context, Stage, StageError, StageOutput};
+use fusion_core::trace::{InMemoryTraceSink, TraceKey, TraceSampling};
 use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
 use fusion_nats::headers::{INGESTION_TIME, INGESTION_TIME_KIND, TENANT};
 use fusion_nats::{Nats, NatsError};
@@ -379,7 +382,7 @@ impl Fixture {
         nats: &std::sync::Arc<Nats>,
         yaml: &str,
         sinks: &MemorySinks,
-        metrics: Metrics,
+        signals: impl Into<Signals>,
     ) -> Engine {
         let mut registry = Registry::new();
         nats.register(&mut registry);
@@ -387,7 +390,7 @@ impl Fixture {
         registry.register_stage("fails_first", fails_first);
         let pipeline = Pipeline::from_yaml(yaml, &registry).expect("pipeline loads");
         let source = nats.source(&self.source_params()).expect("source builds");
-        Engine::start(pipeline, Box::new(source), 1, metrics, no_state()).expect("engine starts")
+        Engine::start(pipeline, Box::new(source), 1, signals, no_state()).expect("engine starts")
     }
 
     fn consumer_info(&self) -> jetstream::consumer::Info {
@@ -1125,13 +1128,17 @@ fn source_fails_fast_when_the_consumer_sets_backoff() {
 fn a_message_that_fails_every_delivery_is_dead_lettered_and_terminated() {
     let fixture = Fixture::with_max_deliver("dlq", 3);
     let recorder = InMemoryRecorder::new();
-    let metrics = Metrics::new(recorder.clone());
-    let nats = std::sync::Arc::new(Nats::new(metrics.clone()).expect("nats runtime"));
+    let events = InMemoryEventLog::new();
+    let traces = InMemoryTraceSink::new();
+    let signals = Signals::new(Metrics::new(recorder.clone()))
+        .with_events(events.clone())
+        .with_traces(traces.clone(), TraceSampling::default());
+    let nats = std::sync::Arc::new(Nats::new(signals.clone()).expect("nats runtime"));
     let sinks = MemorySinks::new();
     sinks.fail_writes_to("out");
     let mut terminated = fixture.advisories("MSG_TERMINATED");
     let mut exhausted = fixture.advisories("MAX_DELIVERIES");
-    let engine = fixture.start(&nats, TO_MEMORY, &sinks, metrics);
+    let engine = fixture.start(&nats, TO_MEMORY, &sinks, signals);
     let payload = br#"{"id": 50, "body": "never lands",   "extra": [1, 2]}"#;
     let mut produced = async_nats::HeaderMap::new();
     produced.insert("traceparent", "00-abc-def-01");
@@ -1192,6 +1199,31 @@ fn a_message_that_fails_every_delivery_is_dead_lettered_and_terminated() {
             .len(),
         1
     );
+    let letters = events.of_kind(EventKind::DeadLetter);
+    assert_eq!(letters.len(), 1, "{letters:?}");
+    let letter = &letters[0];
+    assert_eq!(letter.record_id, Some(RecordId(50)));
+    assert_eq!(&*letter.tenant, "acme");
+    assert_eq!(letter.node, "out");
+    assert_eq!(letter.failure, Some(FailureKind::SinkError));
+    assert_eq!(letter.delivery_count, 3);
+    assert!(letter.stream_sequence.is_some());
+    assert!(letter.message.contains("set to fail"), "{}", letter.message);
+    let context = TraceKey::new(RecordId(50), "acme").delivery_context(3);
+    assert_eq!(letter.trace, Some(context));
+    assert!(
+        traces
+            .traces()
+            .iter()
+            .any(|t| t.trace_id == context.trace_id && t.span_id == context.span_id),
+        "the dead letter names the final delivery's kept trace"
+    );
+    assert_eq!(
+        events.of_kind(EventKind::Nak).len(),
+        3,
+        "the engine logs every nak"
+    );
+    assert_eq!(events.of_kind(EventKind::Redelivery).len(), 2);
     // Past the longest nak delay the message could still be waiting out: no fourth try.
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(
@@ -1292,8 +1324,11 @@ fn a_failed_delivery_that_is_not_the_last_publishes_nothing_and_a_retry_succeeds
 fn a_failed_dlq_publish_naks_without_delay_and_is_not_terminated() {
     let fixture = Fixture::build("dlq_refused", 3, |dlq| dlq.max_message_size = 16);
     let recorder = InMemoryRecorder::new();
+    let events = InMemoryEventLog::new();
     let metrics = Metrics::new(recorder.clone());
-    let nats = std::sync::Arc::new(Nats::new(metrics.clone()).expect("nats runtime"));
+    let nats = std::sync::Arc::new(
+        Nats::new(Signals::new(metrics.clone()).with_events(events.clone())).expect("nats runtime"),
+    );
     let sinks = MemorySinks::new();
     sinks.fail_writes_to("out");
     let mut terminated = fixture.advisories("MSG_TERMINATED");
@@ -1349,6 +1384,12 @@ fn a_failed_dlq_publish_naks_without_delay_and_is_not_terminated() {
     assert_eq!(timed.len(), 1, "one sample covers every try");
     // Four tries, with 250 ms, 500 ms and 1 s between them.
     assert!(timed[0] >= 1.75, "{timed:?}");
+    let failed = events.of_kind(EventKind::DeadLetterFailed);
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].record_id, Some(RecordId(52)));
+    assert_eq!(failed[0].node, "out");
+    assert!(failed[0].stream_sequence.is_some());
+    assert!(events.of_kind(EventKind::DeadLetter).is_empty());
 
     nats.shutdown();
     engine.join().expect("clean shutdown");

@@ -292,6 +292,15 @@ impl Dag {
             .map(|e| e.target)
     }
 
+    /// The label `label` of node `index` as the graph holds it, when a consumer reads it.
+    #[must_use]
+    pub(crate) fn label(&self, index: NodeIndex, label: &str) -> Option<&str> {
+        self.edges[index.0]
+            .iter()
+            .filter_map(|e| e.label.as_deref())
+            .find(|declared| *declared == label)
+    }
+
     /// Indices of the nodes that read from `source`.
     #[must_use]
     pub fn source_successors(&self) -> &[NodeIndex] {

@@ -43,6 +43,9 @@ pub struct Arrival {
     pub ingestion_time: Option<IngestionTime>,
     /// How many times the transport has delivered this message, this one included.
     pub delivery_count: u64,
+    /// The payload's size as the transport delivered it, for `bytes_in_total`; `None` when
+    /// the source does not know it.
+    pub bytes: Option<u64>,
 }
 
 impl Default for Arrival {
@@ -51,6 +54,7 @@ impl Default for Arrival {
             tenant: None,
             ingestion_time: None,
             delivery_count: 1,
+            bytes: None,
         }
     }
 }

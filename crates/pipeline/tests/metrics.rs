@@ -347,19 +347,6 @@ fn source_counts_every_record_in_and_only_those_entering_the_graph_out() {
     });
 }
 
-/// A test-only stage that panics, so the engine's containment path is observable.
-struct Panics;
-
-impl fusion_core::stage::Stage for Panics {
-    fn process(
-        &self,
-        _record: Record,
-        _ctx: &fusion_core::stage::Context<'_>,
-    ) -> fusion_core::stage::StageOutput {
-        panic!("stage blew up");
-    }
-}
-
 #[test]
 fn a_stage_that_panics_counts_an_error_at_its_own_node_and_naks() {
     const PANICS: &str = r#"
@@ -369,16 +356,7 @@ nodes:
   - id: out
     type: sink.memory
 "#;
-    let sinks = fusion_core::memory::MemorySinks::new();
-    let mut registry = common::registry(&sinks);
-    registry.register_stage(
-        "panics",
-        |_: &fusion_core::config::NodeConfig| -> Result<
-            Box<dyn fusion_core::stage::Stage>,
-            fusion_core::config::ConfigError,
-        > { Ok(Box::new(Panics)) },
-    );
-    let h = common::start_with(PANICS, 1, sinks, registry);
+    let h = common::start_with_panics(PANICS);
 
     assert_eq!(
         h.push(record(1, "ERROR")).wait(WAIT),
