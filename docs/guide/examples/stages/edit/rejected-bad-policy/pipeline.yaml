@@ -1,0 +1,14 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: normalise
+    type: edit
+    on_unapplied: nak
+    ops:
+      - delete: {fields: [attributes.debug]}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

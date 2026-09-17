@@ -1,0 +1,10 @@
+nodes:
+  - id: pseudonymise
+    type: edit
+    ops:
+      - rename: {from: attributes.user.email, to: attributes.user.key}
+      - hash: {field: attributes.user.key}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

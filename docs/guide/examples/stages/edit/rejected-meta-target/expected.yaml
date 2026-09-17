@@ -1,0 +1,1 @@
+rejected: 'node `normalise`: op 0 (`set`): `field`: `meta.tenant` is the pipeline''s and cannot be written or removed; instead copy it into a record field: `copy {from: meta.tenant, to: <field>}`'

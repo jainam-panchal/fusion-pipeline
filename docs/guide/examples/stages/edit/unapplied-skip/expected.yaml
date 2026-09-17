@@ -1,0 +1,5 @@
+acks: [ack, ack]
+sinks:
+  out:
+    - payload: {kind: log, attributes: {message: hello, checked: true}}
+    - payload: {kind: log, body: unparsed, attributes: {checked: true}}

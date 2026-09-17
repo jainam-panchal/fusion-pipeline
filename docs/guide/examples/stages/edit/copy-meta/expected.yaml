@@ -1,0 +1,14 @@
+acks: [ack]
+sinks:
+  out:
+    - headers:
+        Fusion-Record-Id: "7"
+        Fusion-Tenant: acme
+        Fusion-Ingestion-Time: "1758000000000000000"
+        Fusion-Ingestion-Time-Kind: reported
+      payload:
+        kind: log
+        body: x
+        observed_time_unix_nano: 1758000000000000000
+        attributes: {arrived_as: 7}
+        resource: {tenant.id: acme}

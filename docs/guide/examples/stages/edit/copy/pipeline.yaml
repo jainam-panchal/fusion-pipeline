@@ -1,0 +1,9 @@
+nodes:
+  - id: normalise
+    type: edit
+    ops:
+      - copy: {from: severity_text, to: attributes.level}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

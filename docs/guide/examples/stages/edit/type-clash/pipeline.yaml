@@ -1,0 +1,10 @@
+nodes:
+  - id: normalise
+    type: edit
+    ops:
+      - copy: {from: body, to: severity_number}
+      - hash: {field: attributes.list}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
