@@ -301,6 +301,6 @@ The ids the producer sent for one line in one cycle: an original and its deliber
 _Avoid_: duplicate set, dedupe group
 
 **Extra copy**:
-A message beyond the first of a duplicate group on one subject, or a second copy of one id: allowed by at-least-once delivery and by `dedupe`'s races, and reported. It fails a run only through `dedupe`'s share: when fewer than half the planned duplicates were dropped.
+A message beyond the first of a duplicate group on one subject, or a second copy of one id: allowed by at-least-once delivery and by `dedupe`'s races, and reported. It never fails a run by itself. A second id of a group on the main subject is also a planned duplicate `dedupe` did not drop, and a run fails when fewer than 80% of those were dropped; a second copy of one id does not count there.
 _Avoid_: duplicate delivery (a delivery is the transport's), unexpected
 

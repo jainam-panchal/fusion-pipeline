@@ -472,7 +472,7 @@ The script brings the stack up with `PIPELINE_CONFIG=pipeline-poc.yaml`, purges 
   `processed.>` and `dlq.>` subject, prints the report and exports it to the collector (the
   internal dashboard's *Loghub harness* row). A line's copies count together: it is missing
   when none reached a subject it should have, and a second copy is an extra copy, allowed as
-  long as `dedupe` dropped at least half the planned duplicates. `edit`'s writes are checked
+  long as `dedupe` dropped at least 80% of the planned duplicates. `edit`'s writes are checked
   on the main subject.
 
 ```
@@ -483,7 +483,7 @@ unexpected     0
 dead_lettered  0
 edit_mismatch  0
 extra_copies   20
-dedupe         dropped 29902 of 29917 planned duplicates (at least 50%: held)
+dedupe         dropped 29902 of 29917 planned duplicates (at least 80%: held)
 extraction by set:
   Apache   100.000% of 17521 groups, 0 mismatched
   Linux    100.000% of 17521 groups, 0 mismatched
@@ -497,7 +497,7 @@ space before the component or after the colon (`kernel:   HighMem zone: ...`); t
 pattern now starts `Component` and `Content` at the first non-space, as the CSV does.
 
 It exits 0 on a pass (nothing missing, unexpected, dead-lettered or wrongly edited, and at
-least half the planned duplicates dropped), 1 on a fail, 2 when the run could not be judged. Extraction accuracy is reported, never gated; the mismatching
+least 80% of the planned duplicates dropped), 1 on a fail, 2 when the run could not be judged. Extraction accuracy is reported, never gated; the mismatching
 `LineId`s are listed. The stack keeps running the POC config afterwards;
 `docker compose -f deploy/compose.yaml up -d` puts `pipeline.yaml` back.
 
