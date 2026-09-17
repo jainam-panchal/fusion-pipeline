@@ -127,6 +127,9 @@ pub struct Report {
     pub published: u64,
     /// Distinct (record id, subject) pairs read back that were expected there.
     pub received: u64,
+    /// (group, subject) pairs the expectations name: what a run without loss delivers, once
+    /// each.
+    pub expected: u64,
     /// (group, subject) pairs no id of the group reached.
     pub missing: u64,
     /// Messages and dead letters nobody expected.
@@ -154,6 +157,13 @@ pub struct Report {
 }
 
 impl Report {
+    /// The (group, subject) pairs that some id of the group reached: [`Self::expected`] less
+    /// [`Self::missing`], so it converges to `expected` as a run catches up.
+    #[must_use]
+    pub const fn arrived(&self) -> u64 {
+        self.expected.saturating_sub(self.missing)
+    }
+
     /// Whether nothing was lost, unexpected, dead-lettered or wrongly edited by `edit` or
     /// `lua`, and `dedupe` dropped enough of the planned duplicates.
     #[must_use]
@@ -186,6 +196,7 @@ impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "published      {}", self.published)?;
         writeln!(f, "received       {}", self.received)?;
+        writeln!(f, "expected       {}", self.expected)?;
         writeln!(f, "missing        {}", self.missing)?;
         writeln!(f, "unexpected     {}", self.unexpected)?;
         writeln!(f, "dead_lettered  {}", self.dead_lettered)?;
@@ -281,10 +292,7 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
         if !e.subjects.contains(&w.subject) || w.tenant.as_deref() != Some(&e.tenant) {
             report.unexpected += 1;
             report.example(Finding::Unexpected, || {
-                format!(
-                    "id {} ({} LineId {}) on {} under tenant {:?}",
-                    e.id, e.set, e.line_id, w.subject, w.tenant
-                )
+                format!("{} on {} under tenant {:?}", named(e), w.subject, w.tenant)
             });
             continue;
         }
@@ -309,15 +317,11 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
             }
             if !edits_match(e, &w.attributes) {
                 report.edit_mismatch += 1;
-                report.example(Finding::EditMismatch, || {
-                    format!("id {} ({} LineId {})", e.id, e.set, e.line_id)
-                });
+                report.example(Finding::EditMismatch, || named(e));
             }
             if !lua_matches(e, &w.attributes) {
                 report.lua_mismatch += 1;
-                report.example(Finding::LuaMismatch, || {
-                    format!("id {} ({} LineId {})", e.id, e.set, e.line_id)
-                });
+                report.example(Finding::LuaMismatch, || named(e));
             }
         }
     }
@@ -333,6 +337,7 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
         }
     }
     for (group, (e, size, planned)) in &groups {
+        report.expected += e.subjects.len() as u64;
         for subject in &e.subjects {
             if !reached.contains_key(&(*group, subject.as_str())) {
                 report.missing += 1;
@@ -372,9 +377,7 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
         match parse_id(letter.record_id.as_deref()).and_then(|id| by_id.get(&id)) {
             Some(e) => {
                 report.dead_lettered += 1;
-                report.example(Finding::DeadLettered, || {
-                    format!("id {} ({} LineId {})", e.id, e.set, e.line_id)
-                });
+                report.example(Finding::DeadLettered, || named(e));
             }
             None => {
                 report.unexpected += 1;
@@ -439,6 +442,11 @@ fn edits_match(e: &Expectation, attributes: &Map<String, Value>) -> bool {
         .iter()
         .all(|(target, source)| attributes.get(target) == attributes.get(source));
     set && copied
+}
+
+/// A message as the summary names it: its id, set and `LineId`.
+fn named(e: &Expectation) -> String {
+    format!("id {} ({} LineId {})", e.id, e.set, e.line_id)
 }
 
 /// Whether `attributes` carry what `lua` writes: each length attribute an integer equal to

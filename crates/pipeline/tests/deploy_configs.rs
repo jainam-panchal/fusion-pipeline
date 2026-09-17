@@ -531,14 +531,8 @@ fn the_poc_pipeline_forwards_every_copy_while_the_state_store_is_down() {
     let (mut dedupe_drops, mut state_errors, mut naks) = (0, 0, 0);
     for set in &SETS {
         let stage = [("tenant", set.tenant), ("stage", "dedupe_body")];
-        dedupe_drops += h.counter(
-            CounterMetric::RecordsDropped,
-            &[
-                ("tenant", set.tenant),
-                ("stage", "dedupe_body"),
-                ("reason", "dedupe"),
-            ],
-        );
+        let dropped = [stage[0], stage[1], ("reason", "dedupe")];
+        dedupe_drops += h.counter(CounterMetric::RecordsDropped, &dropped);
         state_errors += h.counter(CounterMetric::StateErrors, &stage);
         naks += h.counter(CounterMetric::SourceNaks, &[("tenant", set.tenant)]);
     }

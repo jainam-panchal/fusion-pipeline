@@ -52,6 +52,8 @@ pub enum ProducerOutcome {
 }
 
 impl ProducerOutcome {
+    const ALL: [Self; 2] = [Self::Published, Self::Failed];
+
     const fn as_str(self) -> &'static str {
         match self {
             Self::Published => "published",
@@ -88,11 +90,10 @@ pub fn write_done(path: &Path, outcome: ProducerOutcome) -> std::io::Result<()> 
 /// The outcome a done marker's text names, if it names one.
 #[must_use]
 pub fn parse_done(text: &str) -> Option<ProducerOutcome> {
-    match text.trim() {
-        "published" => Some(ProducerOutcome::Published),
-        "failed" => Some(ProducerOutcome::Failed),
-        _ => None,
-    }
+    let text = text.trim();
+    ProducerOutcome::ALL
+        .into_iter()
+        .find(|outcome| outcome.as_str() == text)
 }
 
 /// Where a stream ended once the pipeline had settled.

@@ -19,6 +19,7 @@
 //!
 //! When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, each judgement goes to the collector as gauges
 //! under `service.name=loghub-verifier`: `loghub_published`, `loghub_received`,
+//! `loghub_expected`, `loghub_arrived`,
 //! `loghub_missing`, `loghub_unexpected`, `loghub_extra_copies`, `loghub_dead_lettered`,
 //! `loghub_edit_mismatch`, `loghub_lua_mismatch`, `loghub_sampled_out`,
 //! `loghub_repeated_on_every_subject`, `loghub_duplicates_planned`,
@@ -132,7 +133,7 @@ fn main() -> ExitCode {
     };
     println!("{report}");
     if let Some(exporter) = exporter {
-        exporter.send(&report, true);
+        exporter.send(&report, Judgement::Final);
         exporter.finish();
     }
     if report.passed() {
@@ -140,6 +141,15 @@ fn main() -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Whether a judgement is the run's last.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Judgement {
+    /// Made while the run goes on.
+    SoFar,
+    /// Made once the run is over.
+    Final,
 }
 
 /// What a stream reader hands over.
@@ -179,19 +189,28 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
             js.clone(),
             SINK_STREAM,
             SINK_SUBJECTS,
+            |sequence, message| Arrived::Written(sequence, written(message)),
             tx.clone(),
         )),
         tokio::spawn(follow_stream(
             js.clone(),
             DEAD_LETTER_STREAM,
             DEAD_LETTER_SUBJECTS,
+            |sequence, message| {
+                Arrived::Dead(
+                    sequence,
+                    DeadLetter {
+                        record_id: header(message, RECORD_ID),
+                    },
+                )
+            },
             tx,
         )),
     ];
     let result = async {
         let mut tail = Tail::new(&options.expectations);
         let marker = follow::done_marker(&options.expectations);
-        let (mut written, mut dead) = (Vec::new(), Vec::new());
+        let (mut written_so_far, mut dead_so_far) = (Vec::new(), Vec::new());
         let (mut seen_sinks, mut seen_dead) = (None, None);
         let start = Instant::now();
         let mut next_tick = start;
@@ -201,11 +220,11 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
                 match arrived {
                     Arrived::Written(sequence, w) => {
                         seen_sinks = seen_sinks.max(Some(sequence));
-                        written.push(w);
+                        written_so_far.push(w);
                     }
                     Arrived::Dead(sequence, d) => {
                         seen_dead = seen_dead.max(Some(sequence));
-                        dead.push(d);
+                        dead_so_far.push(d);
                     }
                     Arrived::Failed(message) => return Err(message),
                 }
@@ -213,7 +232,7 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
             tail.read()?;
             let now = Instant::now();
             if now >= next_tick {
-                let report = judge_so_far(&tail.expectations, &written, &dead);
+                let report = judge_so_far(&tail.expectations, &written_so_far, &dead_so_far);
                 eprintln!(
                     "loghub-verifier: {:>4}s published {} received {} missing {} unexpected {}",
                     start.elapsed().as_secs(),
@@ -223,7 +242,7 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
                     report.unexpected
                 );
                 if let Some(exporter) = exporter {
-                    exporter.send(&report, false);
+                    exporter.send(&report, Judgement::SoFar);
                 }
                 next_tick = now + TICK;
             }
@@ -270,10 +289,10 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
                 }
                 Phase::Reading {
                     sinks,
-                    dead: dead_end,
+                    dead,
                     deadline,
                 } => {
-                    if sinks.reached(seen_sinks) && dead_end.reached(seen_dead) {
+                    if sinks.reached(seen_sinks) && dead.reached(seen_dead) {
                         break;
                     }
                     if now >= deadline {
@@ -281,12 +300,12 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
                             "the streams were not read to their end within {READ_TIMEOUT:?}: \
                              {SINK_STREAM} at {seen_sinks:?} of {}, {DEAD_LETTER_STREAM} at \
                              {seen_dead:?} of {}",
-                            sinks.last_sequence, dead_end.last_sequence
+                            sinks.last_sequence, dead.last_sequence
                         ));
                     }
                     Phase::Reading {
                         sinks,
-                        dead: dead_end,
+                        dead,
                         deadline,
                     }
                 }
@@ -300,7 +319,7 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
                 options.expectations.display()
             ));
         }
-        Ok(judge(&tail.expectations, &written, &dead))
+        Ok(judge(&tail.expectations, &written_so_far, &dead_so_far))
     }
     .await;
     for reader in readers {
@@ -385,12 +404,13 @@ async fn stream_end(js: &Context, stream: &str) -> Result<StreamEnd, String> {
     })
 }
 
-/// Hand every message on `subjects` in `stream`, from the start, to `tx` as it arrives, with
-/// its stream sequence; a failure is handed over as the last thing.
+/// Hand every message on `subjects` in `stream`, from the start, to `tx` as it arrives, read
+/// by `arrived` with its stream sequence; a failure is handed over as the last thing.
 async fn follow_stream(
     js: Context,
     stream: &'static str,
     subjects: &'static str,
+    arrived: fn(u64, &async_nats::Message) -> Arrived,
     tx: channel::UnboundedSender<Arrived>,
 ) {
     let fail = |err: &dyn std::fmt::Display| format!("reading {subjects} from {stream}: {err}");
@@ -409,18 +429,7 @@ async fn follow_stream(
         while let Some(message) = messages.next().await {
             let message = message.map_err(|err| fail(&err))?;
             let sequence = message.info().map_err(|err| fail(&err))?.stream_sequence;
-            let message = message.message;
-            let arrived = if stream == DEAD_LETTER_STREAM {
-                Arrived::Dead(
-                    sequence,
-                    DeadLetter {
-                        record_id: header(&message, RECORD_ID),
-                    },
-                )
-            } else {
-                Arrived::Written(sequence, written(&message))
-            };
-            if tx.send(arrived).is_err() {
+            if tx.send(arrived(sequence, &message.message)).is_err() {
                 return Ok(());
             }
         }
@@ -457,7 +466,7 @@ fn header(message: &async_nats::Message, name: &str) -> Option<String> {
 
 /// The collector export, on a thread of its own: the OTLP client blocks.
 struct Exporter {
-    tx: mpsc::Sender<(Report, bool)>,
+    tx: mpsc::Sender<(Report, Judgement)>,
     thread: std::thread::JoinHandle<()>,
 }
 
@@ -467,7 +476,7 @@ impl Exporter {
         if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").map_or(true, |v| v.trim().is_empty()) {
             return None;
         }
-        let (tx, rx) = mpsc::channel::<(Report, bool)>();
+        let (tx, rx) = mpsc::channel::<(Report, Judgement)>();
         let thread = std::thread::spawn(move || {
             let provider = match MetricExporter::builder().with_http().build() {
                 Ok(exporter) => SdkMeterProvider::builder()
@@ -486,8 +495,8 @@ impl Exporter {
             let gauges = Gauges::new(&provider);
             let mut failing = false;
             let mut last = Ok(());
-            for (report, settled) in rx {
-                gauges.record(&report, settled);
+            for (report, judgement) in rx {
+                gauges.record(&report, judgement);
                 last = provider.force_flush().map_err(|err| err.to_string());
                 if let Err(err) = &last
                     && !failing
@@ -503,9 +512,9 @@ impl Exporter {
         Some(Self { tx, thread })
     }
 
-    /// Export `report`, final when `settled`.
-    fn send(&self, report: &Report, settled: bool) {
-        let _ = self.tx.send((report.clone(), settled));
+    /// Export `report`.
+    fn send(&self, report: &Report, judgement: Judgement) {
+        let _ = self.tx.send((report.clone(), judgement));
     }
 
     /// Wait for what was sent to be exported.
@@ -527,10 +536,12 @@ struct Gauges {
 }
 
 /// The report's counts, by gauge name.
-fn counts(report: &Report) -> [(&'static str, u64); 12] {
+fn counts(report: &Report) -> [(&'static str, u64); 14] {
     [
         ("loghub_published", report.published),
         ("loghub_received", report.received),
+        ("loghub_expected", report.expected),
+        ("loghub_arrived", report.arrived()),
         ("loghub_missing", report.missing),
         ("loghub_unexpected", report.unexpected),
         ("loghub_extra_copies", report.extra_copies),
@@ -562,11 +573,12 @@ impl Gauges {
         }
     }
 
-    fn record(&self, report: &Report, settled: bool) {
+    fn record(&self, report: &Report, judgement: Judgement) {
         for (gauge, (_, value)) in self.counts.iter().zip(counts(report)) {
             gauge.record(value, &[]);
         }
-        self.settled.record(u64::from(settled), &[]);
+        self.settled
+            .record(u64::from(judgement == Judgement::Final), &[]);
         // A set's name is its log format, the label the issue names.
         for (name, set) in &report.sets {
             let labels = [KeyValue::new("format", name.clone())];
