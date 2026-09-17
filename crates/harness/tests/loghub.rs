@@ -80,6 +80,22 @@ fn normalise_applies_each_rule_to_its_column_only() {
 }
 
 #[test]
+fn the_payload_carries_the_line_and_its_cycle_for_the_sample_key() {
+    let set = loghub::set("Linux").expect("a vendored set");
+    let line = loghub::Line {
+        line_id: 7,
+        body: "text".to_owned(),
+        attributes: std::collections::BTreeMap::new(),
+    };
+    let payload = loghub::payload(set, &line, 3, 42);
+    assert_eq!(payload["attributes"]["loghub.line_id"], 7);
+    assert_eq!(payload["attributes"]["loghub.cycle"], 3);
+    assert_eq!(payload["body"], "text");
+    assert_eq!(payload["resource"]["log.format"], "Linux");
+    assert_eq!(payload["observed_time_unix_nano"], 42);
+}
+
+#[test]
 fn each_set_has_its_own_tenant() {
     let tenants: BTreeSet<_> = SETS.iter().map(|s| s.tenant).collect();
     assert_eq!(tenants.len(), SETS.len());

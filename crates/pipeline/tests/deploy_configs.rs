@@ -343,104 +343,207 @@ fn the_routing_example_archives_every_record_of_half_the_linux_hosts() {
 /// Every `STRIDE`th distinct line of each loghub set goes through the POC config.
 const LOGHUB_STRIDE: usize = 25;
 
-/// Issue #13: the loghub harness judges the POC pipeline against what it writes down by hand
-/// (the subjects each set reaches, `dedupe` dropping a planned duplicate, what `edit` writes)
-/// and the structured CSV, not against a run of the pipeline. This checks that what it
-/// writes down is the config's: every sampled line goes through twice, as the producer sends
-/// a line and its duplicate, and the verifier's own verdict over what the sinks wrote passes
-/// (nothing missing or unexpected, `edit` as expected, enough duplicates dropped), with each
-/// set reaching exactly its subjects and every set's extraction compared. How well each
-/// pattern extracts is `extract_loghub.rs`'s question, and the live run's report; it is not
-/// gated here.
-#[test]
-fn the_poc_pipeline_treats_each_loghub_set_as_the_harness_expects() {
-    use fusion_harness::expect::expectation;
+/// How many cycles of the sampled lines go through: two, so `sample` keeps a line in one
+/// cycle and leaves it out in another.
+const LOGHUB_CYCLES: u64 = 2;
+
+/// Ingestion time between one cycle and the next: past the POC config's 2s dedupe window, as
+/// the producer's repeat bound keeps it, so a line's next cycle is not dropped as a repeat.
+const CYCLE_GAP_NANOS: u64 = 10_000_000_000;
+
+/// Every `stride`th distinct line of each loghub set, with its set.
+fn loghub_lines(
+    stride: usize,
+) -> Vec<(
+    &'static fusion_harness::loghub::Set,
+    fusion_harness::loghub::Line,
+)> {
     use fusion_harness::loghub::{self, SETS};
-    use fusion_harness::verdict::{Written, judge};
-
-    let yaml = deploy_config("pipeline-poc.yaml");
-    let config = Config::from_yaml(&yaml).expect("config parses");
-    let subjects: Vec<(String, String)> = config
-        .nodes
-        .iter()
-        .filter(|node| node.kind == "sink.nats")
-        .map(|node| {
-            let params: SinkParams = node.parse_params().expect("sink params parse");
-            (node.id.clone(), params.subject)
-        })
-        .collect();
-
-    let sinks = MemorySinks::new();
-    let h = start_with(&yaml, 4, sinks.clone(), registry(&sinks));
-    let mut expectations = Vec::new();
     let mut lines = Vec::new();
     for set in &SETS {
         let loaded = loghub::load(&loghub::testdata(), set).expect("set loads");
-        lines.extend(
-            loaded
-                .into_iter()
-                .step_by(LOGHUB_STRIDE)
-                .map(|line| (set, line)),
-        );
+        lines.extend(loaded.into_iter().step_by(stride).map(|line| (set, line)));
     }
-    // As the producer sends them: every original, then each duplicate after its original,
-    // stored later. Only then is which copy `dedupe` keeps fixed with four workers: a
-    // duplicate handled before its original would hold the key, and the original, older than
-    // the holder, would pass too.
-    for dup in [false, true] {
-        let mut probes = Vec::new();
-        for (index, (set, line)) in lines.iter().enumerate() {
-            let original = index as u64 + 1;
-            let (id, dup_of) = if dup {
-                (lines.len() as u64 + original, Some(original))
-            } else {
-                (original, None)
-            };
-            // The id in `Fusion-Record-Id` only, not in the payload.
-            let record = Record::from_json(&loghub::payload(set, line, 0).to_string())
-                .expect("record parses");
-            let arrival = Arrival {
-                record_id: Some(RecordId(id)),
-                ingestion_time: Some(IngestionTime::Reported(1_000_000_000 + id)),
-                ..arrival_as(set.tenant)
-            };
-            probes.push(h.source.push_arrival(record, arrival));
-            expectations.push(expectation(id, set, line, 0, dup_of));
-        }
-        for probe in &probes {
-            assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
-        }
-    }
+    lines
+}
 
-    let written: Vec<Written> = subjects
+/// Send `lines` through `h` for `cycles` cycles as the producer sends them, and return the
+/// expectations the producer would write. Within a cycle every original goes first, then each
+/// duplicate after its original, stored later: only then is which copy `dedupe` keeps fixed
+/// with four workers, since a duplicate handled before its original would hold the key, and
+/// the original, older than the holder, would pass too. Each cycle is stored
+/// [`CYCLE_GAP_NANOS`] after the one before.
+fn send_loghub_cycles(
+    h: &common::Harness,
+    lines: &[(
+        &'static fusion_harness::loghub::Set,
+        fusion_harness::loghub::Line,
+    )],
+    cycles: u64,
+) -> Vec<fusion_harness::expect::Expectation> {
+    use fusion_harness::expect::expectation;
+    use fusion_harness::loghub;
+
+    let per_cycle = 2 * lines.len() as u64;
+    let mut expectations = Vec::new();
+    for cycle in 0..cycles {
+        for dup in [false, true] {
+            let mut probes = Vec::new();
+            for (index, (set, line)) in lines.iter().enumerate() {
+                let original = cycle * per_cycle + index as u64 + 1;
+                let (id, dup_of) = if dup {
+                    (original + lines.len() as u64, Some(original))
+                } else {
+                    (original, None)
+                };
+                // The id in `Fusion-Record-Id` only, not in the payload.
+                let record = Record::from_json(&loghub::payload(set, line, cycle, 0).to_string())
+                    .expect("record parses");
+                let arrival = Arrival {
+                    record_id: Some(RecordId(id)),
+                    ingestion_time: Some(IngestionTime::Reported(
+                        1_000_000_000 + cycle * CYCLE_GAP_NANOS + id,
+                    )),
+                    ..arrival_as(set.tenant)
+                };
+                probes.push(h.source.push_arrival(record, arrival));
+                expectations.push(expectation(id, set, line, cycle, dup_of));
+            }
+            for probe in &probes {
+                assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+            }
+        }
+    }
+    expectations
+}
+
+/// What the POC config's NATS sinks wrote, as the verifier reads it back.
+fn loghub_written(sinks: &MemorySinks) -> Vec<fusion_harness::verdict::Written> {
+    let config = Config::from_yaml(&deploy_config("pipeline-poc.yaml")).expect("config parses");
+    config
+        .nodes
         .iter()
-        .flat_map(|(node, subject)| {
-            sinks.outgoing(node).into_iter().map(|out| Written {
-                subject: subject.clone(),
-                record_id: Some(out.meta.record_id.0.to_string()),
-                tenant: Some(out.meta.tenant.to_string()),
-                attributes: out.record.attributes,
-            })
+        .filter(|node| node.kind == "sink.nats")
+        .flat_map(|node| {
+            let params: SinkParams = node.parse_params().expect("sink params parse");
+            sinks
+                .outgoing(&node.id)
+                .into_iter()
+                .map(move |out| fusion_harness::verdict::Written {
+                    subject: params.subject.clone(),
+                    record_id: Some(out.meta.record_id.0.to_string()),
+                    tenant: Some(out.meta.tenant.to_string()),
+                    attributes: out.record.attributes,
+                })
         })
-        .collect();
-    let report = judge(&expectations, &written, &[]);
+        .collect()
+}
+
+/// Issues #13 and #14: the loghub harness judges the POC pipeline against what it writes down
+/// by hand (the subjects each set reaches, which lines `sample` keeps, `dedupe` dropping a
+/// planned duplicate, what `edit` and `lua` write) and the structured CSV, not against a run of
+/// the pipeline. This checks that what it writes down is the config's: every sampled line goes
+/// through twice per cycle, as the producer sends a line and its duplicate, over two cycles,
+/// and the verifier's own verdict over what the sinks wrote passes (nothing missing or
+/// unexpected, `edit` and `lua` as expected, enough duplicates dropped), with each set
+/// reaching exactly its subjects, some lines left off the main subject by `sample`, and every
+/// set's extraction compared. How well each pattern extracts is `extract_loghub.rs`'s
+/// question, and the live run's report; it is not gated here.
+#[test]
+fn the_poc_pipeline_treats_each_loghub_set_as_the_harness_expects() {
+    use fusion_harness::expect::sample_keeps;
+    use fusion_harness::loghub::SETS;
+    use fusion_harness::verdict::judge;
+
+    let sinks = MemorySinks::new();
+    let yaml = deploy_config("pipeline-poc.yaml");
+    let h = start_with(&yaml, 4, sinks.clone(), registry(&sinks));
+    let lines = loghub_lines(LOGHUB_STRIDE);
+    let expectations = send_loghub_cycles(&h, &lines, LOGHUB_CYCLES);
+
+    let report = judge(&expectations, &loghub_written(&sinks), &[]);
     assert!(report.passed(), "{report}");
-    assert_eq!(report.edit_mismatch, 0, "{report}");
-    let groups = expectations.len() as u64 / 2;
-    assert_eq!(report.duplicates_planned, groups, "{report}");
     assert_eq!(
-        report.duplicates_dropped, groups,
-        "one copy in memory, so dedupe drops every duplicate: {report}"
+        (report.edit_mismatch, report.lua_mismatch),
+        (0, 0),
+        "{report}"
+    );
+    let groups = expectations.len() as u64 / 2;
+    let kept = lines
+        .iter()
+        .flat_map(|(_, line)| (0..LOGHUB_CYCLES).map(move |cycle| (line.line_id, cycle)))
+        .filter(|&(line_id, cycle)| sample_keeps(line_id, cycle))
+        .count() as u64;
+    assert_eq!(report.sampled_out, groups - kept, "{report}");
+    assert!(
+        report.sampled_out > 0 && kept > 0,
+        "both verdicts occur: {report}"
     );
     let linux = expectations.iter().filter(|e| e.set == "Linux").count() as u64 / 2;
+    let unjudged = expectations
+        .iter()
+        .filter(|e| e.dup_of.is_some() && e.subjects.is_empty())
+        .count() as u64;
+    assert_eq!(report.duplicates_planned, groups - unjudged, "{report}");
     assert_eq!(
-        report.received - report.extra_copies,
-        groups + linux,
-        "one copy of each line, Linux on two subjects and every other set on one: {report}"
+        report.duplicates_dropped, report.duplicates_planned,
+        "one copy in memory, so dedupe drops every duplicate: {report}"
+    );
+    assert_eq!(report.extra_copies, 0, "{report}");
+    assert_eq!(
+        report.received,
+        kept + linux,
+        "one copy of each kept line on main, and of every Linux line on audit: {report}"
     );
     assert_eq!(report.sets.len(), SETS.len(), "{report}");
     for (set, extraction) in &report.sets {
         assert!(extraction.checked > 0, "{set}: {report}");
     }
+    h.finish();
+}
+
+/// Issue #14: while Dragonfly is paused, `dedupe_body` cannot claim a key, and under
+/// `on_state_error: pass` it forwards the record: a duplicate that gets through then is a
+/// state error, never a `dedupe` drop, and never a nak that would spend a delivery.
+#[test]
+fn the_poc_pipeline_forwards_every_copy_while_the_state_store_is_down() {
+    use fusion_harness::loghub::SETS;
+    use fusion_harness::verdict::judge;
+
+    let sinks = MemorySinks::new();
+    let yaml = deploy_config("pipeline-poc.yaml");
+    let h = start_with(&yaml, 4, sinks.clone(), registry(&sinks));
+    h.state.fail_all(true);
+    let lines = loghub_lines(4 * LOGHUB_STRIDE);
+    let expectations = send_loghub_cycles(&h, &lines, 1);
+
+    let report = judge(&expectations, &loghub_written(&sinks), &[]);
+    assert_eq!(
+        (report.missing, report.unexpected),
+        (0, 0),
+        "every copy reaches every subject it expects: {report}"
+    );
+    assert_eq!(
+        report.duplicates_dropped, 0,
+        "no duplicate is dropped: {report}"
+    );
+    assert!(report.duplicates_planned > 0, "{report}");
+    let (mut dedupe_drops, mut state_errors, mut naks) = (0, 0, 0);
+    for set in &SETS {
+        let stage = [("tenant", set.tenant), ("stage", "dedupe_body")];
+        dedupe_drops += h.counter(
+            CounterMetric::RecordsDropped,
+            &[
+                ("tenant", set.tenant),
+                ("stage", "dedupe_body"),
+                ("reason", "dedupe"),
+            ],
+        );
+        state_errors += h.counter(CounterMetric::StateErrors, &stage);
+        naks += h.counter(CounterMetric::SourceNaks, &[("tenant", set.tenant)]);
+    }
+    assert_eq!(dedupe_drops, 0);
+    assert_eq!(state_errors, expectations.len() as u64);
+    assert_eq!(naks, 0, "every message was acked");
     h.finish();
 }

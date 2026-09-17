@@ -4,9 +4,10 @@
 //! Each message goes to `logs.<tenant>.loghub`, one tenant per set, with the record id in
 //! `Fusion-Record-Id` (and in `Nats-Msg-Id`, so a retried publish the server already stored
 //! is dropped as a duplicate) and the payload [`loghub::payload`] builds: the raw line, its set
-//! in `resource.log.format`, its `LineId` in `attributes["loghub.line_id"]` and the send time
-//! in `observed_time_unix_nano`. An expectation is written only once the message's `PubAck` is
-//! in, so the file lists exactly what the stream holds.
+//! in `resource.log.format`, its `LineId` and cycle in `attributes["loghub.line_id"]` and
+//! `attributes["loghub.cycle"]`, and the send time in `observed_time_unix_nano`. An
+//! expectation is written only once the message's `PubAck` is in, so the file lists exactly
+//! what the stream holds.
 //!
 //! Exits 1 when a message could not be published, or when the timing the plan relies on did
 //! not hold: a duplicate trailed its original by more than [`DUP_LAG`], a body came back
@@ -255,7 +256,7 @@ impl Publish {
         let mut headers = HeaderMap::new();
         headers.insert(RECORD_ID, message.id.to_string().as_str());
         headers.insert(MSG_ID, message.id.to_string().as_str());
-        let payload = loghub::payload(set, line, observed_now()).to_string();
+        let payload = loghub::payload(set, line, message.cycle, observed_now()).to_string();
         let expectation = expectation(message.id, set, line, message.cycle, message.dup_of);
         Self {
             subject: format!("logs.{}.loghub", set.tenant),

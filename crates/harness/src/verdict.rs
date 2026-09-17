@@ -8,16 +8,27 @@
 //! subject, under that tenant, or without a readable `Fusion-Record-Id` is unexpected. A
 //! dead letter fails the run even when a duplicate of it arrived.
 //!
-//! `dedupe` is judged by the share of planned duplicates (expectations with `drop: dedupe`)
-//! that never reached the main subject: under [`MIN_DUPLICATES_DROPPED_PERCENT`] fails the run, so a
-//! `dedupe` that drops nothing, or only some, cannot pass, while the copies a race or a
-//! paused state store lets through (chaos, #14: about 5s of a 60s run) can.
+//! A group the POC config's `sample` node leaves out expects no main subject: it is
+//! `sampled_out`, reported, and a copy of it on the main subject is unexpected.
 //!
-//! Extraction and `edit` are judged once per group, on the first copy that reached the main
-//! subject. Extraction compares the set's CSV columns, an absent attribute equal to an empty
-//! cell and `Content` without trailing whitespace; it is reported, never gated. `edit` is
-//! compared with what the record itself carries (a copied attribute equals its source, as
-//! extracted), so a pattern's mistake is never counted as `edit`'s; a mismatch fails the run.
+//! `dedupe` is judged by the share of planned duplicates (expectations with `drop: dedupe`)
+//! that never reached the group's first subject (main, or audit for a sampled-out Linux
+//! group; `dedupe` runs before both): under [`MIN_DUPLICATES_DROPPED_PERCENT`] fails the run,
+//! so a `dedupe` that drops nothing, or only some, cannot pass, while the copies a race or a
+//! paused state store lets through (the chaos run: about 5s of a 60s run) can. A group with
+//! no subject is not judged for `dedupe`, since `sample` dropped every copy of it.
+//!
+//! Extraction, `edit` and `lua` are judged once per group, on the first copy that reached
+//! the main subject. Extraction compares the set's CSV columns, an absent attribute equal to
+//! an empty cell and `Content` without trailing whitespace; it is reported, never gated.
+//! `edit` and `lua` are compared with what the record itself carries (a copied attribute
+//! equals its source, a length is its source's byte length, as extracted), so a pattern's
+//! mistake is never counted as theirs; a mismatch fails the run. The `lua` node runs with
+//! `on_error: pass`, so a script error shows here as a `lua` mismatch.
+//!
+//! A group with more than one subject that holds an extra copy on every one of them is
+//! `repeated_on_every_subject`: the sign of a record redelivered after all its sinks wrote
+//! it, which is what a kill between two sinks of one fan-out looks like. Reported, not gated.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -67,6 +78,8 @@ pub enum Finding {
     DeadLettered,
     /// A main-subject copy whose `edit` attributes are not what the config writes.
     EditMismatch,
+    /// A main-subject copy whose `lua` attributes are not what the config writes.
+    LuaMismatch,
 }
 
 impl Finding {
@@ -78,6 +91,7 @@ impl Finding {
             Self::Unexpected => "unexpected",
             Self::DeadLettered => "dead_lettered",
             Self::EditMismatch => "edit_mismatch",
+            Self::LuaMismatch => "lua_mismatch",
         }
     }
 }
@@ -126,6 +140,12 @@ pub struct Report {
     pub duplicates_dropped: u64,
     /// Groups whose main-subject copy does not carry what `edit` writes.
     pub edit_mismatch: u64,
+    /// Groups whose main-subject copy does not carry what `lua` writes.
+    pub lua_mismatch: u64,
+    /// Groups the `sample` node leaves off the main subject.
+    pub sampled_out: u64,
+    /// Groups with more than one subject that got an extra copy on every one.
+    pub repeated_on_every_subject: u64,
     /// Extraction per set.
     pub sets: BTreeMap<String, SetReport>,
     /// Examples of each finding, for the summary.
@@ -133,14 +153,15 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether nothing was lost, unexpected, dead-lettered or wrongly edited, and `dedupe`
-    /// dropped enough of the planned duplicates.
+    /// Whether nothing was lost, unexpected, dead-lettered or wrongly edited by `edit` or
+    /// `lua`, and `dedupe` dropped enough of the planned duplicates.
     #[must_use]
     pub fn passed(&self) -> bool {
         self.missing == 0
             && self.unexpected == 0
             && self.dead_lettered == 0
             && self.edit_mismatch == 0
+            && self.lua_mismatch == 0
             && self.dedupe_held()
     }
 
@@ -168,7 +189,14 @@ impl fmt::Display for Report {
         writeln!(f, "unexpected     {}", self.unexpected)?;
         writeln!(f, "dead_lettered  {}", self.dead_lettered)?;
         writeln!(f, "edit_mismatch  {}", self.edit_mismatch)?;
+        writeln!(f, "lua_mismatch   {}", self.lua_mismatch)?;
+        writeln!(f, "sampled_out    {}", self.sampled_out)?;
         writeln!(f, "extra_copies   {}", self.extra_copies)?;
+        writeln!(
+            f,
+            "repeated_on_every_subject {}",
+            self.repeated_on_every_subject
+        )?;
         writeln!(
             f,
             "dedupe         dropped {} of {} planned duplicates (at least {}%: {})",
@@ -236,6 +264,8 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
     }
 
     let mut copies: HashMap<(u64, &str), u64> = HashMap::new();
+    // Copies per (group, subject), every copy counted.
+    let mut arrivals: HashMap<(Group<'_>, &str), u64> = HashMap::new();
     let mut reached: HashMap<(Group<'_>, &str), u64> = HashMap::new();
     let mut compared: BTreeSet<Group<'_>> = BTreeSet::new();
     for w in written {
@@ -257,6 +287,7 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
             });
             continue;
         }
+        *arrivals.entry((e.group(), w.subject.as_str())).or_default() += 1;
         let seen = copies.entry((e.id, w.subject.as_str())).or_default();
         *seen += 1;
         if *seen > 1 {
@@ -278,6 +309,12 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
             if !edits_match(e, &w.attributes) {
                 report.edit_mismatch += 1;
                 report.example(Finding::EditMismatch, || {
+                    format!("id {} ({} LineId {})", e.id, e.set, e.line_id)
+                });
+            }
+            if !lua_matches(e, &w.attributes) {
+                report.lua_mismatch += 1;
+                report.example(Finding::LuaMismatch, || {
                     format!("id {} ({} LineId {})", e.id, e.set, e.line_id)
                 });
             }
@@ -306,9 +343,26 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
                 });
             }
         }
+        if !e.subjects.iter().any(|s| s == MAIN) {
+            report.sampled_out += 1;
+        }
+        if e.subjects.len() > 1
+            && e.subjects
+                .iter()
+                .all(|s| arrivals.get(&(*group, s.as_str())).is_some_and(|n| *n > 1))
+        {
+            report.repeated_on_every_subject += 1;
+        }
         // One copy of a group is meant to arrive; every other copy that did not arrive is a
         // drop, whichever of them `dedupe` kept.
-        let arrived = reached.get(&(*group, MAIN)).copied().unwrap_or(0).max(1);
+        let Some(first) = e.subjects.first() else {
+            continue;
+        };
+        let arrived = reached
+            .get(&(*group, first.as_str()))
+            .copied()
+            .unwrap_or(0)
+            .max(1);
         report.duplicates_planned += planned;
         report.duplicates_dropped += size.saturating_sub(arrived).min(*planned);
     }
@@ -359,4 +413,16 @@ fn edits_match(e: &Expectation, attributes: &Map<String, Value>) -> bool {
         .iter()
         .all(|(target, source)| attributes.get(target) == attributes.get(source));
     set && copied
+}
+
+/// Whether `attributes` carry what `lua` writes: each length attribute an integer equal to
+/// the byte length of its string source in the same record, both absent together.
+fn lua_matches(e: &Expectation, attributes: &Map<String, Value>) -> bool {
+    e.lua.lengths.iter().all(|(target, source)| {
+        let expected = attributes
+            .get(source)
+            .and_then(Value::as_str)
+            .map(|text| text.len() as u64);
+        attributes.get(target).map(Value::as_u64) == expected.map(Some)
+    })
 }
