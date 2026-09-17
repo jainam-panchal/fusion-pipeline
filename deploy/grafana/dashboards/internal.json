@@ -1415,8 +1415,8 @@
     {
       "id": 1101,
       "type": "stat",
-      "title": "Did every record arrive?  (published, received, missing, unexpected, dead-lettered, extra copies)",
-      "description": "The verifier's last report (loghub-verifier, issue #13). missing: a line's duplicate group reached none of its sinks. unexpected: a record nobody published, on a subject its format never routes to, or under the wrong tenant. dead-lettered: a published record in DLQ. A run passes when all three are 0. extra copies: a second copy of a group on one sink, which at-least-once delivery allows. Gauges are exported once per run and go stale 5 minutes after it.",
+      "title": "Did every record arrive?  (published, received, missing, unexpected, dead-lettered, wrongly edited, duplicates dropped, extra copies)",
+      "description": "The verifier's last report (loghub-verifier, issue #13). missing: a line's duplicate group reached none of its subjects. unexpected: a record nobody published, on a subject its set never routes to, or under the wrong tenant. dead-lettered: a published record in DLQ. edit mismatch: a main-subject record without what the edit node writes. A run passes when these four are 0 and dedupe dropped at least half the planned duplicates (duplicates dropped of duplicates planned). extra copies: a second copy of a group on one subject, which at-least-once delivery allows. Gauges are exported once per run and go stale 5 minutes after it.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1447,7 +1447,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "missing|unexpected|dead-lettered"
+              "options": "missing|unexpected|dead-lettered|edit mismatch"
             },
             "properties": [
               {
@@ -1539,9 +1539,39 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
+          "expr": "max(last_over_time(loghub_edit_mismatch[1h]))",
+          "legendFormat": "edit mismatch",
+          "refId": "F",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_duplicates_planned[1h]))",
+          "legendFormat": "duplicates planned",
+          "refId": "G",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_duplicates_dropped[1h]))",
+          "legendFormat": "duplicates dropped",
+          "refId": "H",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "max(last_over_time(loghub_extra_copies[1h]))",
           "legendFormat": "extra copies",
-          "refId": "F",
+          "refId": "I",
           "instant": true
         }
       ]
