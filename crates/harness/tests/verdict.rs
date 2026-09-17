@@ -176,7 +176,7 @@ fn an_attribute_that_differs_is_a_mismatch_of_its_format() {
     );
     let apache = &report.formats["Apache"];
     assert_eq!((apache.checked, apache.mismatched), (2, 1));
-    assert_eq!(apache.mismatched_lines, [8]);
+    assert_eq!(apache.mismatched_lines, [8].into());
     assert!((apache.accuracy() - 0.5).abs() < f64::EPSILON);
 }
 
@@ -246,4 +246,21 @@ fn only_linux_fans_out_to_the_audit_sink() {
     let dup = apache(2, 1, Some(1));
     assert_eq!(dup.drop.as_deref(), Some("dedupe"));
     assert_eq!(apache(1, 1, None).drop, None);
+}
+
+#[test]
+fn a_line_that_mismatches_in_every_cycle_is_listed_once() {
+    let mut expectations = Vec::new();
+    let mut deliveries = Vec::new();
+    for (id, line_id, cycle) in [(1, 9, 0), (2, 3, 0), (3, 9, 1), (4, 3, 1)] {
+        let e = expectation(id, "Apache", line_id, cycle, None, apache_attrs()).expect("set");
+        let mut wrong = delivered(&e, MAIN);
+        wrong.attributes.insert("Level".into(), json!("error"));
+        deliveries.push(wrong);
+        expectations.push(e);
+    }
+    let report = judge(&expectations, &deliveries, &[]);
+    let apache = &report.formats["Apache"];
+    assert_eq!((apache.checked, apache.mismatched), (4, 4));
+    assert_eq!(apache.mismatched_lines, [3, 9].into());
 }

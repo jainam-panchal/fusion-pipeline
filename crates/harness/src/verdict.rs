@@ -50,8 +50,9 @@ pub struct FormatReport {
     pub checked: u64,
     /// Of those, groups whose attributes differ from the CSV.
     pub mismatched: u64,
-    /// The `LineId`s that differ, in the order found.
-    pub mismatched_lines: Vec<usize>,
+    /// The distinct `LineId`s that differ, in order: a line that differs in every cycle is
+    /// listed once.
+    pub mismatched_lines: BTreeSet<usize>,
 }
 
 impl FormatReport {
@@ -131,7 +132,7 @@ impl fmt::Display for Report {
                 } else {
                     String::new()
                 };
-                writeln!(f, "    LineIds: {}{tail}", shown.join(", "))?;
+                writeln!(f, "    distinct LineIds: {}{tail}", shown.join(", "))?;
             }
         }
         for (kind, list) in &self.examples {
@@ -205,7 +206,7 @@ pub fn judge(expectations: &[Expectation], deliveries: &[Delivery], dead: &[Dead
             format.checked += 1;
             if !extraction_matches(e, &d.attributes) {
                 format.mismatched += 1;
-                format.mismatched_lines.push(e.line_id);
+                format.mismatched_lines.insert(e.line_id);
             }
         }
     }
