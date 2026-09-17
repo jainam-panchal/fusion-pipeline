@@ -190,7 +190,7 @@ for reason in $seen; do
     echo "dlq reason: $reason"
 done
 [[ "$(nats stream info DLQ --json | jq -r '.state.messages')" -ge 1 ]] \
-    || fail "the record without an id is not on the DLQ stream"
+    || fail "the message without a Fusion-Record-Id is not on the DLQ stream"
 echo "DLQ stream messages: $(nats stream info DLQ --json | jq -r '.state.messages')"
 
 step "5. NATS exporter: JetStream consumer pending, redelivered, ack floor"
@@ -237,7 +237,7 @@ step "8. logs in Loki, traces in Tempo, linked by trace id"
 wait_for 60 "loki" curl -sf "$LOKI/ready"
 wait_for 60 "tempo" curl -sf "$TEMPO/ready"
 NAK='{service_name="fusion-pipeline"} | event="nak" | reason="missing_id" | node="source"'
-wait_for 60 "the nak line of the record without an id" loki_has "$NAK"
+wait_for 60 "the nak line of the message without a Fusion-Record-Id" loki_has "$NAK"
 echo "present: $NAK"
 ERROR='{service_name="fusion-pipeline"} | event="stage_error" | record_id="1000001" | node="out" | reason="sink_error" | tenant="acme"'
 wait_for 60 "the stage_error line of the record whose sink failed" loki_has "$ERROR"
