@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use fusion_core::stage::DropReason;
 use fusion_harness::expect::{Expectation, expectation, sample_keeps};
 use fusion_harness::loghub::{self, AUDIT, Line, MAIN};
-use fusion_harness::verdict::{DeadLetter, Written, judge};
+use fusion_harness::verdict::{DeadLetter, Written, judge, judge_so_far};
 use serde_json::{Map, Value, json};
 
 fn attrs(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -549,7 +549,7 @@ fn a_record_without_content_carries_no_length() {
 #[test]
 fn a_group_repeated_on_every_one_of_its_subjects_is_reported() {
     // A kill between the two sinks of a Linux record: after the redelivery both subjects
-    // hold two copies of it. Reported as evidence of a mid-fan-out kill, never gated.
+    // hold two copies of it. Reported, never gated.
     let e = linux(1);
     let twice = [
         written(&e, MAIN),
@@ -576,4 +576,32 @@ fn a_group_repeated_on_every_one_of_its_subjects_is_reported() {
         report.repeated_on_every_subject, 0,
         "a group with one subject has no fan-out to repeat"
     );
+}
+
+#[test]
+fn while_the_run_goes_on_a_message_whose_expectation_is_not_read_yet_waits() {
+    // The producer writes an expectation after its PubAck, so the pipeline may write the
+    // record before the verifier has read what to expect of it.
+    let expectations = [apache(1, 1, None)];
+    let later = apache(2, 2, None);
+    let sent = [written(&expectations[0], MAIN), written(&later, MAIN)];
+    let dead = [DeadLetter {
+        record_id: Some("2".into()),
+    }];
+    let report = judge_so_far(&expectations, &sent, &dead);
+    assert!(report.passed(), "{report}");
+    assert_eq!(
+        (report.received, report.unexpected, report.dead_lettered),
+        (1, 0, 0)
+    );
+
+    // A message no expectation can ever name is unexpected at once.
+    let mut stray = written(&expectations[0], MAIN);
+    stray.record_id = Some("not a number".into());
+    let report = judge_so_far(&expectations, &[stray], &[]);
+    assert_eq!(report.unexpected, 1);
+
+    // The final judgement holds back nothing.
+    let report = judge(&expectations, &sent, &dead);
+    assert_eq!((report.unexpected, report.dead_lettered), (2, 0));
 }

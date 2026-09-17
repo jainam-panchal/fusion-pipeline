@@ -10,7 +10,8 @@
 //! `PROCESSED` and `DLQ` before the producer starts, so what is there is this run's.
 //!
 //! Every [`TICK`] it judges what it has read so far; while records are in flight they count
-//! as missing, so the numbers converge as the pipeline catches up. The run is over once the
+//! as missing, and a message whose expectation the producer has not written yet waits for the
+//! next judgement, so the numbers converge as the pipeline catches up. The run is over once the
 //! producer has written its done marker, consumer `LOGS/pipeline` has shown nothing pending
 //! and nothing awaiting an ack on three polls in a row, a second apart, and each stream has
 //! been read to the end it had then (a sink's `PubAck` and a dead letter both come before the
@@ -43,7 +44,7 @@ use async_nats::jetstream::{self, Context};
 use fusion_harness::cli;
 use fusion_harness::expect::Expectation;
 use fusion_harness::follow::{self, LineBuffer, ProducerOutcome, StreamEnd};
-use fusion_harness::verdict::{DeadLetter, Report, Written, judge};
+use fusion_harness::verdict::{DeadLetter, Report, Written, judge, judge_so_far};
 use fusion_nats::headers::{RECORD_ID, TENANT};
 use futures::StreamExt;
 use opentelemetry::KeyValue;
@@ -212,7 +213,7 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
             tail.read()?;
             let now = Instant::now();
             if now >= next_tick {
-                let report = judge(&tail.expectations, &written, &dead);
+                let report = judge_so_far(&tail.expectations, &written, &dead);
                 eprintln!(
                     "loghub-verifier: {:>4}s published {} received {} missing {} unexpected {}",
                     start.elapsed().as_secs(),

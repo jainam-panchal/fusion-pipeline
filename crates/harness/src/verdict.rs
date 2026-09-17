@@ -27,10 +27,11 @@
 //! `on_error: pass`, so a script error shows here as a `lua` mismatch.
 //!
 //! A group with more than one subject that holds an extra copy on every one of them is
-//! `repeated_on_every_subject`: the sign of a record redelivered after all its sinks wrote
-//! it, which is what a kill between two sinks of one fan-out looks like. Reported, not gated.
+//! `repeated_on_every_subject`: what a record redelivered after a kill between the sinks of its
+//! fan-out leaves, and also what a `dedupe` race that lets both copies through leaves, so it
+//! shows a kill landed mid-fan-out only beside a run without chaos. Reported, not gated.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 use serde_json::{Map, Value};
@@ -384,6 +385,31 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
         }
     }
     report
+}
+
+/// The judgement of a run still going on: as [`judge`], except that a message or dead letter
+/// whose record id no expectation names yet is left out rather than unexpected, since the
+/// producer writes an expectation only after its `PubAck` and the pipeline may write the
+/// record first. A message without a readable record id is unexpected at once.
+#[must_use]
+pub fn judge_so_far(
+    expectations: &[Expectation],
+    written: &[Written],
+    dead: &[DeadLetter],
+) -> Report {
+    let ids: HashSet<u64> = expectations.iter().map(|e| e.id).collect();
+    let known = |record_id: Option<&str>| parse_id(record_id).is_none_or(|id| ids.contains(&id));
+    let written: Vec<Written> = written
+        .iter()
+        .filter(|w| known(w.record_id.as_deref()))
+        .cloned()
+        .collect();
+    let dead: Vec<DeadLetter> = dead
+        .iter()
+        .filter(|d| known(d.record_id.as_deref()))
+        .cloned()
+        .collect();
+    judge(expectations, &written, &dead)
 }
 
 /// Whether `attributes` hold exactly the CSV's value, or nothing, for each of the set's
