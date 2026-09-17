@@ -228,8 +228,8 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
         let mut next_tick = start;
         let mut phase = Phase::Producing;
         loop {
-            while let Ok(arrived) = rx.try_recv() {
-                match arrived {
+            while let Ok(item) = rx.try_recv() {
+                match item {
                     StreamItem::Written(sequence, w) => {
                         seen.sinks = seen.sinks.max(Some(sequence));
                         written_so_far.push(w);

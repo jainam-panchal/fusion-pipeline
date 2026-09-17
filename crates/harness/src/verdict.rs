@@ -383,9 +383,9 @@ fn judge_where(
         let Some(first) = e.dedupe_subject() else {
             continue;
         };
-        let arrived = reached.get(&(*group, first)).copied().unwrap_or(0).max(1);
+        let reached_first = reached.get(&(*group, first)).copied().unwrap_or(0).max(1);
         report.duplicates_planned += planned;
-        report.duplicates_dropped += size.saturating_sub(arrived).min(*planned);
+        report.duplicates_dropped += size.saturating_sub(reached_first).min(*planned);
     }
 
     for letter in dead.iter().filter(|d| counted(d.record_id.as_deref())) {
