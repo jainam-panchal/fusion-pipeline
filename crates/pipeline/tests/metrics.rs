@@ -156,7 +156,8 @@ fn a_record_whose_source_names_no_tenant_is_counted_under_tenant_unknown() {
 
         // An arrival that names no tenant; the test producer still sends the record's id.
         assert_eq!(
-            h.send(tenantless_record(1), Arrival::default()).wait(WAIT),
+            h.push_as_producer(tenantless_record(1), Arrival::default())
+                .wait(WAIT),
             Some(AckOutcome::Ack)
         );
 

@@ -17,7 +17,7 @@ use fusion_core::memory::{AckOutcome, MemorySinks, MemorySource, MemoryStateStor
 use fusion_core::meta::Arrival;
 use fusion_core::metrics::Metrics;
 use fusion_core::pipeline::Pipeline;
-use fusion_core::record::{Record, RecordId};
+use fusion_core::record::Record;
 use fusion_core::registry::Registry;
 use fusion_core::signals::Signals;
 use fusion_core::trace::{RecordTrace, TraceSampling, TraceSink};
@@ -61,13 +61,7 @@ fn measure(records: u64, signals: impl Into<Signals>) -> f64 {
     )
     .expect("engine starts");
     let batch: Vec<(Record, Arrival)> = (0..records)
-        .map(|id| {
-            let arrival = Arrival {
-                record_id: Some(RecordId(id)),
-                ..Arrival::default()
-            };
-            (record(id), arrival)
-        })
+        .map(|id| (record(id), common::with_id(id)))
         .collect();
     let started = Instant::now();
     let probes: Vec<_> = batch

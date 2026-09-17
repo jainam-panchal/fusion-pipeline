@@ -187,7 +187,7 @@ fn a_passing_redelivery_of_record_zero_under_two_tenants_is_two_valid_traces() {
     let h = start(TO_SINK, 1);
 
     for tenant in ["acme", "beta"] {
-        let probe = h.send(
+        let probe = h.push_as_producer(
             body_record(0, "x"),
             fusion_core::meta::Arrival {
                 delivery_count: 2,
@@ -312,7 +312,7 @@ nodes:
     );
     h.sinks.fail_writes_to("bad");
     let sized = |record: Record, kind: Kind, bytes: u64| {
-        h.send(
+        h.push_as_producer(
             record,
             fusion_core::meta::Arrival {
                 kind: Some(kind),

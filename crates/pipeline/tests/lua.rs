@@ -588,7 +588,7 @@ fn a_script_stamping_the_clock_into_a_time_field_does_not_move_a_downstream_wind
                 delivery_count,
                 ..Arrival::default()
             };
-            let probe = h.send(r, arrival);
+            let probe = h.push_as_producer(r, arrival);
             assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
         }
 

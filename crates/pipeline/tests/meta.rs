@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{WAIT, registry, start_with};
+use common::{WAIT, registry, start_with, with_id};
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::io::FailureKind;
 use fusion_core::memory::{AckOutcome, MemorySinks};
@@ -116,14 +116,6 @@ fn reveal(yaml: &str, record: Record, arrival: Arrival) -> (Vec<Record>, common:
 
 fn record(json: &Value) -> Record {
     Record::from_json(&json.to_string()).expect("record parses")
-}
-
-/// What a transport says about a first delivery of record `id`, and nothing else.
-fn with_id(id: u64) -> Arrival {
-    Arrival {
-        record_id: Some(RecordId(id)),
-        ..Arrival::default()
-    }
 }
 
 fn meta_of(record: &Record, key: &str) -> Value {

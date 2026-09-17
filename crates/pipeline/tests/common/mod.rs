@@ -16,7 +16,7 @@ use fusion_core::memory::{AckProbe, MemoryInput, MemorySinks, MemorySource, Memo
 use fusion_core::meta::{Arrival, IngestionTime};
 use fusion_core::metrics::{CounterMetric, HistogramMetric, InMemoryRecorder, Metrics};
 use fusion_core::pipeline::Pipeline;
-use fusion_core::record::{Kind, Record};
+use fusion_core::record::{Kind, Record, RecordId};
 use fusion_core::registry::Registry;
 use fusion_core::signals::Signals;
 use fusion_core::stage::{Context, Stage, StageOutput};
@@ -195,12 +195,20 @@ pub const DEDUPE_DROP: [(&str, &str); 3] = [
     ("reason", "dedupe"),
 ];
 
+/// What a transport says about a first delivery of record `id`, and nothing else.
+pub fn with_id(id: u64) -> Arrival {
+    Arrival {
+        record_id: Some(RecordId(id)),
+        ..Arrival::default()
+    }
+}
+
 impl Harness {
     /// Push `record` with `arrival`, as the test producer sends every message: with the
     /// record's `id` in `Fusion-Record-Id` too. That is the producer's choice, not the
     /// pipeline's: a test about where the record id comes from pushes through
     /// `source.push_arrival` with the two set apart.
-    pub fn send(&self, record: Record, arrival: Arrival) -> AckProbe {
+    pub fn push_as_producer(&self, record: Record, arrival: Arrival) -> AckProbe {
         let arrival = Arrival {
             record_id: record.id,
             ..arrival
@@ -215,13 +223,13 @@ impl Harness {
 
     /// Push `record` as a first delivery for `tenant`, with no transport time.
     pub fn push_as(&self, tenant: &str, record: Record) -> AckProbe {
-        self.send(record, arrival_as(tenant))
+        self.push_as_producer(record, arrival_as(tenant))
     }
 
     /// Push `record` as a first delivery for tenant [`TENANT`] that entered the transport at
     /// `ingestion_unix_nanos`, as the JetStream publish time says.
     pub fn push_at(&self, record: Record, ingestion_unix_nanos: u64) -> AckProbe {
-        self.send(
+        self.push_as_producer(
             record,
             Arrival {
                 ingestion_time: Some(IngestionTime::Reported(ingestion_unix_nanos)),
@@ -264,7 +272,7 @@ impl Harness {
     /// Push `record` as a first delivery for tenant [`TENANT`] that the transport says is of
     /// `kind`.
     pub fn push_kind(&self, record: Record, kind: Kind) -> AckProbe {
-        self.send(
+        self.push_as_producer(
             record,
             Arrival {
                 kind: Some(kind),
@@ -275,7 +283,7 @@ impl Harness {
 
     /// Push `record` for tenant [`TENANT`] as its `delivery_count`-th delivery.
     pub fn push_delivery(&self, record: Record, delivery_count: u64) -> AckProbe {
-        self.send(
+        self.push_as_producer(
             record,
             Arrival {
                 delivery_count,
