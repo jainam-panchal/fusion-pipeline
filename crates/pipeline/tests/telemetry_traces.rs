@@ -12,7 +12,7 @@ use fusion_core::events::EventKind;
 use fusion_core::io::FailureKind;
 use fusion_core::memory::AckOutcome;
 use fusion_core::metrics::CounterMetric;
-use fusion_core::record::{Record, RecordId};
+use fusion_core::record::{Kind, Record, RecordId};
 use fusion_core::stage::DropReason;
 use fusion_core::trace::{NodeSpan, Settlement, SpanResult, TraceKey, TraceSampling};
 
@@ -187,7 +187,7 @@ fn a_passing_redelivery_of_record_zero_under_two_tenants_is_two_valid_traces() {
     let h = start(TO_SINK, 1);
 
     for tenant in ["acme", "beta"] {
-        let probe = h.source.push_arrival(
+        let probe = h.push_as_producer(
             body_record(0, "x"),
             fusion_core::meta::Arrival {
                 delivery_count: 2,
@@ -311,21 +311,19 @@ nodes:
         1,
     );
     h.sinks.fail_writes_to("bad");
-    let sized = |record: Record, bytes: u64| {
-        h.source.push_arrival(
+    let push_kind_sized = |record: Record, kind: Kind, bytes: u64| {
+        h.push_as_producer(
             record,
             fusion_core::meta::Arrival {
+                kind: fusion_core::meta::ArrivalKind::Named(kind),
                 bytes: Some(bytes),
                 ..common::arrival_as(TENANT)
             },
         )
     };
 
-    let walked = sized(body_record(1, "x"), 100);
-    let metric = sized(
-        Record::from_json(r#"{"id": 2, "kind": "metric"}"#).expect("record parses"),
-        30,
-    );
+    let walked = push_kind_sized(body_record(1, "x"), Kind::Log, 100);
+    let metric = push_kind_sized(body_record(2, "x"), Kind::Metric, 30);
     let no_size = h.push(body_record(3, "x"));
     for probe in [walked, metric, no_size] {
         assert!(probe.wait(WAIT).is_some());

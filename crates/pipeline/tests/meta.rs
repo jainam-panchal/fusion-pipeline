@@ -4,12 +4,13 @@
 
 mod common;
 
-use common::{WAIT, registry, start_with};
+use common::{WAIT, registry, start_with, with_id};
 use fusion_core::config::{ConfigError, NodeConfig};
+use fusion_core::io::FailureKind;
 use fusion_core::memory::{AckOutcome, MemorySinks};
-use fusion_core::meta::{Arrival, IngestionTime, unix_nanos_now};
+use fusion_core::meta::{Arrival, ArrivalKind, IngestionTime, unix_nanos_now};
 use fusion_core::metrics::{CounterMetric, HistogramMetric};
-use fusion_core::record::Record;
+use fusion_core::record::{Kind, Record, RecordId};
 use fusion_core::stage::{Context, Stage, StageOutput};
 use serde_json::{Value, json};
 
@@ -76,6 +77,31 @@ nodes:
     from: reveal
 "#;
 
+const REWRITE_ID_THEN_SPLIT_THEN_REVEAL: &str = r#"
+name: ingest
+nodes:
+  - id: rewrite
+    type: edit
+    ops:
+      - set: { field: id, value: 99 }
+  - id: split
+    type: lua
+    from: rewrite
+    source: |
+      function process(record)
+        local copy = {}
+        for k, v in pairs(record) do copy[k] = v end
+        copy.id = 100
+        return { record, copy }
+      end
+  - id: reveal
+    type: reveal
+    from: split
+  - id: out
+    type: sink.memory
+    from: reveal
+"#;
+
 /// Start `yaml` with the `reveal` stage registered, push `record` with `arrival`, wait for
 /// the ack and return what `out` received.
 fn reveal(yaml: &str, record: Record, arrival: Arrival) -> (Vec<Record>, common::Harness) {
@@ -90,6 +116,19 @@ fn reveal(yaml: &str, record: Record, arrival: Arrival) -> (Vec<Record>, common:
 
 fn record(json: &Value) -> Record {
     Record::from_json(&json.to_string()).expect("record parses")
+}
+
+/// The records the engine dropped at intake for `reason`, for a tenant the transport did not
+/// name.
+fn source_drops(h: &common::Harness, reason: &str) -> u64 {
+    h.counter(
+        CounterMetric::RecordsDropped,
+        &[
+            ("tenant", "unknown"),
+            ("stage", "source"),
+            ("reason", reason),
+        ],
+    )
 }
 
 fn meta_of(record: &Record, key: &str) -> Value {
@@ -109,7 +148,7 @@ fn the_tenant_and_the_time_are_the_transports_and_the_records_are_never_read() {
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
             delivery_count: 3,
-            bytes: None,
+            ..with_id(7)
         },
     );
     assert_eq!(meta_of(&out[0], "record_id"), json!(7));
@@ -144,6 +183,126 @@ fn the_tenant_and_the_time_are_the_transports_and_the_records_are_never_read() {
 }
 
 #[test]
+fn the_record_id_and_the_kind_are_the_transports_and_the_payloads_are_never_read() {
+    let sent = record(&json!({"id": 5, "kind": "metric", "body": "disk full"}));
+    let (out, h) = reveal(REVEAL, sent, with_id(9));
+    assert_eq!(meta_of(&out[0], "record_id"), json!(9));
+    assert_eq!(out[0].id, Some(RecordId(5)), "the payload keeps its id");
+    assert_eq!(
+        out[0].kind,
+        Kind::Metric,
+        "and its kind, walked all the same"
+    );
+    assert_eq!(h.sinks.outgoing("out")[0].meta.record_id, RecordId(9));
+    h.finish();
+}
+
+#[test]
+fn a_message_the_transport_says_is_not_a_log_is_dropped_whatever_the_payload_says() {
+    let sinks = MemorySinks::new();
+    let h = start_with(PASS_THROUGH, 1, sinks.clone(), registry(&sinks));
+    for kind in [Kind::Metric, Kind::Span] {
+        let probe = h.source.push_arrival(
+            record(&json!({"id": 7, "kind": "log"})),
+            Arrival {
+                kind: ArrivalKind::Named(kind),
+                ..with_id(7)
+            },
+        );
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "{kind}");
+    }
+    assert!(h.sinks.records("out").is_empty());
+    assert_eq!(source_drops(&h, "invalid_record"), 2);
+    h.finish();
+}
+
+#[test]
+fn a_message_without_a_record_id_is_nakked_whatever_the_payload_carries() {
+    let sinks = MemorySinks::new();
+    let h = start_with(PASS_THROUGH, 1, sinks.clone(), registry(&sinks));
+    let probe = h
+        .source
+        .push_arrival(record(&json!({"id": 7, "body": "x"})), Arrival::default());
+    assert!(matches!(probe.wait(WAIT), Some(AckOutcome::Nak(_))));
+    let failure = probe.failure().expect("a nak carries its failure");
+    assert_eq!(failure.kind, FailureKind::MissingId);
+    assert_eq!(failure.record_id, None);
+    assert!(h.sinks.records("out").is_empty());
+    h.finish();
+}
+
+#[test]
+fn a_message_that_is_not_a_log_is_dropped_even_without_a_record_id() {
+    let sinks = MemorySinks::new();
+    let h = start_with(PASS_THROUGH, 1, sinks.clone(), registry(&sinks));
+    let probe = h.source.push_arrival(
+        record(&json!({"body": "x"})),
+        Arrival {
+            kind: ArrivalKind::Named(Kind::Span),
+            ..Arrival::default()
+        },
+    );
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(source_drops(&h, "invalid_record"), 1);
+    assert_eq!(source_drops(&h, "missing_id"), 0);
+    h.finish();
+}
+
+#[test]
+fn a_message_whose_kind_the_source_cannot_read_is_dropped_not_walked_as_a_log() {
+    let sinks = MemorySinks::new();
+    let h = start_with(PASS_THROUGH, 1, sinks.clone(), registry(&sinks));
+    for arrival in [
+        Arrival {
+            kind: ArrivalKind::Unreadable,
+            ..with_id(7)
+        },
+        Arrival {
+            kind: ArrivalKind::Unreadable,
+            ..Arrival::default()
+        },
+    ] {
+        let probe = h
+            .source
+            .push_arrival(record(&json!({"id": 7, "kind": "log"})), arrival.clone());
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "{arrival:?}");
+    }
+    assert!(h.sinks.records("out").is_empty());
+    assert_eq!(source_drops(&h, "invalid_record"), 2);
+    h.finish();
+}
+
+#[test]
+fn a_stage_rewriting_the_payload_id_moves_no_decision_and_nothing_else_in_the_payload() {
+    let sent = record(&json!({"id": 7, "body": "disk full", "severity_text": "ERROR"}));
+    let (out, h) = reveal(REWRITE_ID_THEN_SPLIT_THEN_REVEAL, sent.clone(), with_id(7));
+    assert_eq!(out.len(), 2);
+    let ids: Vec<_> = out.iter().map(|r| r.id).collect();
+    assert_eq!(
+        ids,
+        [Some(RecordId(99)), Some(RecordId(100))],
+        "the payload ids are what the stages wrote"
+    );
+    for r in &out {
+        assert_eq!(meta_of(r, "record_id"), json!(7), "every later stage saw 7");
+        let mut untouched = r.clone();
+        untouched.id = sent.id;
+        untouched
+            .attributes
+            .retain(|key, _| !key.starts_with("meta."));
+        assert_eq!(untouched, sent, "nothing but the id changed");
+    }
+    for written in h.sinks.outgoing("out") {
+        assert_eq!(
+            written.meta.record_id,
+            RecordId(7),
+            "the sink's Meta, so its header"
+        );
+    }
+    h.finish();
+}
+
+#[test]
 fn a_record_without_a_tenant_or_a_time_leaves_without_them() {
     let (out, h) = reveal(
         REVEAL,
@@ -151,8 +310,7 @@ fn a_record_without_a_tenant_or_a_time_leaves_without_them() {
         Arrival {
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
-            delivery_count: 1,
-            bytes: None,
+            ..with_id(7)
         },
     );
     assert_eq!(meta_of(&out[0], "tenant"), json!("acme"));
@@ -173,7 +331,7 @@ fn the_sink_receives_the_meta_beside_the_record_it_never_entered() {
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
             delivery_count: 2,
-            bytes: None,
+            ..with_id(7)
         },
     );
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
@@ -201,7 +359,7 @@ fn a_clock_time_an_upstream_pipeline_passed_on_stays_a_clock_time() {
         record(&json!({"id": 7, "observed_time_unix_nano": 5_000_000_000_u64})),
         Arrival {
             ingestion_time: Some(IngestionTime::Clock(9_000_000_000)),
-            ..Arrival::default()
+            ..with_id(7)
         },
     );
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
@@ -225,9 +383,8 @@ fn a_redelivery_is_counted_under_the_tenant_every_other_metric_of_the_record_car
         record(&json!({"id": 7, "resource": {"tenant.id": "beta"}})),
         Arrival {
             tenant: Some("acme".to_owned()),
-            ingestion_time: None,
             delivery_count: 2,
-            bytes: None,
+            ..with_id(7)
         },
     );
     assert_eq!(
@@ -243,7 +400,7 @@ fn a_redelivery_is_counted_under_the_tenant_every_other_metric_of_the_record_car
 
 #[test]
 fn a_first_delivery_is_not_a_redelivery() {
-    let (_, h) = reveal(REVEAL, record(&json!({"id": 7})), Arrival::default());
+    let (_, h) = reveal(REVEAL, record(&json!({"id": 7})), with_id(7));
     assert_eq!(
         h.counter(CounterMetric::SourceRedeliveries, &[("tenant", "unknown")]),
         0
@@ -262,7 +419,7 @@ fn a_source_that_names_nothing_gives_unknown_and_the_clock_whatever_the_record_c
             "observed_time_unix_nano": 5_000_000_000_u64,
             "resource": {"tenant.id": "acme"}
         })),
-        Arrival::default(),
+        with_id(7),
     );
     let after = unix_nanos_now();
     assert_eq!(meta_of(&out[0], "tenant"), json!("unknown"));
@@ -285,7 +442,7 @@ fn a_source_that_names_nothing_gives_unknown_and_the_clock_whatever_the_record_c
 #[test]
 fn a_record_with_no_tenant_and_no_time_gets_unknown_and_the_worker_clock() {
     let before = unix_nanos_now();
-    let (out, h) = reveal(REVEAL, record(&json!({"id": 7})), Arrival::default());
+    let (out, h) = reveal(REVEAL, record(&json!({"id": 7})), with_id(7));
     let after = unix_nanos_now();
     assert_eq!(meta_of(&out[0], "tenant"), json!("unknown"));
     let ingested = meta_of(&out[0], "ingestion_time")
@@ -307,7 +464,7 @@ fn every_record_a_split_emits_continues_under_its_parents_meta() {
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(5_000_000_000)),
             delivery_count: 2,
-            bytes: None,
+            ..with_id(7)
         },
     );
     assert_eq!(out.len(), 2);
@@ -338,12 +495,13 @@ fn push_through(yaml: &str, record: Record, arrival: Arrival) -> common::Harness
     h
 }
 
-fn acme_arrival() -> Arrival {
+/// A second delivery of record `id` for tenant `acme`, ingested at 9 s.
+fn acme_arrival(id: u64) -> Arrival {
     Arrival {
         tenant: Some(common::TENANT.to_owned()),
         ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
         delivery_count: 2,
-        bytes: None,
+        ..with_id(id)
     }
 }
 
@@ -367,7 +525,7 @@ nodes:
     let h = push_through(
         yaml,
         record(&json!({"id": 7, "resource": {"tenant.id": "beta"}})),
-        acme_arrival(),
+        acme_arrival(7),
     );
     assert_eq!(h.sinks.records("acme_out").len(), 1);
     assert!(h.sinks.records("other_out").is_empty());
@@ -389,7 +547,11 @@ nodes:
   - id: out
     type: sink.memory
 "#;
-    let h = push_through(yaml, record(&json!({"id": 7, "body": "x"})), acme_arrival());
+    let h = push_through(
+        yaml,
+        record(&json!({"id": 7, "body": "x"})),
+        acme_arrival(7),
+    );
     let out = h.sinks.records("out");
     assert_eq!(out[0].resource.get("tenant.id"), Some(&json!("acme")));
     assert_eq!(out[0].observed_time_unix_nano, Some(9_000_000_000));
@@ -416,7 +578,7 @@ nodes:
     for (id, payload_tenant) in [(1, "beta"), (2, "gamma")] {
         let probe = h.source.push_arrival(
             record(&json!({"id": id, "resource": {"tenant.id": payload_tenant}})),
-            acme_arrival(),
+            acme_arrival(id),
         );
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     }
@@ -450,7 +612,7 @@ nodes:
     let h = push_through(
         yaml,
         record(&json!({"id": 7, "resource": {"tenant.id": "beta"}})),
-        acme_arrival(),
+        acme_arrival(7),
     );
     let out = h.sinks.records("out");
     assert_eq!(
@@ -481,7 +643,7 @@ nodes:
   - id: out
     type: sink.memory
 "#;
-    let h = push_through(yaml, record(&json!({"id": 7})), acme_arrival());
+    let h = push_through(yaml, record(&json!({"id": 7})), acme_arrival(7));
     assert_eq!(
         h.counter(
             CounterMetric::LuaErrors,
@@ -517,7 +679,7 @@ nodes:
     for id in [1, 2] {
         let probe = h
             .source
-            .push_arrival(record(&json!({"id": id})), acme_arrival());
+            .push_arrival(record(&json!({"id": id})), acme_arrival(id));
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     }
     for r in h.sinks.records("out") {
@@ -540,7 +702,7 @@ fn a_transport_tenant_that_is_empty_or_holds_a_control_character_is_unknown() {
             record(&json!({"id": 7, "resource": {"tenant.id": "acme"}})),
             Arrival {
                 tenant: Some(bad.to_owned()),
-                ..Arrival::default()
+                ..with_id(7)
             },
         );
         assert_eq!(

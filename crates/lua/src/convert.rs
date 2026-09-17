@@ -96,8 +96,8 @@ pub(crate) fn to_table(lua: &mlua::Lua, record: &Record, list: &ListMark) -> mlu
     Ok(t)
 }
 
-/// `meta[field]` as a script reads it: the record id as `id` is in the record table, the
-/// tenant as a string, the ingestion time and delivery count as integers.
+/// `meta[field]` as a script reads it: the record id in the form the record table gives an
+/// `id`, the tenant as a string, the ingestion time and delivery count as integers.
 pub(crate) fn meta_value(lua: &mlua::Lua, meta: &Meta, field: MetaField) -> mlua::Result<LuaValue> {
     // The id crosses as `to_table` hands it over, text above 2^63; every other value as
     // `Meta::get` gives it.

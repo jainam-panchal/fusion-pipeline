@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use fusion_core::engine::Engine;
 use fusion_core::memory::{AckOutcome, MemorySinks, MemorySource, MemoryStateStore};
+use fusion_core::meta::Arrival;
 use fusion_core::metrics::Metrics;
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
@@ -59,9 +60,14 @@ fn measure(records: u64, signals: impl Into<Signals>) -> f64 {
         Arc::new(MemoryStateStore::new()),
     )
     .expect("engine starts");
-    let batch: Vec<Record> = (0..records).map(record).collect();
+    let batch: Vec<(Record, Arrival)> = (0..records)
+        .map(|id| (record(id), common::with_id(id)))
+        .collect();
     let started = Instant::now();
-    let probes: Vec<_> = batch.into_iter().map(|r| input.push(r)).collect();
+    let probes: Vec<_> = batch
+        .into_iter()
+        .map(|(r, arrival)| input.push_arrival(r, arrival))
+        .collect();
     for probe in probes {
         assert_eq!(probe.wait(Duration::from_secs(60)), Some(AckOutcome::Ack));
     }

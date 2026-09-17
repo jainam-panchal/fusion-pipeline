@@ -5,8 +5,9 @@
 mod common;
 
 use fusion_core::memory::AckOutcome;
+use fusion_core::meta::Arrival;
 use fusion_core::metrics::CounterMetric;
-use fusion_core::record::Record;
+use fusion_core::record::{Kind, Record};
 
 use common::{WAIT, for_each_worker_count, start};
 
@@ -153,8 +154,10 @@ fn a_record_whose_source_names_no_tenant_is_counted_under_tenant_unknown() {
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
 
+        // An arrival that names no tenant; the test producer still sends the record's id.
         assert_eq!(
-            h.source.push(tenantless_record(1)).wait(WAIT),
+            h.push_as_producer(tenantless_record(1), Arrival::default())
+                .wait(WAIT),
             Some(AckOutcome::Ack)
         );
 
@@ -205,9 +208,8 @@ fn a_non_log_record_is_dropped_at_the_source_with_reason_invalid_record_and_acks
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
 
-        let mut metric = record(1, "ERROR");
-        metric.kind = fusion_core::record::Kind::Metric;
-        assert_eq!(h.push(metric).wait(WAIT), Some(AckOutcome::Ack));
+        let metric = h.push_kind(record(1, "ERROR"), Kind::Metric);
+        assert_eq!(metric.wait(WAIT), Some(AckOutcome::Ack));
 
         assert_eq!(
             h.counter(
@@ -319,9 +321,11 @@ fn source_counts_every_record_in_and_only_those_entering_the_graph_out() {
 
         let mut no_id = record(1, "ERROR");
         no_id.id = None;
-        let mut metric = record(2, "ERROR");
-        metric.kind = fusion_core::record::Kind::Metric;
-        let probes = [h.push(record(3, "ERROR")), h.push(no_id), h.push(metric)];
+        let probes = [
+            h.push(record(3, "ERROR")),
+            h.push(no_id),
+            h.push_kind(record(2, "ERROR"), Kind::Metric),
+        ];
         for probe in &probes {
             assert!(probe.wait(WAIT).is_some(), "workers={workers}");
         }

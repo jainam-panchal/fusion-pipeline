@@ -1,21 +1,21 @@
 //! The pipeline's view of a record, beside it rather than inside it (ADR 0005).
 //!
 //! A source says what its transport knows about a message in an [`Arrival`]; the engine
-//! resolves that and the record, once, at intake, into a [`Meta`] with [`Meta::resolve`]
-//! and hands it to every stage read-only. The tenant and the ingestion time come from the
-//! arrival and nowhere else: the transport's tenant is authenticated and its time is the
-//! pipeline's, while the record's fields are the producer's data. The only payload fields
-//! the pipeline reads for itself are `id` and `kind`, once, to decide whether the record is
-//! walked at all. Every decision after it (metric labels, state keys, windows) reads
-//! `Meta`, so a stage rewriting any record field changes the data the sink writes and
-//! nothing else. `Meta` is never written into the record: a sink carries it beside the
-//! record, as the NATS sink's pipeline headers do.
+//! resolves that, once, at intake, into a [`Meta`] with [`Meta::resolve`] and hands it to
+//! every stage read-only. Every value of `Meta` comes from the arrival and nowhere else
+//! (ADR 0005, ADR 0007): the transport's tenant is authenticated, its time is the
+//! pipeline's, and its record id and kind are what the producer said about the message,
+//! while the record's fields are the producer's data. The pipeline reads no payload field
+//! for itself. Every decision (whether the record is walked, metric labels, state keys,
+//! windows) reads `Meta`, so a stage rewriting any record field changes the data the sink
+//! writes and nothing else. `Meta` is never written into the record: a sink carries it
+//! beside the record, as the NATS sink's pipeline headers do.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::closed_set::closed_set;
-use crate::record::{Kind, Record, RecordId};
+use crate::record::{Kind, RecordId};
 
 /// The tenant of a record that names none and arrived on a transport that names none.
 pub const UNKNOWN_TENANT: &str = "unknown";
@@ -30,10 +30,15 @@ pub fn is_valid_tenant(tenant: &str) -> bool {
 }
 
 /// What a source's transport says about a message, apart from the record it carries.
-/// Everything but the delivery count is optional: a tenant the transport does not name is
+/// Everything but the delivery count is optional: a message without a record id is not
+/// walked, a kind the transport does not name is `log`, a tenant it does not name is
 /// `unknown`, and a time it does not give is the worker clock's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arrival {
+    /// The record id the transport gives (the NATS `Fusion-Record-Id` header).
+    pub record_id: Option<RecordId>,
+    /// The signal kind the transport gives (the NATS `Fusion-Record-Kind` header).
+    pub kind: ArrivalKind,
     /// The tenant the transport names (the NATS subject's, else an upstream pipeline's
     /// `Fusion-Tenant` header).
     pub tenant: Option<String>,
@@ -48,9 +53,35 @@ pub struct Arrival {
     pub bytes: Option<u64>,
 }
 
+impl Arrival {
+    /// Whether the transport says the message is a log: it names no kind, or names `log`.
+    /// A kind it names but the source cannot read is not known to be a log (ADR 0007).
+    #[must_use]
+    pub const fn is_log(&self) -> bool {
+        matches!(
+            self.kind,
+            ArrivalKind::Unnamed | ArrivalKind::Named(Kind::Log)
+        )
+    }
+}
+
+/// The signal kind a transport gives a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrivalKind {
+    /// The transport names no kind: the message is a log.
+    Unnamed,
+    /// The transport names this kind.
+    Named(Kind),
+    /// The transport names a kind the source cannot read (the NATS `Fusion-Record-Kind`
+    /// does not parse, or is given twice). The message is not walked.
+    Unreadable,
+}
+
 impl Default for Arrival {
     fn default() -> Self {
         Self {
+            record_id: None,
+            kind: ArrivalKind::Unnamed,
             tenant: None,
             ingestion_time: None,
             delivery_count: 1,
@@ -63,7 +94,7 @@ impl Default for Arrival {
 /// every record a stage emits from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Meta {
-    /// The record's id, as it arrived.
+    /// The record id the arrival gave.
     pub record_id: RecordId,
     /// The tenant every metric label and state key uses: see [`Meta::tenant_of`].
     pub tenant: Arc<str>,
@@ -164,33 +195,34 @@ pub struct Rejected {
 /// Why the engine does not walk a record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
-    /// The record arrived without an `id`. Its message is nakked.
+    /// The message arrived without a record id. It is nakked.
     MissingId,
-    /// The record is not a log. It is dropped and its message acked.
+    /// The transport does not say the message is a log: it names another kind, or one the
+    /// source cannot read. It is dropped and acked.
     NotLog,
 }
 
 impl Meta {
-    /// The pipeline's view of `record` as it arrived with `arrival`, or why it is not
-    /// walked: a record without an id, or of a kind other than `log`. The tenant and the
-    /// ingestion time are the arrival's; the record's own tenant and time fields are never
-    /// read.
+    /// The pipeline's view of a message that arrived with `arrival`, or why its record is
+    /// not walked: an arrival that is not [`Arrival::is_log`], or no record id. Everything
+    /// comes from the arrival; the record is never read.
     ///
     /// # Errors
     ///
     /// [`Rejected`] with the reason and the tenant to count it under.
-    pub fn resolve(record: &Record, arrival: &Arrival) -> Result<Self, Rejected> {
+    pub fn resolve(arrival: &Arrival) -> Result<Self, Rejected> {
         let tenant = Self::tenant_of(arrival);
         let reject = |reason| Rejected {
             reason,
             tenant: Arc::clone(&tenant),
         };
-        let Some(record_id) = record.id else {
-            return Err(reject(Rejection::MissingId));
-        };
-        if record.kind != Kind::Log {
+        // The kind first: a message that is not a log is dropped whatever else it lacks.
+        if !arrival.is_log() {
             return Err(reject(Rejection::NotLog));
         }
+        let Some(record_id) = arrival.record_id else {
+            return Err(reject(Rejection::MissingId));
+        };
         let ingestion_time = arrival
             .ingestion_time
             .unwrap_or_else(|| IngestionTime::Clock(unix_nanos_now()));

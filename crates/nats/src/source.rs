@@ -13,12 +13,14 @@
 //! Each message is decoded as one JSON record and handed to the engine, untouched, with an
 //! ack handle that acks or naks the JetStream message. What the transport says about the
 //! message goes beside the record as its [`fusion_core::meta::Arrival`], built by
-//! [`crate::headers::arrival`]: the subject's tenant (`{tenant_prefix}.{tenant}.>`), else an
+//! [`crate::headers::arrival`]: the record id and kind the producer's `Fusion-Record-Id` and
+//! `Fusion-Record-Kind` give; the subject's tenant (`{tenant_prefix}.{tenant}.>`), else an
 //! upstream pipeline's `Fusion-Tenant`; an upstream pipeline's `Fusion-Ingestion-Time`, else
 //! the JetStream publish time; and the delivery count. The engine resolves the record's
-//! `Meta` from it alone (ADR 0005). Nothing is read from or written into the record. The
-//! publish time is the server's and does not change on redelivery, so stateful stages that
-//! measure windows in ingestion time see the same value every time the record comes back.
+//! `Meta` from it alone (ADR 0005, ADR 0007). Nothing is read from or written into the
+//! record. Headers and the publish time are stored with the message and do not change on
+//! redelivery, so stateful stages that measure windows in ingestion time, and every decision
+//! keyed on the record id, see the same value every time the record comes back.
 //!
 //! A pipeline header that does not parse is ignored, reported on stderr and counted once on
 //! `source_invalid_headers_total` under the tenant the record's `Meta` gets; the message is
@@ -26,7 +28,7 @@
 //! names a valid tenant, so a header the subject overrides is never counted.
 //!
 //! A payload that is not a record is nak'd like any other failure and reported on stderr; it
-//! runs out `max_deliver` the same way a record without an id does.
+//! runs out `max_deliver` the same way a message without a `Fusion-Record-Id` does.
 //!
 //! Naks carry a delay. When the engine gives none, [`nak_delay`] derives one from the
 //! message's delivery count: 1s on the first failure, doubling to [`MAX_NAK_DELAY`], so a
@@ -61,7 +63,7 @@ use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{self, AckKind, message::Acker};
 use fusion_core::events::{Event, EventKind};
 use fusion_core::io::{AckHandle, Envelope, Failure, FailureKind, Intake, Source, SourceError};
-use fusion_core::meta::{IngestionTime, Meta};
+use fusion_core::meta::{Arrival, Meta};
 use fusion_core::record::Record;
 use fusion_core::signals::Signals;
 use fusion_core::trace::TraceKey;
@@ -155,7 +157,7 @@ impl DeadLetters {
                 .map(|id| TraceKey::new(id, &delivery.tenant).delivery_context(position.delivered)),
             ..Event::of_failure(
                 kind,
-                delivery.tenant.as_str().into(),
+                Arc::clone(&delivery.tenant),
                 failure,
                 position.delivered,
             )
@@ -234,8 +236,7 @@ impl DeadLetters {
             stream_sequence: position.stream_sequence,
             subject: &delivery.message.subject,
             headers: delivery.message.headers.as_ref(),
-            tenant: &delivery.tenant,
-            ingestion_time: delivery.ingestion_time,
+            arrival: &delivery.arrival,
             failure,
         });
         let mut pauses = DEAD_LETTER_RETRIES.iter();
@@ -298,9 +299,11 @@ struct Position {
 struct Delivery {
     /// The message as it arrived: subject, headers and payload.
     message: async_nats::Message,
-    /// The tenant the record's `Meta` gets.
-    tenant: String,
-    ingestion_time: Option<IngestionTime>,
+    /// What the transport said about it, for its dead letter.
+    arrival: Arrival,
+    /// The tenant the record's `Meta` gets: [`Meta::tenant_of`] the arrival, kept so every
+    /// series the source counts for the message reads it without rebuilding it.
+    tenant: Arc<str>,
     /// The subject a settlement is published to.
     reply: Option<Subject>,
     /// `None` when the message info could not be read; the delivery is then never final.
@@ -398,11 +401,18 @@ impl NatsSource {
             // tenant there is.
             let tenant = Meta::tenant_of(&arrival);
             self.report_invalid_headers(&message.subject, &invalid_headers, &tenant);
-            let decoded = serde_json::from_slice::<Record>(&message.payload);
+            // A message that is not a log is rejected on its arrival alone, so its payload is
+            // not decoded: the engine drops and acks it whatever the payload holds, and
+            // never reads the empty record it is handed.
+            let decoded = if arrival.is_log() {
+                serde_json::from_slice::<Record>(&message.payload)
+            } else {
+                Ok(Record::default())
+            };
             let delivery = Delivery {
                 message,
-                tenant: tenant.to_string(),
-                ingestion_time: arrival.ingestion_time,
+                arrival: arrival.clone(),
+                tenant: Arc::clone(&tenant),
                 reply,
                 position,
             };
@@ -445,10 +455,16 @@ impl NatsSource {
         }
     }
 
-    /// Log and count every pipeline header the source ignored, under `tenant`.
+    /// Log and count every pipeline header that did not parse, under `tenant`: ignored, or,
+    /// for the kind, the reason the message is not walked.
     fn report_invalid_headers(&self, subject: &str, invalid: &[InvalidHeader], tenant: &str) {
         for problem in invalid {
-            eprintln!("nats source: ignored a pipeline header on `{subject}`: {problem}");
+            let outcome = if problem.refuses_message() {
+                "not walked: an unreadable"
+            } else {
+                "ignored a"
+            };
+            eprintln!("nats source: {outcome} pipeline header on `{subject}`: {problem}");
             self.signals.metrics().source_invalid_header(tenant);
         }
     }

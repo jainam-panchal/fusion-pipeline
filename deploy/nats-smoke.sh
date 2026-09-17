@@ -3,9 +3,9 @@
 #
 # Brings up deploy/compose.yaml, runs `pipelined --config deploy/pipeline.yaml`, and checks:
 #   1. a record published to logs.acme.syslog appears on processed.logs exactly as
-#      published, with the pipeline headers Fusion-Tenant: acme, a decimal
-#      Fusion-Ingestion-Time and Fusion-Ingestion-Time-Kind: reported, and the consumer shows
-#      it acknowledged;
+#      published, with the pipeline headers Fusion-Record-Id: 1 (the producer's),
+#      Fusion-Tenant: acme, a decimal Fusion-Ingestion-Time and
+#      Fusion-Ingestion-Time-Kind: reported, and the consumer shows it acknowledged;
 #   2. with the PROCESSED stream deleted, the record is nak'd and JetStream redelivers it;
 #   3. NATS_URL overrides the YAML URL for both the source and the sink (a bogus NATS_URL
 #      makes startup fail fast; bogus YAML URLs with a real NATS_URL start fine).
@@ -84,7 +84,8 @@ start_pipelined
 timeout 20 nats sub processed.logs --count 1 --dump="$SUB_OUT" >/dev/null &
 SUB_PID=$!
 sleep 1
-nats pub logs.acme.syslog '{"id": 1, "body": "disk full", "severity_text": "ERROR"}'
+nats pub logs.acme.syslog '{"id": 1, "body": "disk full", "severity_text": "ERROR"}' \
+    -H 'Fusion-Record-Id:1'
 wait "$SUB_PID" || fail "nats sub processed.logs saw no record"
 MSG="$SUB_OUT/1.json"
 [[ -f "$MSG" ]] || fail "nats sub wrote no message to $SUB_OUT"
@@ -94,6 +95,8 @@ echo "$RECORD"
 jq -e '.id == 1' <<<"$RECORD" >/dev/null || fail "record on processed.logs has the wrong id"
 jq -e '.resource["tenant.id"] == null and .observed_time_unix_nano == null' <<<"$RECORD" >/dev/null \
     || fail "the pipeline wrote a tenant or a time into the record on processed.logs"
+jq -e '.Header["Fusion-Record-Id"] == ["1"]' "$MSG" >/dev/null \
+    || fail 'message on processed.logs lacks Fusion-Record-Id: 1'
 jq -e '.Header["Fusion-Tenant"] == ["acme"]' "$MSG" >/dev/null \
     || fail 'message on processed.logs lacks Fusion-Tenant: acme'
 jq -e '.Header["Fusion-Ingestion-Time"][0] | test("^[0-9]+$")' "$MSG" >/dev/null \
@@ -106,7 +109,7 @@ echo "ok: delivered untouched, Meta in headers, 0 pending, 0 redelivered"
 
 step "2. sink stream deleted -> record nak'd -> JetStream redelivers"
 nats stream rm PROCESSED -f >/dev/null
-nats pub logs.acme.syslog '{"id": 2, "body": "sink is gone"}'
+nats pub logs.acme.syslog '{"id": 2, "body": "sink is gone"}' -H 'Fusion-Record-Id:2'
 wait_for 30 "num_redelivered > 0" bash -c '[[ "$(nats consumer info LOGS pipeline --json | jq -r .num_redelivered)" -gt 0 ]]'
 echo "ok: num_redelivered=$(consumer_field num_redelivered)"
 "${COMPOSE[@]}" run --rm nats-init >/dev/null

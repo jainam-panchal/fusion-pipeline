@@ -3,13 +3,15 @@
 //! and what the source writes on a dead letter.
 //! The live round trip is in `jetstream.rs`.
 
+use std::sync::LazyLock;
+
 use async_nats::HeaderMap;
 use fusion_core::io::{Failure, FailureKind};
-use fusion_core::meta::{Arrival, IngestionTime, Meta};
-use fusion_core::record::RecordId;
+use fusion_core::meta::{Arrival, ArrivalKind, IngestionTime, Meta};
+use fusion_core::record::{Kind, RecordId};
 use fusion_nats::headers::{
     self, DLQ_REASON, DLQ_SUBJECT, DeadLetter, INGESTION_TIME, INGESTION_TIME_KIND, InvalidHeader,
-    MSG_ID, REASON_CAP, Received, TENANT,
+    MSG_ID, REASON_CAP, RECORD_ID, RECORD_KIND, Received, TENANT,
 };
 
 fn meta(ingestion_time: IngestionTime) -> Meta {
@@ -53,12 +55,17 @@ fn value<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
 }
 
 #[test]
-fn the_sink_writes_the_tenant_the_time_and_its_kind_and_nothing_else() {
+fn the_sink_writes_the_record_id_the_tenant_the_time_and_its_kind_and_nothing_else() {
     let written = headers::for_meta(&meta(IngestionTime::Reported(9_000_000_000)));
+    assert_eq!(value(&written, RECORD_ID), Some("7"));
     assert_eq!(value(&written, TENANT), Some("acme"));
     assert_eq!(value(&written, INGESTION_TIME), Some("9000000000"));
     assert_eq!(value(&written, INGESTION_TIME_KIND), Some("reported"));
-    assert_eq!(written.len(), 3, "no record id, no delivery count");
+    assert_eq!(
+        written.len(),
+        4,
+        "no kind (every walked record is a log), no delivery count"
+    );
 }
 
 #[test]
@@ -79,6 +86,8 @@ fn what_the_sink_writes_a_downstream_source_reads_back() {
         assert_eq!(
             arrival,
             Arrival {
+                record_id: Some(RecordId(7)),
+                kind: ArrivalKind::Unnamed,
                 tenant: Some("acme".to_owned()),
                 ingestion_time: Some(time),
                 delivery_count: 1,
@@ -95,6 +104,8 @@ fn a_message_with_no_headers_takes_the_subjects_tenant_and_the_publish_time() {
     assert_eq!(
         arrival,
         Arrival {
+            record_id: None,
+            kind: ArrivalKind::Unnamed,
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
             delivery_count: 2,
@@ -102,6 +113,21 @@ fn a_message_with_no_headers_takes_the_subjects_tenant_and_the_publish_time() {
         }
     );
     assert!(invalid.is_empty());
+}
+
+#[test]
+fn the_record_id_and_the_kind_are_the_headers() {
+    for (name, kind) in [
+        ("log", Kind::Log),
+        ("metric", Kind::Metric),
+        ("span", Kind::Span),
+    ] {
+        let headers = map(&[(RECORD_ID, "18446744073709551615"), (RECORD_KIND, name)]);
+        let (arrival, invalid) = arrival_of("logs.acme.syslog", Some(&headers), None, 1);
+        assert!(invalid.is_empty(), "{name}");
+        assert_eq!(arrival.record_id, Some(RecordId(u64::MAX)), "{name}");
+        assert_eq!(arrival.kind, ArrivalKind::Named(kind), "{name}");
+    }
 }
 
 #[test]
@@ -130,7 +156,24 @@ fn the_header_time_wins_over_the_publish_time() {
 
 #[test]
 fn a_header_that_does_not_parse_is_left_out_and_reported() {
-    let cases: [(&[(&str, &str)], InvalidHeader); 7] = [
+    let cases: [(&[(&str, &str)], InvalidHeader); 12] = [
+        (&[(RECORD_ID, "")], InvalidHeader::RecordId(String::new())),
+        (
+            &[(RECORD_ID, "+5")],
+            InvalidHeader::RecordId("+5".to_owned()),
+        ),
+        (
+            &[(RECORD_ID, "-1")],
+            InvalidHeader::RecordId("-1".to_owned()),
+        ),
+        (
+            &[(RECORD_ID, "7a")],
+            InvalidHeader::RecordId("7a".to_owned()),
+        ),
+        (
+            &[(RECORD_ID, "18446744073709551616")],
+            InvalidHeader::RecordId("18446744073709551616".to_owned()),
+        ),
         (&[(TENANT, "")], InvalidHeader::Tenant),
         (&[(TENANT, "a\tb")], InvalidHeader::Tenant),
         (
@@ -158,12 +201,46 @@ fn a_header_that_does_not_parse_is_left_out_and_reported() {
         let headers = map(pairs);
         let (arrival, invalid) = arrival_of("processed", Some(&headers), Some(9), 1);
         assert_eq!(invalid, vec![problem.clone()], "{pairs:?}");
+        assert_eq!(arrival.record_id, None, "{pairs:?}");
+        assert_eq!(arrival.kind, ArrivalKind::Unnamed, "{pairs:?}");
         assert_eq!(arrival.tenant, None, "{pairs:?}");
         assert_eq!(
             arrival.ingestion_time,
             Some(IngestionTime::Reported(9)),
             "{pairs:?}: the publish time stands"
         );
+    }
+}
+
+#[test]
+fn a_kind_header_that_does_not_parse_is_reported_and_leaves_the_kind_unreadable_not_log() {
+    for text in ["", "Log", "LOG", " log", "trace"] {
+        let headers = map(&[(RECORD_ID, "7"), (RECORD_KIND, text)]);
+        let (arrival, invalid) = arrival_of("logs.acme.syslog", Some(&headers), None, 1);
+        assert_eq!(
+            invalid,
+            vec![InvalidHeader::RecordKind(text.to_owned())],
+            "{text:?}"
+        );
+        assert_eq!(arrival.kind, ArrivalKind::Unreadable, "{text:?}");
+        assert!(!arrival.is_log(), "{text:?}");
+    }
+}
+
+#[test]
+fn only_an_unreadable_kind_refuses_the_message() {
+    assert!(InvalidHeader::RecordKind("Log".to_owned()).refuses_message());
+    assert!(InvalidHeader::Repeated(RECORD_KIND).refuses_message());
+    for ignored in [
+        InvalidHeader::RecordId("x".to_owned()),
+        InvalidHeader::Repeated(RECORD_ID),
+        InvalidHeader::Repeated(TENANT),
+        InvalidHeader::Tenant,
+        InvalidHeader::Time("x".to_owned()),
+        InvalidHeader::Kind("x".to_owned()),
+        InvalidHeader::Unpaired(INGESTION_TIME),
+    ] {
+        assert!(!ignored.refuses_message(), "{ignored:?}");
     }
 }
 
@@ -183,10 +260,25 @@ fn a_bad_time_and_a_bad_kind_are_both_reported() {
 
 #[test]
 fn a_header_given_twice_is_refused() {
-    let mut headers = map(&[(TENANT, "acme")]);
+    let mut headers = map(&[(TENANT, "acme"), (RECORD_ID, "7"), (RECORD_KIND, "log")]);
     headers.append(TENANT, "beta");
+    headers.append(RECORD_ID, "7");
+    headers.append(RECORD_KIND, "metric");
     let (arrival, invalid) = arrival_of("processed", Some(&headers), None, 1);
-    assert_eq!(invalid, vec![InvalidHeader::Repeated(TENANT)]);
+    assert_eq!(
+        invalid,
+        vec![
+            InvalidHeader::Repeated(RECORD_ID),
+            InvalidHeader::Repeated(RECORD_KIND),
+            InvalidHeader::Repeated(TENANT),
+        ]
+    );
+    assert_eq!(arrival.record_id, None);
+    assert_eq!(
+        arrival.kind,
+        ArrivalKind::Unreadable,
+        "not taken as absent, so not a log"
+    );
     assert_eq!(arrival.tenant, None);
 }
 
@@ -279,14 +371,23 @@ mod dead_letter {
         }
     }
 
+    /// The arrival of the message every letter here gives up on.
+    static ARRIVAL: LazyLock<Arrival> = LazyLock::new(|| Arrival {
+        record_id: Some(RecordId(7)),
+        kind: ArrivalKind::Named(Kind::Log),
+        tenant: Some("acme".to_owned()),
+        ingestion_time: Some(IngestionTime::Reported(9)),
+        delivery_count: 5,
+        bytes: None,
+    });
+
     fn letter<'a>(headers: Option<&'a HeaderMap>, failure: &'a Failure) -> DeadLetter<'a> {
         DeadLetter {
             stream: "LOGS",
             stream_sequence: 42,
             subject: "logs.acme.syslog",
             headers,
-            tenant: "acme",
-            ingestion_time: Some(IngestionTime::Reported(9)),
+            arrival: &ARRIVAL,
             failure,
         }
     }
@@ -304,15 +405,37 @@ mod dead_letter {
     fn carries_the_meta_the_arrival_gave_so_a_replay_keeps_it() {
         let failure = failure("x");
         let written = headers::for_dead_letter(&letter(None, &failure));
+        assert_eq!(value(&written, RECORD_ID), Some("7"));
+        assert_eq!(value(&written, RECORD_KIND), Some("log"));
         assert_eq!(value(&written, TENANT), Some("acme"));
         assert_eq!(value(&written, INGESTION_TIME), Some("9"));
         assert_eq!(value(&written, INGESTION_TIME_KIND), Some("reported"));
 
-        let mut no_time = letter(None, &failure);
-        no_time.ingestion_time = None;
-        let written = headers::for_dead_letter(&no_time);
+        let bare = Arrival::default();
+        let written = headers::for_dead_letter(&DeadLetter {
+            arrival: &bare,
+            ..letter(None, &failure)
+        });
+        assert_eq!(value(&written, RECORD_ID), None);
+        assert_eq!(value(&written, RECORD_KIND), None);
         assert_eq!(value(&written, INGESTION_TIME), None);
         assert_eq!(value(&written, INGESTION_TIME_KIND), None);
+    }
+
+    #[test]
+    fn carries_the_meta_tenant_not_an_arrival_tenant_meta_refuses() {
+        let failure = failure("x");
+        for tenant in [None, Some(String::new()), Some("line\nbreak".to_owned())] {
+            let arrival = Arrival {
+                tenant,
+                ..ARRIVAL.clone()
+            };
+            let written = headers::for_dead_letter(&DeadLetter {
+                arrival: &arrival,
+                ..letter(None, &failure)
+            });
+            assert_eq!(value(&written, TENANT), Some("unknown"), "{arrival:?}");
+        }
     }
 
     #[test]
@@ -339,6 +462,8 @@ mod dead_letter {
             ("Nats-Expected-Stream", "LOGS"),
             ("Nats-Msg-Id", "producer-1"),
             (TENANT, "spoofed"),
+            (RECORD_ID, "99"),
+            (RECORD_KIND, "not a kind"),
             (DLQ_REASON, "old reason"),
         ]);
         let failure = failure("x");
@@ -347,7 +472,10 @@ mod dead_letter {
         assert_eq!(value(&written, "Nats-Expected-Stream"), None);
         assert_eq!(value(&written, MSG_ID), Some("LOGS:42"));
         assert_eq!(value(&written, TENANT), Some("acme"));
+        assert_eq!(value(&written, RECORD_ID), Some("7"), "the arrival's");
+        assert_eq!(value(&written, RECORD_KIND), Some("log"), "the arrival's");
         assert_eq!(value(&written, DLQ_REASON), Some("out: x"));
         assert_eq!(written.get_all(TENANT).count(), 1);
+        assert_eq!(written.get_all(RECORD_ID).count(), 1);
     }
 }

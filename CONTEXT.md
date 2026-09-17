@@ -18,19 +18,19 @@ _Avoid_: using "message" for the decoded record
 A record paired with its arrival and the ack handle that settles its message.
 
 **Arrival**:
-What a source's transport says about a message, apart from the record: the tenant it names, when the message entered it (with whether a transport or a clock said so), the delivery count, and the payload's size for `bytes_in_total`. The NATS source takes the tenant from the subject, else the `Fusion-Tenant` pipeline header, and the time from the `Fusion-Ingestion-Time` pipeline header, else the JetStream publish time. Everything but the count is optional; the meta's tenant and time come from it alone, `unknown` and the worker clock when it names none. The NATS source builds it from what JetStream handed over for the message (`headers::Received`: subject, headers, publish time, delivery count, payload length), which is the raw input, not the arrival.
+What a source's transport says about a message, apart from the record: the record id and kind the producer gave, the tenant it names, when the message entered it (with whether a transport or a clock said so), the delivery count, and the payload's size for `bytes_in_total`. The NATS source takes the record id and kind from the `Fusion-Record-Id` and `Fusion-Record-Kind` pipeline headers, the tenant from the subject, else the `Fusion-Tenant` pipeline header, and the time from the `Fusion-Ingestion-Time` pipeline header, else the JetStream publish time. Everything but the count is optional; the meta comes from it alone: no record id is `missing_id`, no kind is `log` (a kind the source cannot read is not), and no tenant or time is `unknown` and the worker clock. The NATS source builds it from what JetStream handed over for the message (`headers::Received`: subject, headers, publish time, delivery count, payload length), which is the raw input, not the arrival.
 _Avoid_: headers (the pipeline headers are one input to it), envelope metadata
 
 **Meta**:
-The pipeline's view of one record, resolved once at intake from its arrival and the record: record id, tenant, ingestion time, delivery count. Read-only on the stage context and through meta paths, and inherited by every record a stage emits from it. Every decision the pipeline takes for itself reads it, never the payload. It is never written into the record: it leaves on the wire as pipeline headers.
+The pipeline's view of one record, resolved once at intake from its arrival alone: record id, tenant, ingestion time, delivery count. Read-only on the stage context and through meta paths, and inherited by every record a stage emits from it. Every decision the pipeline takes for itself reads it, never the payload. It is never written into the record: it leaves on the wire as pipeline headers.
 _Avoid_: metadata (ambiguous with the record's own attributes), headers (its wire form, not the thing)
 
 **Payload**:
-The record itself, as the customer's data: every field, `id`, `kind`, `resource.tenant.id` and the time fields included. Stages change it only as the config asks; the pipeline never writes a value of its own into it.
+The record itself, as the customer's data: every field, `id`, `kind`, `resource.tenant.id` and the time fields included. The pipeline reads none of them for itself; stages change them only as the config asks, and the pipeline never writes a value of its own into it.
 _Avoid_: body (one field of it), content
 
 **Pipeline header**:
-One of the NATS message headers that carry a record's meta on the wire: `Fusion-Tenant`, `Fusion-Ingestion-Time` (nanoseconds, decimal) and `Fusion-Ingestion-Time-Kind` (`reported` or `clock`). The sink writes them; the source reads them back into the arrival, the subject still winning for the tenant. One that does not parse, is given twice, or is one time header without the other is ignored and counted, once per header; a `Fusion-Tenant` the subject overrides is not read, so not counted.
+One of the NATS message headers the pipeline reads a message's arrival from: the four that carry a record's meta on the wire, `Fusion-Record-Id` (decimal), `Fusion-Tenant`, `Fusion-Ingestion-Time` (nanoseconds, decimal) and `Fusion-Ingestion-Time-Kind` (`reported` or `clock`), plus `Fusion-Record-Kind` (`log`, `metric` or `span`), which is arrival-only: no meta carries it, a producer sets it and the sink never writes it. The producer sets the record id and kind; the sink writes the rest and the record id; the source reads them all back into the arrival, the subject still winning for the tenant. One that does not parse, is given twice, or is one time header without the other is ignored and counted, once per header, except `Fusion-Record-Kind`: that one is counted too, but the message is then not walked; a `Fusion-Tenant` the subject overrides is not read, so not counted.
 _Avoid_: stamp, envelope header, metadata header
 
 **Delivery count**:
@@ -38,7 +38,7 @@ How many times the transport has delivered a message, this one included; 1 on th
 _Avoid_: attempt, retry count
 
 **Record id**:
-The producer-supplied snowflake a record arrives with, held on its meta. Records without one are nakked and counted. The record's `id` field is payload: a stage may change or drop it, and the pipeline keeps the meta's.
+The producer-supplied snowflake a message carries in its `Fusion-Record-Id` header, held on its meta. A message without one is nakked and counted (`missing_id`). The record's `id` field is payload, never read: a stage may change or drop it, and the pipeline keeps the meta's.
 
 **Tenant**:
 The owner of a record, as the meta names it: the one its transport names (the NATS subject's `{tenant_prefix}.{tenant}.>` token, else the `Fusion-Tenant` pipeline header), else `unknown`; never read from the record. Never empty and never with a control character: a transport tenant that is counts as none. The record's `resource.tenant.id` is payload, never written by the pipeline unless the config copies `meta.tenant` in, and a stage may rewrite it without changing the tenant.
