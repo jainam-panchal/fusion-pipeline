@@ -6,7 +6,7 @@ mod common;
 
 use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::pipeline::Pipeline;
-use fusion_core::record::Record;
+use fusion_core::record::{Kind, Record};
 
 use common::{WAIT, for_each_worker_count, registry, start};
 
@@ -160,16 +160,16 @@ fn worker_count_comes_from_config_or_defaults_to_cores() {
 }
 
 #[test]
-fn metric_and_span_records_are_rejected_and_acked_without_reaching_a_sink() {
+fn metric_and_span_messages_are_rejected_and_acked_without_reaching_a_sink() {
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
-        let metric = Record::from_json(r#"{"id": 9, "kind": "metric", "severity_text": "ERROR"}"#)
-            .expect("record parses");
-        let span = Record::from_json(r#"{"id": 10, "kind": "span", "severity_text": "ERROR"}"#)
-            .expect("record parses");
+        let error = |id| {
+            Record::from_json(&format!(r#"{{"id": {id}, "severity_text": "ERROR"}}"#))
+                .expect("record parses")
+        };
 
-        let metric_probe = h.push(metric);
-        let span_probe = h.push(span);
+        let metric_probe = h.push_kind(error(9), Kind::Metric);
+        let span_probe = h.push_kind(error(10), Kind::Span);
 
         assert_eq!(
             metric_probe.wait(WAIT),

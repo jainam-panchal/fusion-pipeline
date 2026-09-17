@@ -10,9 +10,9 @@ use serde_json::{Map, Value};
 
 use crate::closed_set::closed_set;
 
-/// Producer-supplied snowflake id. Present on every record the engine walks, as it arrived
-/// (a record that arrives without one is negatively acknowledged); the pipeline decides with
-/// the copy on the record's `Meta`, and a stage may change or drop the field.
+/// A record id: the one a message's transport gives, on the record's `Meta` (a message
+/// without one is negatively acknowledged), and the payload's `id` field, which the pipeline
+/// never reads and a stage may change or drop (ADR 0007).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct RecordId(pub u64);
@@ -40,16 +40,17 @@ impl<'de> Deserialize<'de> for RecordId {
 
 closed_set! {
     serde;
-    /// Signal kind. Only `log` is processed, decided by the engine at intake. Its JSON form is
-    /// its name, [`Kind::as_str`].
+    /// Signal kind. Only `log` is processed, decided by the engine at intake from the kind
+    /// the transport gives; the payload's `kind` field is data the pipeline never reads. Its
+    /// JSON form is its name, [`Kind::as_str`].
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     #[non_exhaustive]
     pub enum Kind {
         /// A log record.
         Log = "log",
-        /// A metric data point. Rejected by the engine at intake.
+        /// A metric data point. A message the transport says is one is rejected at intake.
         Metric = "metric",
-        /// A span. Rejected by the engine at intake.
+        /// A span. A message the transport says is one is rejected at intake.
         Span = "span",
     }
 }
@@ -65,11 +66,11 @@ impl Default for Kind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[non_exhaustive]
 pub struct Record {
-    /// Producer-supplied id; `None` for a record that arrived without one or whose id a
-    /// stage removed.
+    /// The payload's id, never read by the pipeline; `None` for a record that arrived
+    /// without one or whose id a stage removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<RecordId>,
-    /// Signal kind, `log` by default.
+    /// The payload's signal kind, never read by the pipeline; `log` by default.
     #[serde(default)]
     pub kind: Kind,
     /// Event time in nanoseconds since the Unix epoch.

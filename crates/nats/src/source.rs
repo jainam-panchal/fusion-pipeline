@@ -13,12 +13,14 @@
 //! Each message is decoded as one JSON record and handed to the engine, untouched, with an
 //! ack handle that acks or naks the JetStream message. What the transport says about the
 //! message goes beside the record as its [`fusion_core::meta::Arrival`], built by
-//! [`crate::headers::arrival`]: the subject's tenant (`{tenant_prefix}.{tenant}.>`), else an
+//! [`crate::headers::arrival`]: the record id and kind the producer's `Fusion-Record-Id` and
+//! `Fusion-Record-Kind` give; the subject's tenant (`{tenant_prefix}.{tenant}.>`), else an
 //! upstream pipeline's `Fusion-Tenant`; an upstream pipeline's `Fusion-Ingestion-Time`, else
 //! the JetStream publish time; and the delivery count. The engine resolves the record's
-//! `Meta` from it alone (ADR 0005). Nothing is read from or written into the record. The
-//! publish time is the server's and does not change on redelivery, so stateful stages that
-//! measure windows in ingestion time see the same value every time the record comes back.
+//! `Meta` from it alone (ADR 0005, ADR 0007). Nothing is read from or written into the
+//! record. Headers and the publish time are stored with the message and do not change on
+//! redelivery, so stateful stages that measure windows in ingestion time, and every decision
+//! keyed on the record id, see the same value every time the record comes back.
 //!
 //! A pipeline header that does not parse is ignored, reported on stderr and counted once on
 //! `source_invalid_headers_total` under the tenant the record's `Meta` gets; the message is
@@ -26,7 +28,7 @@
 //! names a valid tenant, so a header the subject overrides is never counted.
 //!
 //! A payload that is not a record is nak'd like any other failure and reported on stderr; it
-//! runs out `max_deliver` the same way a record without an id does.
+//! runs out `max_deliver` the same way a message without a `Fusion-Record-Id` does.
 //!
 //! Naks carry a delay. When the engine gives none, [`nak_delay`] derives one from the
 //! message's delivery count: 1s on the first failure, doubling to [`MAX_NAK_DELAY`], so a
@@ -62,7 +64,7 @@ use async_nats::jetstream::{self, AckKind, message::Acker};
 use fusion_core::events::{Event, EventKind};
 use fusion_core::io::{AckHandle, Envelope, Failure, FailureKind, Intake, Source, SourceError};
 use fusion_core::meta::{IngestionTime, Meta};
-use fusion_core::record::Record;
+use fusion_core::record::{Kind, Record, RecordId};
 use fusion_core::signals::Signals;
 use fusion_core::trace::TraceKey;
 use futures::StreamExt;
@@ -234,6 +236,8 @@ impl DeadLetters {
             stream_sequence: position.stream_sequence,
             subject: &delivery.message.subject,
             headers: delivery.message.headers.as_ref(),
+            record_id: delivery.record_id,
+            kind: delivery.kind,
             tenant: &delivery.tenant,
             ingestion_time: delivery.ingestion_time,
             failure,
@@ -298,7 +302,10 @@ struct Position {
 struct Delivery {
     /// The message as it arrived: subject, headers and payload.
     message: async_nats::Message,
-    /// The tenant the record's `Meta` gets.
+    /// The record id, kind and ingestion time the arrival gave, and the tenant the record's
+    /// `Meta` gets: what a dead letter carries.
+    record_id: Option<RecordId>,
+    kind: Option<Kind>,
     tenant: String,
     ingestion_time: Option<IngestionTime>,
     /// The subject a settlement is published to.
@@ -401,6 +408,8 @@ impl NatsSource {
             let decoded = serde_json::from_slice::<Record>(&message.payload);
             let delivery = Delivery {
                 message,
+                record_id: arrival.record_id,
+                kind: arrival.kind,
                 tenant: tenant.to_string(),
                 ingestion_time: arrival.ingestion_time,
                 reply,

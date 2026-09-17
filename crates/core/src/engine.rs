@@ -326,7 +326,7 @@ impl<'p> Walker<'p> {
             ack,
         } = envelope;
         spans.begin();
-        let resolved = Meta::resolve(&record, &arrival);
+        let resolved = Meta::resolve(&arrival);
         let tenant = Arc::clone(match &resolved {
             Ok(meta) => &meta.tenant,
             Err(rejected) => &rejected.tenant,
@@ -362,15 +362,17 @@ impl<'p> Walker<'p> {
             Ok(meta) => meta,
             Err(rejected) => {
                 match rejected.reason {
-                    // Spec: the idempotency guarantee has no unguarded path, so a record
-                    // without an id is nak'd. The record was not forwarded, which is the
+                    // Spec: the idempotency guarantee has no unguarded path, so a message
+                    // without a record id is nak'd. The record was not forwarded, which is the
                     // drop the spec counts under `missing_id`; the message is nak'd, which
                     // is the nak it counts.
                     Rejection::MissingId => {
                         self.metrics().dropped(&source, DropReason::MissingId);
                         self.metrics().source_nak(&tenant);
-                        let failure =
-                            Failure::at_source(FailureKind::MissingId, "the record has no `id`");
+                        let failure = Failure::at_source(
+                            FailureKind::MissingId,
+                            "the message has no record id",
+                        );
                         self.log_nak(&tenant, delivery, &failure, None);
                         ack.nak(None, failure);
                     }

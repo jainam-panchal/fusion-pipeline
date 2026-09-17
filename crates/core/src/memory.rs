@@ -111,7 +111,7 @@ pub struct MemoryInput {
 
 impl MemoryInput {
     /// Queue a record for the engine, as a first delivery the source knows nothing else
-    /// about, and return a probe on its ack outcome.
+    /// about (no record id, so the engine naks it), and return a probe on its ack outcome.
     ///
     /// # Panics
     ///
@@ -121,8 +121,8 @@ impl MemoryInput {
         self.push_arrival(record, Arrival::default())
     }
 
-    /// As [`MemoryInput::push`], with what the source says about the message: a tenant, an
-    /// ingestion time, a delivery count.
+    /// As [`MemoryInput::push`], with what the source says about the message: a record id, a
+    /// kind, a tenant, an ingestion time, a delivery count.
     ///
     /// # Panics
     ///

@@ -1,24 +1,30 @@
 //! Pipeline headers: a record's `Meta` on the wire, beside the record and never in it
 //! (ADR 0005).
 //!
-//! The sink writes three headers on every message it publishes:
+//! The sink writes four headers on every message it publishes:
 //!
 //! | Header | Value |
 //! |---|---|
+//! | `Fusion-Record-Id` | the `Meta` record id, decimal |
 //! | `Fusion-Tenant` | the `Meta` tenant |
 //! | `Fusion-Ingestion-Time` | the ingestion time, nanoseconds since the Unix epoch, decimal |
 //! | `Fusion-Ingestion-Time-Kind` | `reported` or `clock` |
 //!
+//! A producer sets `Fusion-Record-Id` on every message, and `Fusion-Record-Kind` (`log`,
+//! `metric` or `span`; absent is `log`) when it sends anything but logs (ADR 0007). The sink
+//! writes no kind: every record it writes was walked, so a log.
+//!
 //! The source reads them back into the message's [`Arrival`] with [`arrival()`], so a pipeline
-//! consuming another's output keeps the first pipeline's tenant and ingestion time. The
+//! consuming another's output keeps the first pipeline's record id, tenant and ingestion
+//! time. The
 //! subject's tenant wins over the header, because NATS permissions back the subject and any
 //! producer can set a header; the header's time wins over the JetStream publish time, so the
 //! first pipeline's time survives every hop. A header that does not parse is ignored,
 //! reported and counted once, never a reason to nak: the record is still valid.
 //!
 //! A dead letter carries the message as it arrived, with [`for_dead_letter`]: the
-//! producer's headers, the tenant and ingestion time the arrival gave (so a replay keeps
-//! them), `Fusion-Dlq-Reason` (the failing node and its error), `Fusion-Dlq-Subject` (where
+//! producer's headers, the record id, kind, tenant and ingestion time the arrival gave (so a
+//! replay keeps them), `Fusion-Dlq-Reason` (the failing node and its error), `Fusion-Dlq-Subject` (where
 //! it arrived) and `Nats-Msg-Id` (its stream and sequence, so a second dead letter of the
 //! same message is dropped as a duplicate). No `Nats-*` header of the producer's is kept:
 //! `Nats-Expected-Stream` and its kind would make the publish fail.
@@ -26,9 +32,14 @@
 use async_nats::{HeaderMap, HeaderValue};
 use fusion_core::io::Failure;
 use fusion_core::meta::{Arrival, IngestionTime, Meta, TimeKind, is_valid_tenant};
+use fusion_core::record::{Kind, RecordId};
 
 use crate::subject::tenant_from_subject;
 
+/// The record id, decimal.
+pub const RECORD_ID: &str = "Fusion-Record-Id";
+/// The signal kind: `log`, `metric` or `span`.
+pub const RECORD_KIND: &str = "Fusion-Record-Kind";
 /// The `Meta` tenant.
 pub const TENANT: &str = "Fusion-Tenant";
 /// The `Meta` ingestion time in nanoseconds since the Unix epoch, decimal.
@@ -57,13 +68,31 @@ const NATS_PREFIX: &str = "nats-";
 #[must_use]
 pub fn for_meta(meta: &Meta) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    write_meta(&mut headers, &meta.tenant, Some(meta.ingestion_time));
+    write_meta(
+        &mut headers,
+        Some(meta.record_id),
+        None,
+        &meta.tenant,
+        Some(meta.ingestion_time),
+    );
     headers
 }
 
-/// Insert the tenant and, when given, the two ingestion time headers. A value that cannot
-/// be a header is left out.
-fn write_meta(headers: &mut HeaderMap, tenant: &str, ingestion_time: Option<IngestionTime>) {
+/// Insert the tenant and, when given, the record id, the kind and the two ingestion time
+/// headers. A value that cannot be a header is left out.
+fn write_meta(
+    headers: &mut HeaderMap,
+    record_id: Option<RecordId>,
+    kind: Option<Kind>,
+    tenant: &str,
+    ingestion_time: Option<IngestionTime>,
+) {
+    if let Some(record_id) = record_id {
+        insert(headers, RECORD_ID, &record_id.to_string());
+    }
+    if let Some(kind) = kind {
+        insert(headers, RECORD_KIND, kind.as_str());
+    }
     insert(headers, TENANT, tenant);
     if let Some(time) = ingestion_time {
         insert(headers, INGESTION_TIME, &time.unix_nanos().to_string());
@@ -90,6 +119,10 @@ pub struct DeadLetter<'m> {
     pub subject: &'m str,
     /// The headers it arrived with, if any.
     pub headers: Option<&'m HeaderMap>,
+    /// The record id its arrival gave, if any.
+    pub record_id: Option<RecordId>,
+    /// The kind its arrival gave, if any.
+    pub kind: Option<Kind>,
     /// The tenant its arrival gave (`unknown` when none): the `Meta` tenant.
     pub tenant: &'m str,
     /// The ingestion time its arrival gave, if any.
@@ -99,7 +132,7 @@ pub struct DeadLetter<'m> {
 }
 
 /// The headers of `letter`'s dead letter: the producer's headers except `Nats-*` and
-/// `Fusion-*`, then the tenant and ingestion time, [`DLQ_REASON`], [`DLQ_SUBJECT`] and
+/// `Fusion-*`, then the record id, kind, tenant and ingestion time, [`DLQ_REASON`], [`DLQ_SUBJECT`] and
 /// [`MSG_ID`].
 #[must_use]
 pub fn for_dead_letter(letter: &DeadLetter<'_>) -> HeaderMap {
@@ -113,7 +146,13 @@ pub fn for_dead_letter(letter: &DeadLetter<'_>) -> HeaderMap {
             headers.append(name.clone(), value.clone());
         }
     }
-    write_meta(&mut headers, letter.tenant, letter.ingestion_time);
+    write_meta(
+        &mut headers,
+        letter.record_id,
+        letter.kind,
+        letter.tenant,
+        letter.ingestion_time,
+    );
     let failure = letter.failure;
     insert(
         &mut headers,
@@ -147,6 +186,12 @@ fn header_line(text: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum InvalidHeader {
+    /// `Fusion-Record-Id` is not a decimal `u64`.
+    #[error("`{RECORD_ID}` is `{0}`, not a decimal integer")]
+    RecordId(String),
+    /// `Fusion-Record-Kind` is not `log`, `metric` or `span`.
+    #[error("`{RECORD_KIND}` is `{0}`, not `log`, `metric` or `span`")]
+    RecordKind(String),
     /// `Fusion-Tenant` is empty or holds a control character.
     #[error("`{TENANT}` is empty or holds a control character")]
     Tenant,
@@ -183,6 +228,8 @@ pub struct Received<'m> {
 /// `{tenant_prefix}.{tenant}.>`, and the pipeline headers ignored because they did not
 /// parse:
 ///
+/// - record id: `Fusion-Record-Id`;
+/// - kind: `Fusion-Record-Kind`;
 /// - tenant: the subject's tenant token, else `Fusion-Tenant`, each only when it passes
 ///   [`is_valid_tenant`]; the header is not read when the subject names a valid tenant;
 /// - ingestion time: `Fusion-Ingestion-Time` with its kind, else the publish time as
@@ -203,6 +250,14 @@ pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<Inv
         bytes,
     } = received;
     let mut invalid = Vec::new();
+    let record_id = parsed(header(headers, RECORD_ID), &mut invalid, |text| {
+        parse_decimal(text)
+            .map(RecordId)
+            .ok_or_else(|| InvalidHeader::RecordId(text.to_owned()))
+    });
+    let kind = parsed(header(headers, RECORD_KIND), &mut invalid, |text| {
+        Kind::parse(text).ok_or_else(|| InvalidHeader::RecordKind(text.to_owned()))
+    });
     let tenant = tenant_from_subject(subject, tenant_prefix)
         .filter(|tenant| is_valid_tenant(tenant))
         .or_else(|| header_tenant(headers, &mut invalid))
@@ -213,6 +268,8 @@ pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<Inv
         &mut invalid,
     );
     let arrival = Arrival {
+        record_id,
+        kind,
         tenant,
         ingestion_time: header_time.or(published.map(IngestionTime::Reported)),
         delivery_count: delivered,
@@ -221,24 +278,33 @@ pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<Inv
     (arrival, invalid)
 }
 
+/// The value `parse` makes of a header `read` gave once; `None` when the header is absent or
+/// ignored, with the reason pushed onto `invalid` when it was present.
+fn parsed<'h, T>(
+    read: Result<Option<&'h str>, InvalidHeader>,
+    invalid: &mut Vec<InvalidHeader>,
+    parse: impl FnOnce(&'h str) -> Result<T, InvalidHeader>,
+) -> Option<T> {
+    match read.and_then(|text| text.map(parse).transpose()) {
+        Ok(value) => value,
+        Err(problem) => {
+            invalid.push(problem);
+            None
+        }
+    }
+}
+
 /// The `Fusion-Tenant` header when it is given once and passes [`is_valid_tenant`];
 /// otherwise `None`, with the reason pushed onto `invalid` when the header was present.
 fn header_tenant<'h>(
     headers: Option<&'h HeaderMap>,
     invalid: &mut Vec<InvalidHeader>,
 ) -> Option<&'h str> {
-    match header(headers, TENANT) {
-        Ok(Some(tenant)) if is_valid_tenant(tenant) => Some(tenant),
-        Ok(None) => None,
-        Ok(Some(_)) => {
-            invalid.push(InvalidHeader::Tenant);
-            None
-        }
-        Err(problem) => {
-            invalid.push(problem);
-            None
-        }
-    }
+    parsed(header(headers, TENANT), invalid, |tenant| {
+        Some(tenant)
+            .filter(|tenant| is_valid_tenant(tenant))
+            .ok_or(InvalidHeader::Tenant)
+    })
 }
 
 /// The ingestion time the two time headers give, `None` when either is missing or ignored.
@@ -251,7 +317,7 @@ fn ingestion_time(
     invalid: &mut Vec<InvalidHeader>,
 ) -> Option<IngestionTime> {
     let time = time.and_then(|time| {
-        time.map(|text| parse_nanos(text).ok_or_else(|| InvalidHeader::Time(text.to_owned())))
+        time.map(|text| parse_decimal(text).ok_or_else(|| InvalidHeader::Time(text.to_owned())))
             .transpose()
     });
     let kind = kind.and_then(|kind| {
@@ -277,8 +343,8 @@ fn ingestion_time(
     }
 }
 
-/// Nanoseconds written as a decimal `u64`.
-fn parse_nanos(text: &str) -> Option<u64> {
+/// A decimal `u64`: nanoseconds or a record id.
+fn parse_decimal(text: &str) -> Option<u64> {
     text.parse().ok().filter(|_| is_decimal(text))
 }
 

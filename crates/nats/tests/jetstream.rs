@@ -24,7 +24,7 @@ use fusion_core::signals::Signals;
 use fusion_core::stage::{Context, Stage, StageError, StageOutput};
 use fusion_core::trace::{InMemoryTraceSink, TraceKey, TraceSampling};
 use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
-use fusion_nats::headers::{INGESTION_TIME, INGESTION_TIME_KIND, TENANT};
+use fusion_nats::headers::{INGESTION_TIME, INGESTION_TIME_KIND, RECORD_ID, TENANT};
 use fusion_nats::{Nats, NatsError};
 use futures::StreamExt;
 
@@ -178,15 +178,11 @@ impl JetStreamClient {
         let _ = self.rt.block_on(self.js.delete_stream(name));
     }
 
-    fn publish(&self, subject: &str, payload: &str) {
-        self.rt
-            .block_on(async {
-                self.js
-                    .publish(subject.to_owned(), payload.to_owned().into())
-                    .await?
-                    .await
-            })
-            .expect("published");
+    /// Publish `payload` on `subject` as record `id`, the way a producer does.
+    fn publish(&self, subject: &str, id: u64, payload: &str) {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(RECORD_ID, id.to_string().as_str());
+        self.publish_with_headers(subject, headers, payload);
     }
 
     /// Publish `payload` on `subject` with `headers`.
@@ -464,6 +460,7 @@ fn sink_write_returns_once_the_record_is_in_the_stream() {
         "the record is published exactly as written"
     );
     let header = |name: &str| headers.get(name).map(|v| v.as_str().to_owned());
+    assert_eq!(header(RECORD_ID).as_deref(), Some("7"));
     assert_eq!(header(TENANT).as_deref(), Some("acme"));
     assert_eq!(header(INGESTION_TIME).as_deref(), Some("9000000000"));
     assert_eq!(header(INGESTION_TIME_KIND).as_deref(), Some("reported"));
@@ -597,8 +594,10 @@ fn source_writes_nothing_into_the_record_and_acks_after_the_sink() {
         r#"{"id": 43, "body": "dated", "observed_time_unix_nano": 5}"#,
         r#"{"id": 44, "body": "event timed", "time_unix_nano": 7, "resource": {"tenant.id": "beta"}}"#,
     ];
-    for payload in published {
-        fixture.client.publish(&fixture.in_subject("acme"), payload);
+    for (id, payload) in (42..).zip(published) {
+        fixture
+            .client
+            .publish(&fixture.in_subject("acme"), id, payload);
     }
 
     assert!(
@@ -608,7 +607,12 @@ fn source_writes_nothing_into_the_record_and_acks_after_the_sink() {
     let mut written = sinks.outgoing("out");
     written.sort_by_key(|w| w.meta.record_id);
     let now = unix_nanos_now();
-    for (w, payload) in written.iter().zip(published) {
+    for ((w, payload), id) in written.iter().zip(published).zip(42..) {
+        assert_eq!(
+            w.meta.record_id,
+            RecordId(id),
+            "the record id is the header's"
+        );
         assert_eq!(
             w.record,
             Record::from_json(payload).expect("record parses"),
@@ -699,6 +703,7 @@ fn source_fills_meta_with_the_subject_tenant_the_publish_time_and_the_delivery_c
 
     fixture.client.publish(
         &fixture.in_subject("acme"),
+        42,
         r#"{"id": 42, "body": "no tenant, no time"}"#,
     );
 
@@ -759,6 +764,7 @@ fn sink_failure_naks_the_source_message_and_jetstream_redelivers() {
     fixture.client.delete_stream(&fixture.out_stream);
     fixture.client.publish(
         &fixture.in_subject("acme"),
+        43,
         r#"{"id": 43, "body": "sink is gone"}"#,
     );
 
@@ -805,11 +811,14 @@ fn undecodable_payload_is_nakd_and_the_source_keeps_going() {
     let engine = Engine::start(pipeline, Box::new(source), 1, Metrics::noop(), no_state())
         .expect("engine starts");
 
-    fixture
-        .client
-        .publish(&fixture.in_subject("acme"), "this is not json");
+    fixture.client.publish_with_headers(
+        &fixture.in_subject("acme"),
+        async_nats::HeaderMap::new(),
+        "this is not json",
+    );
     fixture.client.publish(
         &fixture.in_subject("acme"),
+        44,
         r#"{"id": 44, "body": "after garbage"}"#,
     );
 
@@ -886,7 +895,9 @@ fn a_downstream_pipeline_takes_the_tenant_and_the_first_ingestion_time_from_the_
     .expect("downstream starts");
 
     let payload = r#"{"id": 42, "body": "two hops", "observed_time_unix_nano": 5}"#;
-    fixture.client.publish(&fixture.in_subject("acme"), payload);
+    fixture
+        .client
+        .publish(&fixture.in_subject("acme"), 42, payload);
 
     assert!(
         wait_until(SETTLE_TIMEOUT, || sinks.outgoing("out").len() == 1),
@@ -907,6 +918,16 @@ fn a_downstream_pipeline_takes_the_tenant_and_the_first_ingestion_time_from_the_
         written.record,
         Record::from_json(payload).expect("record parses"),
         "neither pipeline wrote into the record"
+    );
+    assert_eq!(
+        upstream_headers.get(RECORD_ID).map(|v| v.as_str()),
+        Some("42"),
+        "the upstream sink carries the record id"
+    );
+    assert_eq!(
+        written.meta.record_id,
+        RecordId(42),
+        "from Fusion-Record-Id"
     );
     assert_eq!(&*written.meta.tenant, "acme", "from Fusion-Tenant");
     assert_eq!(
@@ -943,6 +964,7 @@ fn the_subject_beats_a_spoofed_tenant_header_and_a_bad_header_is_counted_not_nak
     .expect("engine starts");
 
     let mut headers = async_nats::HeaderMap::new();
+    headers.insert(RECORD_ID, "42");
     headers.insert(TENANT, "beta");
     headers.insert(INGESTION_TIME, "soon");
     headers.insert(INGESTION_TIME_KIND, "reported");
@@ -1003,7 +1025,7 @@ fn a_payload_tenant_is_never_read_when_the_transport_names_none() {
     let payload = r#"{"id": 42, "body": "who", "resource": {"tenant.id": "acme"}}"#;
     fixture
         .client
-        .publish(&format!("{}.acme", fixture.tenant_prefix), payload);
+        .publish(&format!("{}.acme", fixture.tenant_prefix), 42, payload);
 
     assert!(
         wait_until(SETTLE_TIMEOUT, || sinks.outgoing("out").len() == 1),
@@ -1141,6 +1163,7 @@ fn a_message_that_fails_every_delivery_is_dead_lettered_and_terminated() {
     let engine = fixture.start(&nats, TO_MEMORY, &sinks, signals);
     let payload = br#"{"id": 50, "body": "never lands",   "extra": [1, 2]}"#;
     let mut produced = async_nats::HeaderMap::new();
+    produced.insert(RECORD_ID, "50");
     produced.insert("traceparent", "00-abc-def-01");
 
     fixture
@@ -1169,6 +1192,11 @@ fn a_message_that_fails_every_delivery_is_dead_lettered_and_terminated() {
     assert_eq!(
         header("Fusion-Dlq-Subject"),
         Some(fixture.in_subject("acme"))
+    );
+    assert_eq!(
+        header(RECORD_ID).as_deref(),
+        Some("50"),
+        "a replay keeps its id"
     );
     assert_eq!(header(TENANT).as_deref(), Some("acme"));
     assert_eq!(header(INGESTION_TIME_KIND).as_deref(), Some("reported"));
@@ -1249,9 +1277,11 @@ fn an_undecodable_payload_is_dead_lettered_after_max_deliver() {
     let mut terminated = fixture.advisories("MSG_TERMINATED");
     let engine = fixture.start(&nats, TO_MEMORY, &sinks, metrics);
 
-    fixture
-        .client
-        .publish(&fixture.in_subject("acme"), "this is not json");
+    fixture.client.publish_with_headers(
+        &fixture.in_subject("acme"),
+        async_nats::HeaderMap::new(),
+        "this is not json",
+    );
 
     assert!(
         fixture
@@ -1298,6 +1328,7 @@ fn a_failed_delivery_that_is_not_the_last_publishes_nothing_and_a_retry_succeeds
 
     fixture.client.publish(
         &fixture.in_subject("acme"),
+        51,
         r#"{"id": 51, "body": "second time"}"#,
     );
 
@@ -1337,6 +1368,7 @@ fn a_failed_dlq_publish_naks_without_delay_and_is_not_terminated() {
 
     fixture.client.publish(
         &fixture.in_subject("acme"),
+        52,
         r#"{"id": 52, "body": "far larger than the dead-letter stream takes"}"#,
     );
 
@@ -1418,6 +1450,7 @@ fn a_duplicate_dead_letter_is_stored_once() {
 
     fixture.client.publish(
         &fixture.in_subject("acme"),
+        53,
         r#"{"id": 53, "body": "again"}"#,
     );
 
@@ -1456,12 +1489,16 @@ fn two_tenants_dead_letter_to_their_own_subjects_in_one_stream() {
     sinks.fail_writes_to("out");
     let engine = fixture.start(&nats, TO_MEMORY, &sinks, Metrics::noop());
 
-    fixture
-        .client
-        .publish(&fixture.in_subject("acme"), r#"{"id": 54, "body": "a"}"#);
-    fixture
-        .client
-        .publish(&fixture.in_subject("beta"), r#"{"id": 55, "body": "b"}"#);
+    fixture.client.publish(
+        &fixture.in_subject("acme"),
+        54,
+        r#"{"id": 54, "body": "a"}"#,
+    );
+    fixture.client.publish(
+        &fixture.in_subject("beta"),
+        55,
+        r#"{"id": 55, "body": "b"}"#,
+    );
 
     assert!(
         wait_until(SETTLE_TIMEOUT, || fixture.dead_letters().len() == 2),
