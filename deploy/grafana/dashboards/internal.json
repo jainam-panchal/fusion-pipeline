@@ -1402,7 +1402,7 @@
     {
       "id": 1100,
       "type": "row",
-      "title": "Loghub harness  \u2014  the last deploy/loghub-check.sh run",
+      "title": "Coverage  \u2014  the last loghub-check run, with or without chaos (make chaos)",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -1414,15 +1414,15 @@
     },
     {
       "id": 1101,
-      "type": "stat",
-      "title": "Did every record arrive?  (published, received, missing, unexpected, dead-lettered, wrongly edited, duplicates dropped, extra copies)",
-      "description": "The verifier's last report (loghub-verifier, issue #13). missing: a line's duplicate group reached none of its subjects. unexpected: a record nobody published, on a subject its set never routes to, or under the wrong tenant. dead-lettered: a published record in DLQ. edit mismatch: a main-subject record without what the edit node writes. A run passes when these four are 0 and dedupe dropped at least 80% of the planned duplicates (duplicates dropped of duplicates planned). extra copies: a second copy of a group on one subject, which at-least-once delivery allows. Gauges are exported once per run and go stale 5 minutes after it.",
+      "type": "timeseries",
+      "title": "Did every record arrive?  (published vs received, converging)",
+      "description": "The loghub verifier's judgement, exported every 5s while a run goes on and once more when it is final (settled = 1). published: messages the producer got a PubAck for. received: distinct (record, subject) pairs on the sink subjects that were expected there; a Linux record counts on main and audit. While records are in flight, received trails published; it converges once the pipeline catches up, also after the chaos run's kill and pause. sampled out: lines the sample node leaves off the main subject. The series go stale 5 minutes after the run.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "gridPos": {
-        "h": 6,
+        "h": 8,
         "w": 12,
         "x": 0,
         "y": 55
@@ -1430,58 +1430,99 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
-          "color": {
-            "mode": "thresholds"
+          "decimals": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never"
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
+          "min": 0
         },
         "overrides": [
           {
             "matcher": {
-              "id": "byRegexp",
-              "options": "missing|unexpected|dead-lettered|edit mismatch"
+              "id": "byName",
+              "options": "published"
             },
             "properties": [
               {
-                "id": "thresholds",
+                "id": "color",
                 "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
-                    },
-                    {
-                      "color": "red",
-                      "value": 1
-                    }
-                  ]
+                  "mode": "fixed",
+                  "fixedColor": "blue"
                 }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "received"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sampled out"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "settled"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              },
+              {
+                "id": "max",
+                "value": 1
               }
             ]
           }
         ]
       },
       "options": {
-        "reduceOptions": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
           "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+            "lastNotNull",
+            "max"
+          ]
         },
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "value_and_name",
-        "orientation": "vertical"
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
         {
@@ -1489,95 +1530,314 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(last_over_time(loghub_published[1h]))",
+          "expr": "max(last_over_time(loghub_published[15s]))",
           "legendFormat": "published",
-          "refId": "A",
-          "instant": true
+          "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(last_over_time(loghub_received[1h]))",
+          "expr": "max(last_over_time(loghub_received[15s]))",
           "legendFormat": "received",
-          "refId": "B",
-          "instant": true
+          "refId": "B"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(last_over_time(loghub_missing[1h]))",
+          "expr": "max(last_over_time(loghub_sampled_out[15s]))",
+          "legendFormat": "sampled out",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_settled[15s]))",
+          "legendFormat": "settled",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "id": 1103,
+      "type": "timeseries",
+      "title": "Is anything lost?  (missing, unexpected, dead-lettered, wrongly written; extra copies)",
+      "description": "missing: a line's duplicate group has not reached a subject it should (in flight while the run goes on; 0 once settled on a pass). unexpected: a record nobody published, on a subject it never reaches, or under the wrong tenant. dead-lettered: a published record in DLQ. edit / lua mismatch: a main-subject record without what those nodes write. A run passes when these are 0 at settled = 1 and dedupe dropped at least 80% of the planned duplicates. extra copies: a second copy on one subject, which at-least-once delivery allows. repeated on every subject: a fan-out record copied twice on each of its sinks, which a kill between them leaves (a dedupe race does too).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "missing"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unexpected"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dead-lettered"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "dark-red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "extra copies"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "duplicates dropped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "duplicates planned"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_missing[15s]))",
           "legendFormat": "missing",
-          "refId": "C",
-          "instant": true
+          "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(last_over_time(loghub_unexpected[1h]))",
+          "expr": "max(last_over_time(loghub_unexpected[15s]))",
           "legendFormat": "unexpected",
-          "refId": "D",
-          "instant": true
+          "refId": "B"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(last_over_time(loghub_dead_lettered[1h]))",
+          "expr": "max(last_over_time(loghub_dead_lettered[15s]))",
           "legendFormat": "dead-lettered",
-          "refId": "E",
-          "instant": true
+          "refId": "C"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(last_over_time(loghub_edit_mismatch[1h]))",
+          "expr": "max(last_over_time(loghub_edit_mismatch[15s]))",
           "legendFormat": "edit mismatch",
-          "refId": "F",
-          "instant": true
+          "refId": "D"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(last_over_time(loghub_duplicates_planned[1h]))",
-          "legendFormat": "duplicates planned",
-          "refId": "G",
-          "instant": true
+          "expr": "max(last_over_time(loghub_lua_mismatch[15s]))",
+          "legendFormat": "lua mismatch",
+          "refId": "E"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(last_over_time(loghub_duplicates_dropped[1h]))",
-          "legendFormat": "duplicates dropped",
-          "refId": "H",
-          "instant": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max(last_over_time(loghub_extra_copies[1h]))",
+          "expr": "max(last_over_time(loghub_extra_copies[15s]))",
           "legendFormat": "extra copies",
-          "refId": "I",
-          "instant": true
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_repeated_on_every_subject[15s]))",
+          "legendFormat": "repeated on every subject",
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_duplicates_planned[15s]))",
+          "legendFormat": "duplicates planned",
+          "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_duplicates_dropped[15s]))",
+          "legendFormat": "duplicates dropped",
+          "refId": "I"
         }
       ]
     },
     {
       "id": 1102,
+      "type": "timeseries",
+      "title": "Extraction mismatch by format  (lines whose attributes differ from the structured CSV)",
+      "description": "Per log format, the duplicate groups whose extracted attributes differ from the line's row in the loghub structured CSV, compared on the main sink. Reported, never gated: a mismatch is a finding about the pattern. The verifier prints the mismatching LineIds.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 63
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (format) (last_over_time(loghub_extraction_mismatch[15s]))",
+          "legendFormat": "{{format}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 1104,
       "type": "bargauge",
       "title": "How well does each pattern extract?  (share of lines matching the structured CSV)",
       "description": "Per log format, the share of duplicate groups whose extracted attributes equal the line's row in the loghub structured CSV, compared on the main sink. Reported, never gated: a mismatch is a finding about the pattern. The verifier prints the mismatching LineIds.",
@@ -1586,10 +1846,10 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "h": 6,
+        "h": 7,
         "w": 12,
         "x": 12,
-        "y": 55
+        "y": 63
       },
       "fieldConfig": {
         "defaults": {
@@ -1654,7 +1914,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 61
+        "y": 70
       },
       "panels": [
         {
