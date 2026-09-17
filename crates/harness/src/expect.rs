@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use fusion_core::hash::{fnv1a64, mix};
 use fusion_core::stage::DropReason;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::loghub::{Line, MAIN, Set};
 
@@ -76,6 +77,21 @@ pub struct Edits {
 }
 
 impl Edits {
+    /// Whether `attributes` carry these writes: each set attribute with its value, and each
+    /// copied attribute equal to its source in the same record, both absent together.
+    #[must_use]
+    pub fn written_in(&self, attributes: &Map<String, Value>) -> bool {
+        let set = self
+            .set
+            .iter()
+            .all(|(name, value)| attributes.get(name).and_then(Value::as_str) == Some(value));
+        let copied = self
+            .copied
+            .iter()
+            .all(|(target, source)| attributes.get(target) == attributes.get(source));
+        set && copied
+    }
+
     /// The POC config's `edit` node: `attributes.Component` copied to `attributes.service`,
     /// and `attributes.pipeline` set to [`PIPELINE_NAME`].
     #[must_use]
@@ -96,6 +112,19 @@ pub struct LuaWrites {
 }
 
 impl LuaWrites {
+    /// Whether `attributes` carry these writes: each length attribute an integer equal to the
+    /// byte length of its string source in the same record, both absent together.
+    #[must_use]
+    pub fn written_in(&self, attributes: &Map<String, Value>) -> bool {
+        self.lengths.iter().all(|(target, source)| {
+            let expected = attributes
+                .get(source)
+                .and_then(Value::as_str)
+                .map(|text| text.len() as u64);
+            attributes.get(target).map(Value::as_u64) == expected.map(Some)
+        })
+    }
+
     /// The POC config's `lua` node: the byte length of `attributes.Content`, as extracted
     /// (trailing whitespace included), in `attributes.content_bytes`.
     #[must_use]
@@ -118,6 +147,20 @@ pub struct Group<'e> {
 }
 
 impl Expectation {
+    /// The message as a report names it: its id, set and `LineId`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!("id {} ({} LineId {})", self.id, self.set, self.line_id)
+    }
+
+    /// The subject `dedupe` is judged on: the first its group reaches, since `dedupe` runs
+    /// before every sink. The main subject when `sample` keeps the line, else the Linux audit
+    /// subject, else none.
+    #[must_use]
+    pub fn dedupe_subject(&self) -> Option<&str> {
+        self.subjects.first().map(String::as_str)
+    }
+
     /// The duplicate group the message belongs to.
     #[must_use]
     pub fn group(&self) -> Group<'_> {

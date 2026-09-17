@@ -607,7 +607,7 @@ fn while_the_run_goes_on_a_message_whose_expectation_is_not_read_yet_waits() {
 }
 
 #[test]
-fn expected_counts_each_group_on_each_of_its_subjects_and_arrived_converges_to_it() {
+fn expected_counts_each_group_on_each_of_its_subjects_and_reached_converges_to_it() {
     let sampled_out = sampled_out_line();
     let expectations = [
         linux(1),
@@ -617,7 +617,7 @@ fn expected_counts_each_group_on_each_of_its_subjects_and_arrived_converges_to_i
     ];
     let report = judge(&expectations, &[written(&expectations[0], MAIN)], &[]);
     assert_eq!((report.expected, report.missing), (3, 2), "{report}");
-    assert_eq!(report.arrived(), 1);
+    assert_eq!(report.reached(), 1);
     assert!(report.to_string().contains("expected       3"), "{report}");
 
     let all = [
@@ -627,6 +627,6 @@ fn expected_counts_each_group_on_each_of_its_subjects_and_arrived_converges_to_i
         written(&expectations[2], MAIN),
     ];
     let report = judge(&expectations, &all, &[]);
-    assert_eq!((report.expected, report.arrived()), (3, 3), "{report}");
+    assert_eq!((report.expected, report.reached()), (3, 3), "{report}");
     assert_eq!(report.received, 4, "received counts every id per subject");
 }

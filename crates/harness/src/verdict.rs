@@ -160,7 +160,7 @@ impl Report {
     /// The (group, subject) pairs that some id of the group reached: [`Self::expected`] less
     /// [`Self::missing`], so it converges to `expected` as a run catches up.
     #[must_use]
-    pub const fn arrived(&self) -> u64 {
+    pub const fn reached(&self) -> u64 {
         self.expected.saturating_sub(self.missing)
     }
 
@@ -266,6 +266,16 @@ fn parse_id(text: Option<&str>) -> Option<u64> {
 /// The judgement of `written` and `dead` against `expectations`.
 #[must_use]
 pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLetter]) -> Report {
+    judge_where(expectations, written, dead, |_| true)
+}
+
+/// [`judge`] over the messages and dead letters whose record id `counted` accepts.
+fn judge_where(
+    expectations: &[Expectation],
+    written: &[Written],
+    dead: &[DeadLetter],
+    counted: impl Fn(Option<&str>) -> bool,
+) -> Report {
     let mut report = Report {
         published: expectations.len() as u64,
         ..Report::default()
@@ -277,10 +287,10 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
 
     let mut copies: HashMap<(u64, &str), u64> = HashMap::new();
     // Copies per (group, subject), every copy counted.
-    let mut arrivals: HashMap<(Group<'_>, &str), u64> = HashMap::new();
+    let mut copies_per_group: HashMap<(Group<'_>, &str), u64> = HashMap::new();
     let mut reached: HashMap<(Group<'_>, &str), u64> = HashMap::new();
     let mut compared: BTreeSet<Group<'_>> = BTreeSet::new();
-    for w in written {
+    for w in written.iter().filter(|w| counted(w.record_id.as_deref())) {
         let id = parse_id(w.record_id.as_deref());
         let Some(e) = id.and_then(|id| by_id.get(&id)) else {
             report.unexpected += 1;
@@ -292,11 +302,18 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
         if !e.subjects.contains(&w.subject) || w.tenant.as_deref() != Some(&e.tenant) {
             report.unexpected += 1;
             report.example(Finding::Unexpected, || {
-                format!("{} on {} under tenant {:?}", named(e), w.subject, w.tenant)
+                format!(
+                    "{} on {} under tenant {:?}",
+                    e.describe(),
+                    w.subject,
+                    w.tenant
+                )
             });
             continue;
         }
-        *arrivals.entry((e.group(), w.subject.as_str())).or_default() += 1;
+        *copies_per_group
+            .entry((e.group(), w.subject.as_str()))
+            .or_default() += 1;
         let seen = copies.entry((e.id, w.subject.as_str())).or_default();
         *seen += 1;
         if *seen > 1 {
@@ -315,13 +332,13 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
                 set.mismatched += 1;
                 set.mismatched_lines.insert(e.line_id);
             }
-            if !edits_match(e, &w.attributes) {
+            if !e.edits.written_in(&w.attributes) {
                 report.edit_mismatch += 1;
-                report.example(Finding::EditMismatch, || named(e));
+                report.example(Finding::EditMismatch, || e.describe());
             }
-            if !lua_matches(e, &w.attributes) {
+            if !e.lua.written_in(&w.attributes) {
                 report.lua_mismatch += 1;
-                report.example(Finding::LuaMismatch, || named(e));
+                report.example(Finding::LuaMismatch, || e.describe());
             }
         }
     }
@@ -353,31 +370,29 @@ pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLett
             report.sampled_out += 1;
         }
         if e.subjects.len() > 1
-            && e.subjects
-                .iter()
-                .all(|s| arrivals.get(&(*group, s.as_str())).is_some_and(|n| *n > 1))
+            && e.subjects.iter().all(|s| {
+                copies_per_group
+                    .get(&(*group, s.as_str()))
+                    .is_some_and(|n| *n > 1)
+            })
         {
             report.repeated_on_every_subject += 1;
         }
         // One copy of a group is meant to arrive; every other copy that did not arrive is a
         // drop, whichever of them `dedupe` kept.
-        let Some(first) = e.subjects.first() else {
+        let Some(first) = e.dedupe_subject() else {
             continue;
         };
-        let arrived = reached
-            .get(&(*group, first.as_str()))
-            .copied()
-            .unwrap_or(0)
-            .max(1);
+        let arrived = reached.get(&(*group, first)).copied().unwrap_or(0).max(1);
         report.duplicates_planned += planned;
         report.duplicates_dropped += size.saturating_sub(arrived).min(*planned);
     }
 
-    for letter in dead {
+    for letter in dead.iter().filter(|d| counted(d.record_id.as_deref())) {
         match parse_id(letter.record_id.as_deref()).and_then(|id| by_id.get(&id)) {
             Some(e) => {
                 report.dead_lettered += 1;
-                report.example(Finding::DeadLettered, || named(e));
+                report.example(Finding::DeadLettered, || e.describe());
             }
             None => {
                 report.unexpected += 1;
@@ -401,18 +416,9 @@ pub fn judge_so_far(
     dead: &[DeadLetter],
 ) -> Report {
     let ids: HashSet<u64> = expectations.iter().map(|e| e.id).collect();
-    let known = |record_id: Option<&str>| parse_id(record_id).is_none_or(|id| ids.contains(&id));
-    let written: Vec<Written> = written
-        .iter()
-        .filter(|w| known(w.record_id.as_deref()))
-        .cloned()
-        .collect();
-    let dead: Vec<DeadLetter> = dead
-        .iter()
-        .filter(|d| known(d.record_id.as_deref()))
-        .cloned()
-        .collect();
-    judge(expectations, &written, &dead)
+    judge_where(expectations, written, dead, |record_id| {
+        parse_id(record_id).is_none_or(|id| ids.contains(&id))
+    })
 }
 
 /// Whether `attributes` hold exactly the CSV's value, or nothing, for each of the set's
@@ -425,38 +431,5 @@ fn extraction_matches(e: &Expectation, attributes: &Map<String, Value>) -> bool 
             other => loghub::normalise(column, &other.to_string()),
         });
         got.as_ref() == e.attributes.get(*column)
-    })
-}
-
-/// Whether `attributes` carry what `edit` writes: each set attribute with its value, and
-/// each copied attribute equal to its source in the same record, both absent together.
-fn edits_match(e: &Expectation, attributes: &Map<String, Value>) -> bool {
-    let set = e
-        .edits
-        .set
-        .iter()
-        .all(|(name, value)| attributes.get(name).and_then(Value::as_str) == Some(value));
-    let copied = e
-        .edits
-        .copied
-        .iter()
-        .all(|(target, source)| attributes.get(target) == attributes.get(source));
-    set && copied
-}
-
-/// A message as the summary names it: its id, set and `LineId`.
-fn named(e: &Expectation) -> String {
-    format!("id {} ({} LineId {})", e.id, e.set, e.line_id)
-}
-
-/// Whether `attributes` carry what `lua` writes: each length attribute an integer equal to
-/// the byte length of its string source in the same record, both absent together.
-fn lua_matches(e: &Expectation, attributes: &Map<String, Value>) -> bool {
-    e.lua.lengths.iter().all(|(target, source)| {
-        let expected = attributes
-            .get(source)
-            .and_then(Value::as_str)
-            .map(|text| text.len() as u64);
-        attributes.get(target).map(Value::as_u64) == expected.map(Some)
     })
 }

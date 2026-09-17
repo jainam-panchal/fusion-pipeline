@@ -9,8 +9,83 @@
 //! `PubAck` both land before the source message's ack, so after settling nothing more
 //! arrives.
 
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+use crate::expect::Expectation;
+
+/// The expectations file, read as it grows.
+#[derive(Debug)]
+pub struct Tail {
+    path: PathBuf,
+    file: Option<File>,
+    read: u64,
+    lines: usize,
+    buffer: LineBuffer,
+    expectations: Vec<Expectation>,
+}
+
+impl Tail {
+    /// A tail of the file at `path`, which need not exist yet.
+    #[must_use]
+    pub fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_owned(),
+            file: None,
+            read: 0,
+            lines: 0,
+            buffer: LineBuffer::default(),
+            expectations: Vec::new(),
+        }
+    }
+
+    /// Take in the lines written since the last call. A file not created yet has none.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the file when it cannot be read or is shorter than what was already
+    /// read (rewritten under the tail), and naming the line when a line is not an expectation.
+    pub fn read(&mut self) -> Result<(), String> {
+        let fail = |err: &dyn std::fmt::Display| format!("{}: {err}", self.path.display());
+        if self.file.is_none() {
+            match File::open(&self.path) {
+                Ok(file) => self.file = Some(file),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(err) => return Err(fail(&err)),
+            }
+        }
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        let len = file.metadata().map_err(|err| fail(&err))?.len();
+        if len < self.read {
+            return Err(fail(&"rewritten while it was read; remove it before a run"));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|err| fail(&err))?;
+        self.read += bytes.len() as u64;
+        for line in self.buffer.push(&bytes) {
+            self.lines += 1;
+            let expectation = serde_json::from_str(&line)
+                .map_err(|err| format!("{}:{}: {err}", self.path.display(), self.lines))?;
+            self.expectations.push(expectation);
+        }
+        Ok(())
+    }
+
+    /// The expectations read so far.
+    #[must_use]
+    pub fn expectations(&self) -> &[Expectation] {
+        &self.expectations
+    }
+
+    /// Whether what was read ends with a whole line.
+    #[must_use]
+    pub fn ends_whole(&self) -> bool {
+        !self.buffer.has_partial()
+    }
+}
 
 /// Complete lines out of bytes that arrive in arbitrary pieces.
 #[derive(Debug, Default)]
@@ -66,8 +141,13 @@ impl ProducerOutcome {
 /// removes it before writing the first expectation and writes it after the last.
 #[must_use]
 pub fn done_marker(expectations: &Path) -> PathBuf {
-    let mut path = expectations.as_os_str().to_owned();
-    path.push(".done");
+    with_suffix(expectations, ".done")
+}
+
+/// `path` with `suffix` appended to its last component.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut path = path.as_os_str().to_owned();
+    path.push(suffix);
     PathBuf::from(path)
 }
 
@@ -78,9 +158,7 @@ pub fn done_marker(expectations: &Path) -> PathBuf {
 ///
 /// The I/O error of the write or the rename.
 pub fn write_done(path: &Path, outcome: ProducerOutcome) -> std::io::Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
+    let temporary = with_suffix(path, ".tmp");
     let mut file = std::fs::File::create(&temporary)?;
     writeln!(file, "{}", outcome.as_str())?;
     file.sync_all()?;

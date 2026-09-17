@@ -19,7 +19,7 @@
 //!
 //! When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, each judgement goes to the collector as gauges
 //! under `service.name=loghub-verifier`: `loghub_published`, `loghub_received`,
-//! `loghub_expected`, `loghub_arrived`,
+//! `loghub_expected`, `loghub_reached`,
 //! `loghub_missing`, `loghub_unexpected`, `loghub_extra_copies`, `loghub_dead_lettered`,
 //! `loghub_edit_mismatch`, `loghub_lua_mismatch`, `loghub_sampled_out`,
 //! `loghub_repeated_on_every_subject`, `loghub_duplicates_planned`,
@@ -33,8 +33,6 @@
 //! when the run could not be judged: the producer failed or never finished, the pipeline did
 //! not settle, or a stream could not be read.
 
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc;
@@ -43,8 +41,7 @@ use std::time::{Duration, Instant};
 use async_nats::jetstream::consumer::pull::OrderedConfig;
 use async_nats::jetstream::{self, Context};
 use fusion_harness::cli;
-use fusion_harness::expect::Expectation;
-use fusion_harness::follow::{self, LineBuffer, ProducerOutcome, StreamEnd};
+use fusion_harness::follow::{self, ProducerOutcome, StreamEnd, Tail};
 use fusion_harness::verdict::{DeadLetter, Report, Written, judge, judge_so_far};
 use fusion_nats::headers::{RECORD_ID, TENANT};
 use futures::StreamExt;
@@ -153,10 +150,26 @@ enum Judgement {
 }
 
 /// What a stream reader hands over.
-enum Arrived {
+enum StreamItem {
     Written(u64, Written),
     Dead(u64, DeadLetter),
     Failed(String),
+}
+
+/// One value for each stream the verifier reads.
+#[derive(Clone, Copy, Default)]
+struct PerStream<T> {
+    /// For `PROCESSED`, the sink subjects.
+    sinks: T,
+    /// For `DLQ`, the dead letters.
+    dead: T,
+}
+
+impl PerStream<StreamEnd> {
+    /// Whether both streams have been read to these ends, having seen up to `seen`.
+    fn reached(&self, seen: PerStream<Option<u64>>) -> bool {
+        self.sinks.reached(seen.sinks) && self.dead.reached(seen.dead)
+    }
 }
 
 /// Which stage of its end the run is in.
@@ -167,8 +180,7 @@ enum Phase {
     Settling { clean: u32, deadline: Instant },
     /// Reading the streams up to the ends they had once it settled.
     Reading {
-        sinks: StreamEnd,
-        dead: StreamEnd,
+        ends: PerStream<StreamEnd>,
         deadline: Instant,
     },
 }
@@ -189,7 +201,7 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
             js.clone(),
             SINK_STREAM,
             SINK_SUBJECTS,
-            |sequence, message| Arrived::Written(sequence, written(message)),
+            |sequence, message| StreamItem::Written(sequence, written(message)),
             tx.clone(),
         )),
         tokio::spawn(follow_stream(
@@ -197,7 +209,7 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
             DEAD_LETTER_STREAM,
             DEAD_LETTER_SUBJECTS,
             |sequence, message| {
-                Arrived::Dead(
+                StreamItem::Dead(
                     sequence,
                     DeadLetter {
                         record_id: header(message, RECORD_ID),
@@ -211,28 +223,28 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
         let mut tail = Tail::new(&options.expectations);
         let marker = follow::done_marker(&options.expectations);
         let (mut written_so_far, mut dead_so_far) = (Vec::new(), Vec::new());
-        let (mut seen_sinks, mut seen_dead) = (None, None);
+        let mut seen = PerStream::<Option<u64>>::default();
         let start = Instant::now();
         let mut next_tick = start;
         let mut phase = Phase::Producing;
         loop {
             while let Ok(arrived) = rx.try_recv() {
                 match arrived {
-                    Arrived::Written(sequence, w) => {
-                        seen_sinks = seen_sinks.max(Some(sequence));
+                    StreamItem::Written(sequence, w) => {
+                        seen.sinks = seen.sinks.max(Some(sequence));
                         written_so_far.push(w);
                     }
-                    Arrived::Dead(sequence, d) => {
-                        seen_dead = seen_dead.max(Some(sequence));
+                    StreamItem::Dead(sequence, d) => {
+                        seen.dead = seen.dead.max(Some(sequence));
                         dead_so_far.push(d);
                     }
-                    Arrived::Failed(message) => return Err(message),
+                    StreamItem::Failed(message) => return Err(message),
                 }
             }
             tail.read()?;
             let now = Instant::now();
             if now >= next_tick {
-                let report = judge_so_far(&tail.expectations, &written_so_far, &dead_so_far);
+                let report = judge_so_far(tail.expectations(), &written_so_far, &dead_so_far);
                 eprintln!(
                     "loghub-verifier: {:>4}s published {} received {} missing {} unexpected {}",
                     start.elapsed().as_secs(),
@@ -274,8 +286,10 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
                     let clean = if idle { clean + 1 } else { 0 };
                     if clean >= SETTLED_POLLS {
                         Phase::Reading {
-                            sinks: stream_end(&js, SINK_STREAM).await?,
-                            dead: stream_end(&js, DEAD_LETTER_STREAM).await?,
+                            ends: PerStream {
+                                sinks: stream_end(&js, SINK_STREAM).await?,
+                                dead: stream_end(&js, DEAD_LETTER_STREAM).await?,
+                            },
                             deadline: now + READ_TIMEOUT,
                         }
                     } else if now >= deadline {
@@ -287,39 +301,33 @@ async fn observe(options: &Options, exporter: Option<&Exporter>) -> Result<Repor
                         Phase::Settling { clean, deadline }
                     }
                 }
-                Phase::Reading {
-                    sinks,
-                    dead,
-                    deadline,
-                } => {
-                    if sinks.reached(seen_sinks) && dead.reached(seen_dead) {
+                Phase::Reading { ends, deadline } => {
+                    if ends.reached(seen) {
                         break;
                     }
                     if now >= deadline {
                         return Err(format!(
                             "the streams were not read to their end within {READ_TIMEOUT:?}: \
-                             {SINK_STREAM} at {seen_sinks:?} of {}, {DEAD_LETTER_STREAM} at \
-                             {seen_dead:?} of {}",
-                            sinks.last_sequence, dead.last_sequence
+                             {SINK_STREAM} at {:?} of {}, {DEAD_LETTER_STREAM} at {:?} of {}",
+                            seen.sinks,
+                            ends.sinks.last_sequence,
+                            seen.dead,
+                            ends.dead.last_sequence
                         ));
                     }
-                    Phase::Reading {
-                        sinks,
-                        dead,
-                        deadline,
-                    }
+                    Phase::Reading { ends, deadline }
                 }
             };
             tokio::time::sleep(POLL).await;
         }
         tail.read()?;
-        if tail.buffer.has_partial() {
+        if !tail.ends_whole() {
             return Err(format!(
                 "{} ends without a newline after the producer finished",
                 options.expectations.display()
             ));
         }
-        Ok(judge(&tail.expectations, &written_so_far, &dead_so_far))
+        Ok(judge(tail.expectations(), &written_so_far, &dead_so_far))
     }
     .await;
     for reader in readers {
@@ -339,58 +347,6 @@ fn read_marker(marker: &Path) -> Result<Option<ProducerOutcome>, String> {
     }
 }
 
-/// The expectations file, read as it grows.
-struct Tail {
-    path: PathBuf,
-    file: Option<File>,
-    read: u64,
-    lines: usize,
-    buffer: LineBuffer,
-    expectations: Vec<Expectation>,
-}
-
-impl Tail {
-    fn new(path: &Path) -> Self {
-        Self {
-            path: path.to_owned(),
-            file: None,
-            read: 0,
-            lines: 0,
-            buffer: LineBuffer::default(),
-            expectations: Vec::new(),
-        }
-    }
-
-    /// Take in the lines written since the last call. A file not created yet has none.
-    fn read(&mut self) -> Result<(), String> {
-        let fail = |err: &dyn std::fmt::Display| format!("{}: {err}", self.path.display());
-        if self.file.is_none() {
-            match File::open(&self.path) {
-                Ok(file) => self.file = Some(file),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(err) => return Err(fail(&err)),
-            }
-        }
-        let Some(file) = self.file.as_mut() else {
-            return Ok(());
-        };
-        let len = file.metadata().map_err(|err| fail(&err))?.len();
-        if len < self.read {
-            return Err(fail(&"rewritten while it was read; remove it before a run"));
-        }
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(|err| fail(&err))?;
-        self.read += bytes.len() as u64;
-        for line in self.buffer.push(&bytes) {
-            self.lines += 1;
-            let expectation = serde_json::from_str(&line)
-                .map_err(|err| format!("{}:{}: {err}", self.path.display(), self.lines))?;
-            self.expectations.push(expectation);
-        }
-        Ok(())
-    }
-}
-
 /// Where `stream` ends now.
 async fn stream_end(js: &Context, stream: &str) -> Result<StreamEnd, String> {
     let info = js
@@ -405,13 +361,13 @@ async fn stream_end(js: &Context, stream: &str) -> Result<StreamEnd, String> {
 }
 
 /// Hand every message on `subjects` in `stream`, from the start, to `tx` as it arrives, read
-/// by `arrived` with its stream sequence; a failure is handed over as the last thing.
+/// by `item` with its stream sequence; a failure is handed over as the last thing.
 async fn follow_stream(
     js: Context,
     stream: &'static str,
     subjects: &'static str,
-    arrived: fn(u64, &async_nats::Message) -> Arrived,
-    tx: channel::UnboundedSender<Arrived>,
+    item: fn(u64, &async_nats::Message) -> StreamItem,
+    tx: channel::UnboundedSender<StreamItem>,
 ) {
     let fail = |err: &dyn std::fmt::Display| format!("reading {subjects} from {stream}: {err}");
     let result = async {
@@ -429,7 +385,7 @@ async fn follow_stream(
         while let Some(message) = messages.next().await {
             let message = message.map_err(|err| fail(&err))?;
             let sequence = message.info().map_err(|err| fail(&err))?.stream_sequence;
-            if tx.send(arrived(sequence, &message.message)).is_err() {
+            if tx.send(item(sequence, &message.message)).is_err() {
                 return Ok(());
             }
         }
@@ -437,7 +393,7 @@ async fn follow_stream(
     }
     .await;
     if let Err(message) = result {
-        let _ = tx.send(Arrived::Failed(message));
+        let _ = tx.send(StreamItem::Failed(message));
     }
 }
 
@@ -541,7 +497,7 @@ fn counts(report: &Report) -> [(&'static str, u64); 14] {
         ("loghub_published", report.published),
         ("loghub_received", report.received),
         ("loghub_expected", report.expected),
-        ("loghub_arrived", report.arrived()),
+        ("loghub_reached", report.reached()),
         ("loghub_missing", report.missing),
         ("loghub_unexpected", report.unexpected),
         ("loghub_extra_copies", report.extra_copies),
