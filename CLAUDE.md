@@ -4,10 +4,11 @@ Observability pipeline POC in Rust: a YAML-declared DAG of stages, NATS JetStrea
 
 Read first, in this order:
 
-1. `README.md`: crate map, commands, minimal config, routing example.
+1. `README.md`: quick start, crate map, commands, what the POC concluded.
 2. `CONTEXT.md`: the glossary. Use its terms in code, tests, issues and commit messages.
 3. `docs/specs/2026-09-08-observability-pipeline-poc.md`: the spec. Source of truth for behaviour, limits, metrics and what is out of scope. When a decision changes, amend the spec inline with a dated `Amended YYYY-MM-DD (issue #n):` paragraph rather than rewriting history.
 4. `docs/adr/`: decisions that were hard to reverse. Read the ones touching your area before designing.
+5. `docs/guide/`: the user guide for config authors, an mdBook published to GitHub Pages. It says what each stage, key, header and load error does, and every example in it is a tested folder under `docs/guide/examples/`.
 
 ## Invariants no file confesses
 
@@ -26,6 +27,8 @@ Read first, in this order:
 
 ## How to test
 
+- The user guide is tested too: `guide_examples` runs every folder under `docs/guide/examples/` (`pipeline.yaml`, `input.yaml`, `expected.yaml`, or `expected.yaml` with `rejected:` for a refused config) through the engine, with headers parsed by the NATS source's own code; `guide_pages` fails when a registered stage type has no page, an include is missing, or an example is on no page. CI builds the book with mdBook and fails on any warning.
+
 - Drive behaviour through the trait boundary: load a YAML config, push envelopes through the in-memory `Source`, assert which records reached which in-memory `Sink` and which ack handles saw `ack` versus `nak`. The source, sink and state fakes live in `crates/core/src/memory.rs`; the event and trace fakes live beside their seams.
 - Tests that touch real NATS are `#[ignore]` and need `deploy/compose.yaml` up. Commands are in the README.
 - The loghub harness (`crates/harness`) is tested on its pure modules, `loghub`, `plan`, `expect`, `verdict`, `follow` and `cli`: what a run publishes, how a report judges it and how the verifier follows a run are not observable through `Source`/`Sink`. Its route table, sample verdicts and `edit`/`lua` writes are checked against `deploy/pipeline-poc.yaml` through the harness in `deploy_configs.rs`, and the live runs are `make loghub` and `make chaos` (`deploy/loghub-check.sh`).
@@ -36,7 +39,8 @@ Read first, in this order:
 
 ## Workflow
 
-- Work happens on a branch named `feat/<issue>-<slug>` (or `fix/`, `refactor/`), pushed and merged by PR. Never commit on `main`.
+- Work happens on a branch named `feat/<issue>-<slug>` (or `fix/`, `refactor/`, `docs/`), pushed and merged by PR. Never commit on `main`.
+- A PR that changes what a config author sees (a stage's keys, defaults or behaviour, a load or start-up error text, a pipeline header, a limit) updates the matching page under `docs/guide/src/` and its examples in the same PR. The guide follows the spec; when they disagree, fix the guide.
 - Commits are Conventional Commits scoped by crate: `feat(core): ...`, `fix(nats): ...`, `docs(spec): ...`; `deploy` for the compose stack.
 - One ticket per `/implement` session. Clear context between tickets.
 
