@@ -1,0 +1,9 @@
+source:
+  type: nats
+  stream: PROCESSED
+  consumer: archive
+nodes:
+  - id: archive
+    type: sink.nats
+    stream: ARCHIVE
+    subject: archive.logs

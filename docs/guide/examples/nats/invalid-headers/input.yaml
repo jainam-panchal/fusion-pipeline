@@ -1,0 +1,12 @@
+- subject: processed.logs
+  headers: {Fusion-Record-Id: "1", Fusion-Tenant: acme, Fusion-Ingestion-Time: soon, Fusion-Ingestion-Time-Kind: reported}
+  payload: {body: bad time}
+- subject: processed.logs
+  headers: {Fusion-Record-Id: "2", Fusion-Tenant: [acme, globex]}
+  payload: {body: tenant given twice}
+- subject: processed.logs
+  headers: {Fusion-Record-Id: "+3"}
+  payload: {body: bad record id}
+- subject: processed.logs
+  headers: {Fusion-Record-Id: "4", Fusion-Record-Kind: LOG}
+  payload: {body: bad kind}

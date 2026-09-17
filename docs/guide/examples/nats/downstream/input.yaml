@@ -1,0 +1,14 @@
+- subject: processed.logs
+  headers:
+    Fusion-Record-Id: "1"
+    Fusion-Tenant: acme
+    Fusion-Ingestion-Time: "1757000000000000000"
+    Fusion-Ingestion-Time-Kind: reported
+  payload: {body: written by the first pipeline}
+- subject: processed.logs
+  headers:
+    Fusion-Record-Id: "2"
+    Fusion-Tenant: globex
+    Fusion-Ingestion-Time: "1757000000000000001"
+    Fusion-Ingestion-Time-Kind: clock
+  payload: {body: timed by a worker clock upstream}
