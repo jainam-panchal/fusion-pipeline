@@ -195,7 +195,8 @@ struct Walk<'p: 't, 't> {
     meta: &'t Meta,
     /// What the record's trace ids derive from.
     key: TraceKey,
-    /// The node whose stage or sink is running, so a panic is charged to it.
+    /// The node whose stage or sink is running, or whose output is being handed on, so a
+    /// panic is charged to it; none once its branch has returned.
     at: Option<At<'t>>,
     /// The first failure of the walk, the one the nak reports.
     failure: Option<Failure>,
@@ -406,9 +407,11 @@ impl<'p> Walker<'p> {
                 labels: source,
                 span: None,
             });
-            walk.fail(at, Instant::now(), FailureKind::Panic, &PANICKED);
-            walk.spans
-                .fail_open(Instant::now(), FailureKind::Panic, PANICKED);
+            // `fail` closes the failing node's span first; any span still open is one the
+            // panic cut short, closed at the same instant.
+            let panicked = Instant::now();
+            walk.fail(at, panicked, FailureKind::Panic, &PANICKED);
+            walk.spans.fail_open(panicked, FailureKind::Panic, PANICKED);
         }
         let Walk { failure, spans, .. } = walk;
         // The trace of every failed or redelivered walk is kept, so a log line about it
@@ -471,9 +474,12 @@ impl<'p> Walker<'p> {
         while let Some(target) = targets.next() {
             if targets.peek().is_none() {
                 self.run_node(target, record, walk, parent);
+                walk.at = None;
                 return;
             }
             self.run_node(target, Arc::clone(&record), walk, parent);
+            // A node's walk is over, its branch included: nothing is running until the next.
+            walk.at = None;
         }
     }
 

@@ -1,7 +1,8 @@
 //! Structured pipeline logs: the event vocabulary and the event-log boundary (ADR 0006).
 //!
 //! The pipeline logs a closed set of events, each with fixed fields, so a line without its
-//! record id or tenant cannot be written and a test can assert every field. The engine
+//! tenant cannot be written, a record id is absent only when the record has none, and a test
+//! can assert every field. The engine
 //! emits `stage_error`, `nak` and `redelivery`; the NATS source emits the two dead-letter
 //! events. Drops are not events: `records_dropped_total` counts them. An [`EventLog`] is the
 //! seam an exporter implements: [`InMemoryEventLog`] is the fake for tests,
