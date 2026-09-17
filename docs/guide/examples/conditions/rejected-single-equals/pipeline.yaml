@@ -1,0 +1,13 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: keep_errors
+    type: filter
+    condition: severity_number = 17
+    action: keep
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

@@ -1,0 +1,1 @@
+rejected: 'node `no_repeats`: window `10`: needs a unit: `ms`, `s`, `m` or `h`'

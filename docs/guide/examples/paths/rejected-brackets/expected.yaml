@@ -1,0 +1,1 @@
+rejected: 'node `server_errors`: condition `attributes["http.status"] >= 500`: brackets are not allowed; instead use `attributes.http.status` (path at offset 0)'

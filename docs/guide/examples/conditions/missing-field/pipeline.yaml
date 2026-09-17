@@ -1,0 +1,9 @@
+nodes:
+  - id: has_user
+    type: filter
+    condition: attributes.user != null
+    action: keep
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

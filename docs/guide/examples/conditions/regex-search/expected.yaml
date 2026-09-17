@@ -1,0 +1,5 @@
+acks: [ack, ack, ack]
+sinks:
+  out:
+    - payload: {kind: log, body: all good}
+    - payload: {kind: log, body: 7}

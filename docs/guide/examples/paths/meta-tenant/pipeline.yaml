@@ -1,0 +1,9 @@
+nodes:
+  - id: only_acme
+    type: filter
+    condition: meta.tenant == "acme"
+    action: keep
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

@@ -1,0 +1,5 @@
+acks: [ack, ack, ack]
+sinks:
+  out:
+    - payload: {kind: log, severity_text: ERROR}
+    - payload: {kind: log, severity_text: WARN, attributes: {retry: true}}

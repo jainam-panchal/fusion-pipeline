@@ -1,0 +1,9 @@
+nodes:
+  - id: keep
+    type: filter
+    condition: severity_text == "ERROR" or severity_text == "WARN" and attributes.retry == true
+    action: keep
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

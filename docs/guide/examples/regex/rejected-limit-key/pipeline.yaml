@@ -1,0 +1,14 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: keep_disk
+    type: filter
+    condition: body =~ "disk"
+    action: keep
+    limits: {input_kib: 64}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

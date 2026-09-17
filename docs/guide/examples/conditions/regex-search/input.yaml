@@ -1,0 +1,9 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: disk full on /var}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: all good}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "3"}
+  payload: {body: 7}

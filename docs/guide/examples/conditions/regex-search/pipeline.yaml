@@ -1,0 +1,9 @@
+nodes:
+  - id: no_disk
+    type: filter
+    condition: body !~ "disk (full|failing)"
+    action: keep
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

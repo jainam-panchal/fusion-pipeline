@@ -1,0 +1,1 @@
+rejected: 'node `keep_some`: `on_state_error` belongs to `mode: every_nth`, not `mode: random`'

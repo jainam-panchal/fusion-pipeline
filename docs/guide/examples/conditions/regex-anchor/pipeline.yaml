@@ -1,0 +1,9 @@
+nodes:
+  - id: starts_with_disk
+    type: filter
+    condition: body =~ "^disk"
+    action: keep
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
