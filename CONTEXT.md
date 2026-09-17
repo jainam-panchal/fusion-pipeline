@@ -308,6 +308,10 @@ _Avoid_: duplicate delivery (a delivery is the transport's), unexpected
 A duplicate group the POC config's `sample` node leaves off the main subject: decided by the line and its cycle, so every copy of the group shares it and a redelivery gets it again. Its expectation names no main subject, so a copy there is unexpected, and it is judged for `dedupe` on its first remaining subject (the Linux audit subject), or not at all. Reported, never a failure.
 _Avoid_: dropped (a drop is any record's), filtered
 
+**Done marker**:
+The file beside the expectations file (`expectations.jsonl.done`) the producer writes once it has finished, saying `published` or `failed`, and removes before it starts. A verifier following the run takes it as the sign that no more expectations will be written.
+_Avoid_: sentinel, flag file, lock
+
 **Chaos run**:
 A loghub harness run (`make chaos`) during which the pipeline container is killed at 20s and started at 25s, and Dragonfly is paused at 40s for 5s. It passes as any run does, and is judged at all only when the chaos landed: the source consumer redelivered messages, `dedupe_body` counted state errors, and nothing was nakked.
 _Avoid_: chaos test (the spec's name for the requirement), fault injection, soak

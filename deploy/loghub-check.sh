@@ -23,15 +23,21 @@
 # messages (its deliveries grew by more than the messages published), `dedupe_body` counted
 # state errors (`state_errors_total`), and no message was nakked (`source_naks_total`), since
 # `on_state_error: pass` forwards a record the store could not answer for rather than failing
-# it.
+# it. The counters are read as their highest value since the producer started, so what the
+# killed process counted before 20s is not lost. The schedule needs a run longer than 45s: on
+# a shorter one (PRODUCER_ARGS) the verifier can settle before the pause, and the run is not
+# judged.
 #
 # Exits 0 when nothing is missing, unexpected, dead-lettered or wrongly written, 1 when
 # something is (the verifier's verdict), 2 when the run could not be judged: the producer
-# failed, the pipeline did not settle, or under --chaos the chaos did not land. Needs docker
+# failed, the pipeline did not settle, a command the script runs (docker, nats, curl) failed,
+# or under --chaos the chaos did not land. Needs docker
 # compose, the `nats` CLI, curl, jq and cargo. Host ports follow the compose overrides
 # (DRAGONFLY_PORT, GRAFANA_PORT, ...). The stack keeps running the POC config afterwards;
 # `docker compose -f deploy/compose.yaml up -d` puts pipeline.yaml back.
-set -euo pipefail
+set -eEuo pipefail
+# A command that fails on its own is a run not judged, never a loss.
+trap 'exit 2' ERR
 
 cd "$(dirname "$0")/.."
 export PIPELINE_CONFIG=pipeline-poc.yaml
@@ -78,9 +84,14 @@ delivered() {
     nats consumer info LOGS pipeline --json | jq -r '"\(.delivered.consumer_seq) \(.delivered.stream_seq)"'
 }
 
-# prom_sum <selector>: the sum of the matching series now, 0 when there is none.
-prom_sum() {
-    curl -sf --get "$PROM/api/v1/query" --data-urlencode "query=sum($1) or vector(0)" \
+# prom_max <selector>: the sum over the matching series of each one's highest value since
+# the producer started, 0 when there is none. A counter restarted by the kill keeps what it
+# had counted before.
+prom_max() {
+    local window
+    window=$(awk -v t0="$T0" -v now="$EPOCHREALTIME" 'BEGIN { printf "%d", now - t0 + 1 }')
+    curl -sf --get "$PROM/api/v1/query" \
+        --data-urlencode "query=sum(max_over_time($1[${window}s])) or vector(0)" \
         | jq -r '.data.result[0].value[1]'
 }
 
@@ -149,7 +160,7 @@ done
 rm -f "$EXPECTATIONS" "$EXPECTATIONS.done"
 read -r CONSUMER_SEQ_BEFORE STREAM_SEQ_BEFORE < <(delivered)
 
-step "produce and verify$( ((CHAOS)) && echo ", with chaos" )"
+if ((CHAOS)); then step "produce and verify, with chaos"; else step "produce and verify"; fi
 OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:4318} \
     target/release/loghub-verifier --expectations "$EXPECTATIONS" &
 VERIFIER=$!
@@ -172,8 +183,8 @@ read -r consumer_seq stream_seq < <(delivered)
 redelivered=$(((consumer_seq - CONSUMER_SEQ_BEFORE) - (stream_seq - STREAM_SEQ_BEFORE)))
 # One pipeline export (5s) and one scrape (5s) after the pipeline settled.
 sleep 12
-state_errors=$(prom_sum "state_errors_total{stage=\"dedupe_body\",$TENANTS}")
-naks=$(prom_sum "source_naks_total{$TENANTS}")
+state_errors=$(prom_max "state_errors_total{stage=\"dedupe_body\",$TENANTS}")
+naks=$(prom_max "source_naks_total{$TENANTS}")
 echo "redelivered messages          $redelivered   (the kill at ${KILL_AT}s: more than 0)"
 echo "dedupe_body state errors      $state_errors   (the pause at ${PAUSE_AT}s: more than 0)"
 echo "naks                          $naks   (on_state_error: pass: 0)"

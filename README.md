@@ -475,8 +475,9 @@ The script brings the stack up with `PIPELINE_CONFIG=pipeline-poc.yaml`, purges 
   behind the plan, and says how it ended in `expectations.jsonl.done`.
 - `loghub-verifier` follows the run: it reads the expectations as they are written and every
   `processed.>` and `dlq.>` subject as the pipeline writes it, and every 5s judges what it has
-  and exports it to the collector (the internal dashboard's *Coverage* row, where published
-  and received converge). Once the producer is done, the `pipeline` consumer has settled and
+  and exports it to the collector (the internal dashboard's *Coverage* row, where `arrived`,
+  the line and subject pairs some copy reached, climbs to `expected`; `published` counts
+  messages and `received` record and subject pairs, so those two never meet). Once the producer is done, the `pipeline` consumer has settled and
   both streams are read to their end, it prints the final report. A line's copies count
   together: it is missing when none reached a subject it should have, and a second copy is an
   extra copy, allowed as long as `dedupe` dropped at least 80% of the planned duplicates.
@@ -493,16 +494,17 @@ of 2026-09-17:
 
 ```
 published      100000
-received       80705
+received       80694
+expected       80513
 missing        0
 unexpected     0
 dead_lettered  0
 edit_mismatch  0
 lua_mismatch   0
 sampled_out    7091
-extra_copies   192
-repeated_on_every_subject 39
-dedupe         dropped 27542 of 27695 planned duplicates (at least 80%: held)
+extra_copies   181
+repeated_on_every_subject 36
+dedupe         dropped 27550 of 27695 planned duplicates (at least 80%: held)
 extraction by set:
   Apache   100.000% of 15771 groups, 0 mismatched
   Linux    100.000% of 15738 groups, 0 mismatched
@@ -511,14 +513,17 @@ extraction by set:
 verdict: PASS
 
 == did the chaos land?
-redelivered messages          5   (the kill at 20s: more than 0)
+redelivered messages          8   (the kill at 20s: more than 0)
 dedupe_body state errors      8   (the pause at 40s: more than 0)
 naks                          0   (on_state_error: pass: 0)
 verdict: PASS under chaos
 ```
 
 The run without chaos that day had 22 extra copies and 4 groups repeated on both Linux
-subjects (dedupe races), and dropped 27677 of the planned duplicates. The first 100k run of
+subjects (dedupe races), and dropped 27677 of the planned duplicates. The chaos checks read
+each counter's highest value since the producer started, so what the killed process counted
+survives its restart; a command the script runs that fails exits 2, and the schedule needs a
+run longer than 45s. The first 100k run of
 #13 found nine Linux lines with more than one space before the component or after the colon
 (`kernel:   HighMem zone: ...`); the Linux pattern now starts `Component` and `Content` at the
 first non-space, as the CSV does.

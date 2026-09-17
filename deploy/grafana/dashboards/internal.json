@@ -1415,8 +1415,8 @@
     {
       "id": 1101,
       "type": "timeseries",
-      "title": "Did every record arrive?  (published vs received, converging)",
-      "description": "The loghub verifier's judgement, exported every 5s while a run goes on and once more when it is final (settled = 1). published: messages the producer got a PubAck for. received: distinct (record, subject) pairs on the sink subjects that were expected there; a Linux record counts on main and audit. While records are in flight, received trails published; it converges once the pipeline catches up, also after the chaos run's kill and pause. sampled out: lines the sample node leaves off the main subject. The series go stale 5 minutes after the run.",
+      "title": "Did every record arrive?  (arrived converging to expected; published, received)",
+      "description": "The loghub verifier's judgement, exported every 5s while a run goes on and once more when it is final (settled = 1). expected: (line, subject) pairs the run must deliver, a Linux line counting on main and audit and a sampled-out line on neither main nor, outside Linux, anywhere. arrived: those some copy of the line reached; while records are in flight it trails expected, and on a run without loss it meets it, also after the chaos run's kill and pause. published: messages the producer got a PubAck for. received: distinct (record, subject) pairs read back, duplicates that got through included. sampled out: lines the sample node leaves off the main subject. The series go stale 5 minutes after the run.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1449,22 +1449,7 @@
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "blue"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "received"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "green"
+                  "fixedColor": "purple"
                 }
               }
             ]
@@ -1498,12 +1483,67 @@
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "purple"
+                  "fixedColor": "orange"
                 }
               },
               {
                 "id": "max",
                 "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "expected"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arrived"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "received"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
               }
             ]
           }
@@ -1525,6 +1565,24 @@
         }
       },
       "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_expected[15s]))",
+          "legendFormat": "expected",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_arrived[15s]))",
+          "legendFormat": "arrived",
+          "refId": "F"
+        },
         {
           "datasource": {
             "type": "prometheus",
