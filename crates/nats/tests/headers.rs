@@ -228,6 +228,23 @@ fn a_kind_header_that_does_not_parse_is_reported_and_leaves_the_kind_unreadable_
 }
 
 #[test]
+fn only_an_unreadable_kind_refuses_the_message() {
+    assert!(InvalidHeader::RecordKind("Log".to_owned()).refuses_message());
+    assert!(InvalidHeader::Repeated(RECORD_KIND).refuses_message());
+    for ignored in [
+        InvalidHeader::RecordId("x".to_owned()),
+        InvalidHeader::Repeated(RECORD_ID),
+        InvalidHeader::Repeated(TENANT),
+        InvalidHeader::Tenant,
+        InvalidHeader::Time("x".to_owned()),
+        InvalidHeader::Kind("x".to_owned()),
+        InvalidHeader::Unpaired(INGESTION_TIME),
+    ] {
+        assert!(!ignored.refuses_message(), "{ignored:?}");
+    }
+}
+
+#[test]
 fn a_bad_time_and_a_bad_kind_are_both_reported() {
     let headers = map(&[(INGESTION_TIME, "x"), (INGESTION_TIME_KIND, "y")]);
     let (arrival, invalid) = arrival_of("processed", Some(&headers), None, 1);

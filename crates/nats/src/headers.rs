@@ -204,6 +204,20 @@ pub enum InvalidHeader {
     Unpaired(&'static str),
 }
 
+impl InvalidHeader {
+    /// Whether the message is not walked because of this header: a `Fusion-Record-Kind` that
+    /// does not parse or is given twice leaves the kind unreadable, which is not a log. Every
+    /// other header is only ignored.
+    #[must_use]
+    pub fn refuses_message(&self) -> bool {
+        match self {
+            Self::RecordKind(_) => true,
+            Self::Repeated(name) => *name == RECORD_KIND,
+            _ => false,
+        }
+    }
+}
+
 /// What JetStream handed the source for one message, apart from its payload's content.
 #[derive(Debug, Clone, Copy)]
 pub struct Received<'m> {

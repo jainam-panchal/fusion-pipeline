@@ -185,8 +185,8 @@ impl JetStreamClient {
         self.publish_with_headers(subject, headers, payload);
     }
 
-    /// Publish `payload` on `subject` with the headers `pairs`, none for a message as a
-    /// producer that sets no header sends it.
+    /// Publish `payload` on `subject` with the headers `pairs`. Empty `pairs` publish the
+    /// message with no headers at all.
     fn publish_headed(&self, subject: &str, pairs: &[(&str, &str)], payload: &str) {
         let mut headers = async_nats::HeaderMap::new();
         for (name, value) in pairs {
@@ -911,6 +911,11 @@ fn a_message_the_transport_does_not_say_is_a_log_is_acked_and_never_walked() {
             ]
         ),
         4
+    );
+    assert_eq!(
+        recorder.counter(CounterMetric::SourceInvalidHeaders, &[("tenant", "acme")]),
+        1,
+        "the kind header `Log` is counted"
     );
 
     nats.shutdown();

@@ -455,10 +455,16 @@ impl NatsSource {
         }
     }
 
-    /// Log and count every pipeline header the source ignored, under `tenant`.
+    /// Log and count every pipeline header that did not parse, under `tenant`: ignored, or,
+    /// for the kind, the reason the message is not walked.
     fn report_invalid_headers(&self, subject: &str, invalid: &[InvalidHeader], tenant: &str) {
         for problem in invalid {
-            eprintln!("nats source: ignored a pipeline header on `{subject}`: {problem}");
+            let outcome = if problem.refuses_message() {
+                "not walked: an unreadable"
+            } else {
+                "ignored a"
+            };
+            eprintln!("nats source: {outcome} pipeline header on `{subject}`: {problem}");
             self.signals.metrics().source_invalid_header(tenant);
         }
     }
