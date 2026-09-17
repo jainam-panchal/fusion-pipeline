@@ -3,6 +3,7 @@
 
 pub mod cli;
 pub mod expect;
+pub mod follow;
 pub mod loghub;
 pub mod plan;
 pub mod verdict;

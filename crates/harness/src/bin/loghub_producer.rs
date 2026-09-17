@@ -9,6 +9,9 @@
 //! expectation is written only once the message's `PubAck` is in, so the file lists exactly
 //! what the stream holds.
 //!
+//! Once it is done it writes the done marker beside the expectations file (`published` or
+//! `failed`), which a verifier following the run waits for; it removes a stale one first.
+//!
 //! Exits 1 when a message could not be published, or when the timing the plan relies on did
 //! not hold: a duplicate trailed its original by more than [`DUP_LAG`], a body came back
 //! sooner than the dedupe window, the lag and [`REPEAT_MARGIN`], or a publish needed a retry
@@ -25,6 +28,7 @@ use async_nats::HeaderMap;
 use async_nats::jetstream::{self, Context};
 use fusion_harness::cli;
 use fusion_harness::expect::{Expectation, expectation};
+use fusion_harness::follow::{self, ProducerOutcome};
 use fusion_harness::loghub::{self, Line, Set};
 use fusion_harness::plan::{DUP_LAG, PlanConfig, Planned, REPEAT_MARGIN, plan};
 use fusion_nats::headers::{MSG_ID, RECORD_ID};
@@ -106,14 +110,26 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(&options)) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
+    let marker = follow::done_marker(&options.expectations);
+    if let Err(err) = std::fs::remove_file(&marker)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("loghub-producer: {}: {err}", marker.display());
+        return ExitCode::FAILURE;
+    }
+    let (outcome, code) = match runtime.block_on(run(&options)) {
+        Ok(true) => (ProducerOutcome::Published, ExitCode::SUCCESS),
+        Ok(false) => (ProducerOutcome::Failed, ExitCode::FAILURE),
         Err(message) => {
             eprintln!("loghub-producer: {message}");
-            ExitCode::FAILURE
+            (ProducerOutcome::Failed, ExitCode::FAILURE)
         }
+    };
+    if let Err(err) = follow::write_done(&marker, outcome) {
+        eprintln!("loghub-producer: {}: {err}", marker.display());
+        return ExitCode::FAILURE;
     }
+    code
 }
 
 /// One set's lines with its name, so a planned message can be turned into a publish.
