@@ -1,0 +1,15 @@
+nodes:
+  - id: errors
+    type: filter
+    condition: severity_text == "ERROR"
+    action: keep
+  - id: slow
+    type: filter
+    from: source
+    condition: attributes.duration_ms > 1000
+    action: keep
+  - id: out
+    type: sink.nats
+    from: [errors, slow]
+    stream: PROCESSED
+    subject: processed.logs

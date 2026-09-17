@@ -1,0 +1,8 @@
+- subject: logs.acme.checkout
+  headers:
+    Fusion-Record-Id: "7"
+  payload:
+    id: 99
+    body: payment failed
+    resource:
+      tenant.id: globex

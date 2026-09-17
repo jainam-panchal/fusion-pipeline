@@ -1,0 +1,9 @@
+nodes:
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
+  - id: drop_debug
+    type: filter
+    condition: severity_text == "DEBUG"
+    action: drop

@@ -1,0 +1,9 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {severity_text: DEBUG, resource: {service.name: checkout}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {severity_text: INFO, resource: {service.name: search}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "3"}
+  payload: {severity_text: INFO, resource: {service.name: checkout}}

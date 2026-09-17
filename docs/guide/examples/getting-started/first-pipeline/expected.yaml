@@ -1,0 +1,12 @@
+acks: [ack, ack]
+sinks:
+  out:
+    - headers:
+        Fusion-Record-Id: "2"
+        Fusion-Tenant: acme
+        Fusion-Ingestion-Time: "1758000000000000000"
+        Fusion-Ingestion-Time-Kind: reported
+      payload:
+        kind: log
+        severity_text: WARN
+        body: payment retry

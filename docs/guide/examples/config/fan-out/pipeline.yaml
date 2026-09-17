@@ -1,0 +1,14 @@
+nodes:
+  - id: all
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.all
+  - id: errors
+    type: filter
+    from: source
+    condition: severity_text == "ERROR"
+    action: keep
+  - id: errors_out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.errors

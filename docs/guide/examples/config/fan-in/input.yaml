@@ -1,0 +1,9 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {severity_text: ERROR, attributes: {duration_ms: 20}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {severity_text: INFO, attributes: {duration_ms: 3000}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "3"}
+  payload: {severity_text: ERROR, attributes: {duration_ms: 3000}}
