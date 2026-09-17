@@ -15,6 +15,7 @@ name = "loghub-verifier"
 path = "src/bin/loghub_verifier.rs"
 
 [dependencies]
+fusion-core.workspace = true
 fusion-nats.workspace = true
 async-nats.workspace = true
 bytes.workspace = true

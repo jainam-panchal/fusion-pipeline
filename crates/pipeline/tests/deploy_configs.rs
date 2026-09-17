@@ -343,17 +343,20 @@ fn the_routing_example_archives_every_record_of_half_the_linux_hosts() {
 /// Every `STRIDE`th distinct line of each loghub set goes through the POC config.
 const LOGHUB_STRIDE: usize = 25;
 
-/// Issue #13: the loghub harness judges the POC pipeline against a route table and the
-/// structured CSV, not against a run of the pipeline. This checks that the table is the
-/// config's: each set reaches exactly the subjects the table names, under its tenant and
-/// record id, and the verifier's own verdict over what the sinks got passes, with every set's
-/// extraction compared. How well each pattern extracts is `extract_loghub.rs`'s question, and
-/// the live run's report; it is not gated here.
+/// Issue #13: the loghub harness judges the POC pipeline against what it writes down by hand
+/// (the subjects each set reaches, `dedupe` dropping a planned duplicate, what `edit` writes)
+/// and the structured CSV, not against a run of the pipeline. This checks that what it
+/// writes down is the config's: every sampled line goes through twice, as the producer sends
+/// a line and its duplicate, and the verifier's own verdict over what the sinks wrote passes
+/// (nothing missing or unexpected, `edit` as expected, enough duplicates dropped), with each
+/// set reaching exactly its subjects and every set's extraction compared. How well each
+/// pattern extracts is `extract_loghub.rs`'s question, and the live run's report; it is not
+/// gated here.
 #[test]
-fn the_poc_pipeline_sends_each_loghub_set_where_the_harness_expects_it() {
+fn the_poc_pipeline_treats_each_loghub_set_as_the_harness_expects() {
     use fusion_harness::expect::expectation;
     use fusion_harness::loghub::{self, SETS};
-    use fusion_harness::verdict::{Delivery, judge};
+    use fusion_harness::verdict::{Written, judge};
 
     let yaml = deploy_config("pipeline-poc.yaml");
     let config = Config::from_yaml(&yaml).expect("config parses");
@@ -374,36 +377,30 @@ fn the_poc_pipeline_sends_each_loghub_set_where_the_harness_expects_it() {
     for set in &SETS {
         let lines = loghub::load(&loghub::testdata(), set).expect("set loads");
         for line in lines.iter().step_by(LOGHUB_STRIDE) {
-            let id = expectations.len() as u64 + 1;
-            // As the producer sends it: the id in `Fusion-Record-Id` only, not in the payload.
-            let record = Record::from_json(
-                &serde_json::json!({
-                    "body": line.body,
-                    "resource": {"log.format": set.name},
-                    "attributes": {"loghub.line_id": line.line_id},
-                })
-                .to_string(),
-            )
-            .expect("record parses");
-            let arrival = Arrival {
-                record_id: Some(RecordId(id)),
-                ..arrival_as(set.tenant)
-            };
-            probes.push(h.source.push_arrival(record, arrival));
-            expectations.push(
-                expectation(id, set.name, line.line_id, 0, None, line.attributes.clone())
-                    .expect("a vendored set"),
-            );
+            let original = expectations.len() as u64 + 1;
+            for dup_of in [None, Some(original)] {
+                let id = expectations.len() as u64 + 1;
+                // As the producer sends it: the id in `Fusion-Record-Id` only, not in the
+                // payload.
+                let record = Record::from_json(&loghub::payload(set, line, 0).to_string())
+                    .expect("record parses");
+                let arrival = Arrival {
+                    record_id: Some(RecordId(id)),
+                    ..arrival_as(set.tenant)
+                };
+                probes.push(h.source.push_arrival(record, arrival));
+                expectations.push(expectation(id, set, line, 0, dup_of));
+            }
         }
     }
     for probe in &probes {
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     }
 
-    let deliveries: Vec<Delivery> = subjects
+    let written: Vec<Written> = subjects
         .iter()
         .flat_map(|(node, subject)| {
-            sinks.outgoing(node).into_iter().map(|out| Delivery {
+            sinks.outgoing(node).into_iter().map(|out| Written {
                 subject: subject.clone(),
                 record_id: Some(out.meta.record_id.0.to_string()),
                 tenant: Some(out.meta.tenant.to_string()),
@@ -411,18 +408,20 @@ fn the_poc_pipeline_sends_each_loghub_set_where_the_harness_expects_it() {
             })
         })
         .collect();
-    let report = judge(&expectations, &deliveries, &[]);
+    let report = judge(&expectations, &written, &[]);
     assert!(report.passed(), "{report}");
-    assert_eq!(report.extra_copies, 0, "{report}");
-    let linux = expectations.iter().filter(|e| e.set == "Linux").count() as u64;
+    assert_eq!(report.edit_mismatch, 0, "{report}");
+    let groups = expectations.len() as u64 / 2;
+    assert_eq!(report.duplicates_planned, groups, "{report}");
+    let linux = expectations.iter().filter(|e| e.set == "Linux").count() as u64 / 2;
     assert_eq!(
-        report.received,
-        expectations.len() as u64 + linux,
-        "Linux reaches two subjects, every other set one: {report}"
+        report.received - report.extra_copies,
+        groups + linux,
+        "one copy of each line, Linux on two subjects and every other set on one: {report}"
     );
-    assert_eq!(report.formats.len(), SETS.len(), "{report}");
-    for (set, format) in &report.formats {
-        assert!(format.checked > 0, "{set}: {report}");
+    assert_eq!(report.sets.len(), SETS.len(), "{report}");
+    for (set, extraction) in &report.sets {
+        assert!(extraction.checked > 0, "{set}: {report}");
     }
     h.finish();
 }

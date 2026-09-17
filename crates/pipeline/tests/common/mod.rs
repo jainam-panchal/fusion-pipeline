@@ -32,6 +32,23 @@ pub fn deploy_config(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("deploy/{name} is readable: {err}"))
 }
 
+/// The `pattern` of node `node` in the config shipped as `deploy/{name}`, so a test runs the
+/// pattern the config ships rather than a copy of it.
+pub fn deploy_pattern(name: &str, node: &str) -> String {
+    let config = fusion_core::config::Config::from_yaml(&deploy_config(name))
+        .unwrap_or_else(|err| panic!("deploy/{name} parses: {err}"));
+    config
+        .nodes
+        .iter()
+        .find(|n| n.id == node)
+        .unwrap_or_else(|| panic!("deploy/{name} has node `{node}`"))
+        .params
+        .get("pattern")
+        .and_then(|pattern| pattern.as_str())
+        .unwrap_or_else(|| panic!("node `{node}` in deploy/{name} has a pattern"))
+        .to_owned()
+}
+
 /// How long a test waits for an ack handle to settle.
 pub const WAIT: Duration = Duration::from_secs(5);
 

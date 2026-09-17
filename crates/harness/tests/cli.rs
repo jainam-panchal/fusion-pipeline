@@ -48,3 +48,22 @@ fn durations_take_a_unit() {
     assert!(cli::duration("2").is_err());
     assert!(cli::duration("-1s").is_err());
 }
+
+#[test]
+fn both_binaries_share_the_expectations_path_and_nats_url_defaults() {
+    let known = ["--expectations", "--nats-url"];
+    let none = cli::parse(std::iter::empty(), &known).expect("parses");
+    assert_eq!(
+        none.expectations(),
+        std::path::PathBuf::from(cli::DEFAULT_EXPECTATIONS)
+    );
+    let given = cli::parse(
+        ["--expectations", "x.jsonl", "--nats-url", "nats://h:1"]
+            .into_iter()
+            .map(str::to_owned),
+        &known,
+    )
+    .expect("parses");
+    assert_eq!(given.expectations(), std::path::PathBuf::from("x.jsonl"));
+    assert_eq!(given.nats_url(), "nats://h:1");
+}

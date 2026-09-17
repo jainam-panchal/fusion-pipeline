@@ -1,34 +1,44 @@
-//! The verifier's verdict: the expectations against what the sinks and the dead-letter stream
-//! hold after a run.
+//! The verifier's verdict: the expectations against what the sinks wrote and the
+//! dead-letter stream holds after a run.
 //!
-//! Delivery is judged per duplicate group and sink, because `dedupe` keeps whichever copy of
-//! a group it sees first and lets both through when they race: a group is missing from a
-//! sink when no id of it arrived there, and a second id, or a second copy of one id, is an
-//! extra copy, which at-least-once delivery allows. A delivery nobody expected on that
+//! What reached each subject is judged per duplicate group, because `dedupe` keeps whichever
+//! copy of a group it sees first and lets both through when they race: a group is missing
+//! from a subject when no id of it arrived there, and a second id, or a second copy of one
+//! id, is an extra copy, which at-least-once delivery allows. A message nobody expected on that
 //! subject, under that tenant, or without a readable `Fusion-Record-Id` is unexpected. A
 //! dead letter fails the run even when a duplicate of it arrived.
 //!
-//! Extraction is judged once per group, on the first copy that reached the main sink: the
-//! set's CSV columns, an absent attribute equal to an empty cell and `Content` compared
-//! without trailing whitespace. It is reported, never gated.
+//! `dedupe` is judged by the share of planned duplicates (expectations with `drop: dedupe`)
+//! that never reached the main subject: under [`MIN_DUPLICATES_DROPPED`] fails the run, so a
+//! `dedupe` that drops nothing cannot pass, while the copies a race or a paused state store
+//! lets through (chaos, #14) can.
+//!
+//! Extraction and `edit` are judged once per group, on the first copy that reached the main
+//! subject. Extraction compares the set's CSV columns, an absent attribute equal to an empty
+//! cell and `Content` without trailing whitespace; it is reported, never gated. `edit` is
+//! compared with what the record itself carries (a copied attribute equals its source, as
+//! extracted), so a pattern's mistake is never counted as `edit`'s; a mismatch fails the run.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use serde_json::{Map, Value};
 
-use crate::expect::{Expectation, MAIN};
+use crate::expect::{Expectation, Group, MAIN};
 use crate::loghub;
 
-/// How many examples of each failure the summary lists.
+/// The share of planned duplicates `dedupe` must drop for a run to pass.
+pub const MIN_DUPLICATES_DROPPED: f64 = 0.5;
+
+/// How many examples of each finding the summary lists.
 const SHOWN: usize = 20;
 
 /// How many mismatching `LineId`s the summary lists per set.
 const SHOWN_LINE_IDS: usize = 100;
 
-/// One message read from a sink subject.
+/// One message a sink wrote, read back off its subject.
 #[derive(Debug, Clone)]
-pub struct Delivery {
+pub struct Written {
     /// The subject it was published on.
     pub subject: String,
     /// Its `Fusion-Record-Id` header, as written.
@@ -46,10 +56,36 @@ pub struct DeadLetter {
     pub record_id: Option<String>,
 }
 
-/// Extraction for one set.
+/// A kind of failure the summary gives examples of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Finding {
+    /// A group none of whose ids reached one of its subjects.
+    Missing,
+    /// A message or dead letter nobody expected.
+    Unexpected,
+    /// A published message in the dead-letter stream.
+    DeadLettered,
+    /// A main-subject copy whose `edit` attributes are not what the config writes.
+    EditMismatch,
+}
+
+impl Finding {
+    /// The finding's name in the summary.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Unexpected => "unexpected",
+            Self::DeadLettered => "dead_lettered",
+            Self::EditMismatch => "edit_mismatch",
+        }
+    }
+}
+
+/// Extraction for one set, whose name is its log format.
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct FormatReport {
-    /// Groups whose main-sink copy was compared.
+pub struct SetReport {
+    /// Groups whose main-subject copy was compared.
     pub checked: u64,
     /// Of those, groups whose attributes differ from the CSV.
     pub mismatched: u64,
@@ -58,7 +94,7 @@ pub struct FormatReport {
     pub mismatched_lines: BTreeSet<usize>,
 }
 
-impl FormatReport {
+impl SetReport {
     /// The share of compared groups that match, 0 when none was compared.
     #[must_use]
     pub fn accuracy(&self) -> f64 {
@@ -74,31 +110,51 @@ impl FormatReport {
 pub struct Report {
     /// Messages the producer published and got a `PubAck` for.
     pub published: u64,
-    /// Distinct (record id, subject) pairs read from the sinks.
+    /// Distinct (record id, subject) pairs read back that were expected there.
     pub received: u64,
-    /// (group, sink) pairs no id of the group reached.
+    /// (group, subject) pairs no id of the group reached.
     pub missing: u64,
-    /// Deliveries and dead letters nobody expected.
+    /// Messages and dead letters nobody expected.
     pub unexpected: u64,
-    /// Deliveries beyond the first per (group, sink).
+    /// Messages beyond the first per (group, subject).
     pub extra_copies: u64,
     /// Published messages found in the dead-letter stream.
     pub dead_lettered: u64,
+    /// Planned duplicates: expectations with `drop: dedupe`.
+    pub duplicates_planned: u64,
+    /// Of those, how many copies never reached the main subject.
+    pub duplicates_dropped: u64,
+    /// Groups whose main-subject copy does not carry what `edit` writes.
+    pub edit_mismatch: u64,
     /// Extraction per set.
-    pub formats: BTreeMap<String, FormatReport>,
-    /// Examples of each failure, for the summary.
-    pub examples: BTreeMap<&'static str, Vec<String>>,
+    pub sets: BTreeMap<String, SetReport>,
+    /// Examples of each finding, for the summary.
+    pub examples: BTreeMap<Finding, Vec<String>>,
 }
 
 impl Report {
-    /// Whether nothing was lost, nothing unexpected arrived and nothing was dead-lettered.
+    /// Whether nothing was lost, unexpected, dead-lettered or wrongly edited, and `dedupe`
+    /// dropped enough of the planned duplicates.
     #[must_use]
     pub fn passed(&self) -> bool {
-        self.missing == 0 && self.unexpected == 0 && self.dead_lettered == 0
+        self.missing == 0
+            && self.unexpected == 0
+            && self.dead_lettered == 0
+            && self.edit_mismatch == 0
+            && self.dedupe_held()
     }
 
-    fn example(&mut self, kind: &'static str, text: impl FnOnce() -> String) {
-        let list = self.examples.entry(kind).or_default();
+    /// Whether `dedupe` dropped at least [`MIN_DUPLICATES_DROPPED`] of the planned
+    /// duplicates; true when none was planned.
+    #[must_use]
+    pub fn dedupe_held(&self) -> bool {
+        self.duplicates_planned == 0
+            || self.duplicates_dropped as f64
+                >= MIN_DUPLICATES_DROPPED * self.duplicates_planned as f64
+    }
+
+    fn example(&mut self, finding: Finding, text: impl FnOnce() -> String) {
+        let list = self.examples.entry(finding).or_default();
         if list.len() < SHOWN {
             list.push(text());
         }
@@ -112,24 +168,33 @@ impl fmt::Display for Report {
         writeln!(f, "missing        {}", self.missing)?;
         writeln!(f, "unexpected     {}", self.unexpected)?;
         writeln!(f, "dead_lettered  {}", self.dead_lettered)?;
+        writeln!(f, "edit_mismatch  {}", self.edit_mismatch)?;
         writeln!(f, "extra_copies   {}", self.extra_copies)?;
-        writeln!(f, "extraction:")?;
-        for (set, format) in &self.formats {
+        writeln!(
+            f,
+            "dedupe         dropped {} of {} planned duplicates (at least {:.0}%: {})",
+            self.duplicates_dropped,
+            self.duplicates_planned,
+            MIN_DUPLICATES_DROPPED * 100.0,
+            if self.dedupe_held() { "held" } else { "FAILED" }
+        )?;
+        writeln!(f, "extraction by set:")?;
+        for (name, set) in &self.sets {
             writeln!(
                 f,
-                "  {set:<8} {:>7.3}% of {} groups, {} mismatched",
-                format.accuracy() * 100.0,
-                format.checked,
-                format.mismatched
+                "  {name:<8} {:>7.3}% of {} groups, {} mismatched",
+                set.accuracy() * 100.0,
+                set.checked,
+                set.mismatched
             )?;
-            if !format.mismatched_lines.is_empty() {
-                let shown: Vec<String> = format
+            if !set.mismatched_lines.is_empty() {
+                let shown: Vec<String> = set
                     .mismatched_lines
                     .iter()
                     .take(SHOWN_LINE_IDS)
                     .map(ToString::to_string)
                     .collect();
-                let more = format.mismatched_lines.len().saturating_sub(shown.len());
+                let more = set.mismatched_lines.len().saturating_sub(shown.len());
                 let tail = if more > 0 {
                     format!(" (+{more} more)")
                 } else {
@@ -138,8 +203,8 @@ impl fmt::Display for Report {
                 writeln!(f, "    distinct LineIds: {}{tail}", shown.join(", "))?;
             }
         }
-        for (kind, list) in &self.examples {
-            writeln!(f, "{kind}:")?;
+        for (finding, list) in &self.examples {
+            writeln!(f, "{}:", finding.as_str())?;
             for line in list {
                 writeln!(f, "  {line}")?;
             }
@@ -159,91 +224,107 @@ fn parse_id(text: Option<&str>) -> Option<u64> {
         .ok()
 }
 
-/// The judgement of `deliveries` and `dead` against `expectations`.
+/// The judgement of `written` and `dead` against `expectations`.
 #[must_use]
-pub fn judge(expectations: &[Expectation], deliveries: &[Delivery], dead: &[DeadLetter]) -> Report {
+pub fn judge(expectations: &[Expectation], written: &[Written], dead: &[DeadLetter]) -> Report {
     let mut report = Report {
         published: expectations.len() as u64,
         ..Report::default()
     };
     let by_id: HashMap<u64, &Expectation> = expectations.iter().map(|e| (e.id, e)).collect();
     for e in expectations {
-        report.formats.entry(e.set.clone()).or_default();
+        report.sets.entry(e.set.clone()).or_default();
     }
 
     let mut copies: HashMap<(u64, &str), u64> = HashMap::new();
-    let mut reached: HashMap<((&str, usize, u64), &str), u64> = HashMap::new();
-    let mut compared: BTreeSet<(&str, usize, u64)> = BTreeSet::new();
-    for d in deliveries {
-        let id = parse_id(d.record_id.as_deref());
+    let mut reached: HashMap<(Group<'_>, &str), u64> = HashMap::new();
+    let mut compared: BTreeSet<Group<'_>> = BTreeSet::new();
+    for w in written {
+        let id = parse_id(w.record_id.as_deref());
         let Some(e) = id.and_then(|id| by_id.get(&id)) else {
             report.unexpected += 1;
-            report.example("unexpected", || {
-                format!("{:?} on {}: no published record id", d.record_id, d.subject)
+            report.example(Finding::Unexpected, || {
+                format!("{:?} on {}: no published record id", w.record_id, w.subject)
             });
             continue;
         };
-        if !e.sinks.contains(&d.subject) || d.tenant.as_deref() != Some(&e.tenant) {
+        if !e.subjects.contains(&w.subject) || w.tenant.as_deref() != Some(&e.tenant) {
             report.unexpected += 1;
-            report.example("unexpected", || {
+            report.example(Finding::Unexpected, || {
                 format!(
                     "id {} ({} LineId {}) on {} under tenant {:?}",
-                    e.id, e.set, e.line_id, d.subject, d.tenant
+                    e.id, e.set, e.line_id, w.subject, w.tenant
                 )
             });
             continue;
         }
-        let seen = copies.entry((e.id, d.subject.as_str())).or_default();
+        let seen = copies.entry((e.id, w.subject.as_str())).or_default();
         *seen += 1;
         if *seen > 1 {
             report.extra_copies += 1;
             continue;
         }
-        let ids = reached.entry((e.group(), d.subject.as_str())).or_default();
+        let ids = reached.entry((e.group(), w.subject.as_str())).or_default();
         *ids += 1;
         if *ids > 1 {
             report.extra_copies += 1;
         }
-        if d.subject == MAIN && compared.insert(e.group()) {
-            let format = report.formats.entry(e.set.clone()).or_default();
-            format.checked += 1;
-            if !extraction_matches(e, &d.attributes) {
-                format.mismatched += 1;
-                format.mismatched_lines.insert(e.line_id);
+        if w.subject == MAIN && compared.insert(e.group()) {
+            let set = report.sets.entry(e.set.clone()).or_default();
+            set.checked += 1;
+            if !extraction_matches(e, &w.attributes) {
+                set.mismatched += 1;
+                set.mismatched_lines.insert(e.line_id);
+            }
+            if !edits_match(e, &w.attributes) {
+                report.edit_mismatch += 1;
+                report.example(Finding::EditMismatch, || {
+                    format!("id {} ({} LineId {})", e.id, e.set, e.line_id)
+                });
             }
         }
     }
     report.received = copies.len() as u64;
 
-    let mut groups: BTreeMap<(&str, usize, u64), &Expectation> = BTreeMap::new();
+    // Per group: its first expectation, how many ids it has, how many were planned drops.
+    let mut groups: BTreeMap<Group<'_>, (&Expectation, u64, u64)> = BTreeMap::new();
     for e in expectations {
-        groups.entry(e.group()).or_insert(e);
+        let (_, size, planned) = groups.entry(e.group()).or_insert((e, 0, 0));
+        *size += 1;
+        if e.drop.is_some() {
+            *planned += 1;
+        }
     }
-    for (group, e) in &groups {
-        for sink in &e.sinks {
-            if !reached.contains_key(&(*group, sink.as_str())) {
+    for (group, (e, size, planned)) in &groups {
+        for subject in &e.subjects {
+            if !reached.contains_key(&(*group, subject.as_str())) {
                 report.missing += 1;
-                report.example("missing", || {
+                report.example(Finding::Missing, || {
                     format!(
-                        "{} LineId {} cycle {} never reached {sink}",
+                        "{} LineId {} cycle {} never reached {subject}",
                         e.set, e.line_id, e.cycle
                     )
                 });
             }
         }
+        // One copy of a group is meant to arrive; every other copy that did not arrive is a
+        // drop, whichever of them `dedupe` kept.
+        let arrived = reached.get(&(*group, MAIN)).copied().unwrap_or(0).max(1);
+        report.duplicates_planned += planned;
+        report.duplicates_dropped += size.saturating_sub(arrived).min(*planned);
     }
 
     for letter in dead {
         match parse_id(letter.record_id.as_deref()).and_then(|id| by_id.get(&id)) {
             Some(e) => {
                 report.dead_lettered += 1;
-                report.example("dead_lettered", || {
+                report.example(Finding::DeadLettered, || {
                     format!("id {} ({} LineId {})", e.id, e.set, e.line_id)
                 });
             }
             None => {
                 report.unexpected += 1;
-                report.example("unexpected", || {
+                report.example(Finding::Unexpected, || {
                     format!("dead letter {:?}: no published record id", letter.record_id)
                 });
             }
@@ -263,4 +344,20 @@ fn extraction_matches(e: &Expectation, attributes: &Map<String, Value>) -> bool 
         });
         got.as_ref() == e.attributes.get(*column)
     })
+}
+
+/// Whether `attributes` carry what `edit` writes: each set attribute with its value, and
+/// each copied attribute equal to its source in the same record, both absent together.
+fn edits_match(e: &Expectation, attributes: &Map<String, Value>) -> bool {
+    let set = e
+        .edits
+        .set
+        .iter()
+        .all(|(name, value)| attributes.get(name).and_then(Value::as_str) == Some(value));
+    let copied = e
+        .edits
+        .copied
+        .iter()
+        .all(|(target, source)| attributes.get(target) == attributes.get(source));
+    set && copied
 }

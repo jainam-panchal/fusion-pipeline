@@ -9,6 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use serde_json::{Value, json};
+
+use crate::expect::{AUDIT, MAIN};
+
 /// A vendored set.
 #[derive(Debug)]
 pub struct Set {
@@ -19,6 +23,10 @@ pub struct Set {
     pub tenant: &'static str,
     /// The structured-CSV columns extraction must lift, in CSV order.
     pub columns: &'static [&'static str],
+    /// The subjects `deploy/pipeline-poc.yaml` writes the set's records to, the main one
+    /// first. Written down by hand, not read from the config: `deploy_configs.rs` checks the
+    /// two agree.
+    pub subjects: &'static [&'static str],
 }
 
 /// Every vendored set, in the order the producer interleaves them.
@@ -35,16 +43,19 @@ pub const SETS: [Set; 4] = [
             "PID",
             "Content",
         ],
+        subjects: &[MAIN, AUDIT],
     },
     Set {
         name: "OpenSSH",
         tenant: "openssh",
         columns: &["Date", "Day", "Time", "Component", "Pid", "Content"],
+        subjects: &[MAIN],
     },
     Set {
         name: "Apache",
         tenant: "apache",
         columns: &["Time", "Level", "Content"],
+        subjects: &[MAIN],
     },
     Set {
         name: "Mac",
@@ -59,6 +70,7 @@ pub const SETS: [Set; 4] = [
             "Address",
             "Content",
         ],
+        subjects: &[MAIN],
     },
 ];
 
@@ -102,6 +114,19 @@ pub enum LoadError {
         /// What is wrong.
         message: String,
     },
+}
+
+/// The payload the producer sends for `line` of `set`: the raw line, the set as the log
+/// format, the `LineId`, and when the producer observed it. No id, no kind and no tenant:
+/// those travel in the headers and the subject (ADRs 0005 and 0007).
+#[must_use]
+pub fn payload(set: &Set, line: &Line, observed_unix_nanos: u64) -> Value {
+    json!({
+        "observed_time_unix_nano": observed_unix_nanos,
+        "body": line.body,
+        "resource": {"log.format": set.name},
+        "attributes": {"loghub.line_id": line.line_id},
+    })
 }
 
 /// The set named `name`, if it is vendored.

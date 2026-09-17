@@ -133,20 +133,19 @@ pub fn plan(config: &PlanConfig, lens: &[usize], base: u64) -> Result<Vec<Planne
     let mut rng = SplitMix64(config.seed);
     let mut sent_per_set = vec![0_u64; lens.len()];
     let mut originals = 0_usize;
-    let mut due: BTreeMap<(u64, u64), (usize, usize, u64, u64)> = BTreeMap::new();
+    // Scheduled duplicates by (due slot, original's slot), each held as its original.
+    let mut due: BTreeMap<(u64, u64), Planned> = BTreeMap::new();
     let mut messages = Vec::with_capacity(usize::try_from(config.count).unwrap_or(0));
     for i in 0..config.count {
         let id = base | i;
         let at = Duration::from_secs_f64(i as f64 / config.rate);
         if let Some(entry) = due.first_entry().filter(|entry| entry.key().0 <= i) {
-            let (set, line, cycle, original) = entry.remove();
+            let original = entry.remove();
             messages.push(Planned {
                 id,
-                set,
-                line,
-                cycle,
-                dup_of: Some(original),
+                dup_of: Some(original.id),
                 at,
+                ..original
             });
             continue;
         }
@@ -156,18 +155,19 @@ pub fn plan(config: &PlanConfig, lens: &[usize], base: u64) -> Result<Vec<Planne
         let (line, cycle) = (sent_per_set[set] % len, sent_per_set[set] / len);
         sent_per_set[set] += 1;
         let line = usize::try_from(line).unwrap_or(usize::MAX);
-        if half > 0 && (due.len() as u64) < half && rng.unit() < dup_chance {
-            let after = 1 + rng.next() % half;
-            due.insert((i + after, i), (set, line, cycle, id));
-        }
-        messages.push(Planned {
+        let original = Planned {
             id,
             set,
             line,
             cycle,
             dup_of: None,
             at,
-        });
+        };
+        if half > 0 && (due.len() as u64) < half && rng.unit() < dup_chance {
+            let after = 1 + rng.next() % half;
+            due.insert((i + after, i), original.clone());
+        }
+        messages.push(original);
     }
     Ok(messages)
 }

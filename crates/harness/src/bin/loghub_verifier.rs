@@ -3,20 +3,23 @@
 //! expectations file, print the summary and export it to the collector.
 //!
 //! The pipeline has settled once consumer `LOGS/pipeline` shows nothing pending and nothing
-//! awaiting an ack on three polls in a row, a second apart. The sink and dead-letter subjects
-//! are then read from the start of their streams through ephemeral ordered consumers, which
-//! belong to the harness: the verifier creates no stream. The run script purges `PROCESSED`
-//! and `DLQ` before the producer starts, so what is there is this run's.
+//! awaiting an ack on three polls in a row, a second apart. Every sink subject
+//! (`processed.>`) and every dead-letter subject (`dlq.>`) is then read from the start of its
+//! stream through ephemeral ordered consumers, which belong to the harness: the verifier
+//! creates no stream. The run script purges `PROCESSED` and `DLQ` before the producer starts,
+//! so what is there is this run's.
 //!
 //! When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the report goes to the collector as gauges
 //! under `service.name=loghub-verifier`: `loghub_published`, `loghub_received`,
 //! `loghub_missing`, `loghub_unexpected`, `loghub_extra_copies`, `loghub_dead_lettered`,
-//! and per `format`, `loghub_extraction_checked`, `loghub_extraction_mismatch` and
+//! `loghub_edit_mismatch`, `loghub_duplicates_planned`, `loghub_duplicates_dropped`, and per
+//! `format`, `loghub_extraction_checked`, `loghub_extraction_mismatch` and
 //! `loghub_extraction_accuracy`. They are exported once, on exit; the collector keeps
 //! serving a series for its `metric_expiration` (5m), and Prometheus keeps what it scraped.
 //!
-//! Exits 0 on a pass, 1 on a fail (anything missing, unexpected or dead-lettered), 2 when the
-//! run could not be judged.
+//! Exits 0 on a pass, 1 on a fail (anything missing, unexpected, dead-lettered or wrongly
+//! edited, or `dedupe` dropping under half the planned duplicates), 2 when the run could not
+//! be judged.
 
 use std::io::BufRead;
 use std::path::PathBuf;
@@ -27,7 +30,7 @@ use async_nats::jetstream::consumer::pull::OrderedConfig;
 use async_nats::jetstream::{self, Context};
 use fusion_harness::cli;
 use fusion_harness::expect::Expectation;
-use fusion_harness::verdict::{DeadLetter, Delivery, Report, judge};
+use fusion_harness::verdict::{DeadLetter, Report, Written, judge};
 use fusion_nats::headers::{RECORD_ID, TENANT};
 use futures::StreamExt;
 use opentelemetry::KeyValue;
@@ -46,9 +49,10 @@ const FLAGS: [&str; 3] = ["--expectations", "--nats-url", "--settle-timeout"];
 const SOURCE_STREAM: &str = "LOGS";
 const SOURCE_CONSUMER: &str = "pipeline";
 
-/// Where the POC config writes, and the subjects the harness reads there.
+/// Where the POC config writes. Every subject there is read, so a message on a subject no set
+/// routes to is unexpected rather than unseen.
 const SINK_STREAM: &str = "PROCESSED";
-const SINK_SUBJECTS: &str = "processed.loghub.>";
+const SINK_SUBJECTS: &str = "processed.>";
 const DEAD_LETTER_STREAM: &str = "DLQ";
 const DEAD_LETTER_SUBJECTS: &str = "dlq.>";
 
@@ -68,14 +72,8 @@ struct Options {
 fn options() -> Result<Options, String> {
     let flags = cli::parse(std::env::args().skip(1), &FLAGS)?;
     Ok(Options {
-        expectations: flags
-            .get("--expectations")
-            .map_or_else(|| "target/loghub/expectations.jsonl".into(), PathBuf::from),
-        nats_url: flags
-            .get("--nats-url")
-            .map(str::to_owned)
-            .or_else(|| std::env::var("NATS_URL").ok())
-            .unwrap_or_else(|| "nats://127.0.0.1:4222".to_owned()),
+        expectations: flags.expectations(),
+        nats_url: flags.nats_url(),
         settle_timeout: flags
             .get("--settle-timeout")
             .map_or(Ok(Duration::from_secs(120)), cli::duration)?,
@@ -134,10 +132,10 @@ async fn observe(options: &Options, expectations: &[Expectation]) -> Result<Repo
     let js = jetstream::new(client);
     settle(&js, options.settle_timeout).await?;
 
-    let deliveries = read(&js, SINK_STREAM, SINK_SUBJECTS)
+    let written = read(&js, SINK_STREAM, SINK_SUBJECTS)
         .await?
         .into_iter()
-        .map(|message| Delivery {
+        .map(|message| Written {
             record_id: header(&message, RECORD_ID),
             tenant: header(&message, TENANT),
             attributes: serde_json::from_slice::<Map<String, Value>>(&message.payload)
@@ -157,7 +155,7 @@ async fn observe(options: &Options, expectations: &[Expectation]) -> Result<Repo
             record_id: header(&message, RECORD_ID),
         })
         .collect::<Vec<_>>();
-    Ok(judge(expectations, &deliveries, &dead))
+    Ok(judge(expectations, &written, &dead))
 }
 
 fn header(message: &async_nats::Message, name: &str) -> Option<String> {
@@ -254,17 +252,21 @@ fn export(report: &Report) -> Result<(), String> {
         ("loghub_unexpected", report.unexpected),
         ("loghub_extra_copies", report.extra_copies),
         ("loghub_dead_lettered", report.dead_lettered),
+        ("loghub_edit_mismatch", report.edit_mismatch),
+        ("loghub_duplicates_planned", report.duplicates_planned),
+        ("loghub_duplicates_dropped", report.duplicates_dropped),
     ] {
         meter.u64_gauge(name).build().record(value, &[]);
     }
     let checked = meter.u64_gauge("loghub_extraction_checked").build();
     let mismatch = meter.u64_gauge("loghub_extraction_mismatch").build();
     let accuracy = meter.f64_gauge("loghub_extraction_accuracy").build();
-    for (set, format) in &report.formats {
-        let labels = [KeyValue::new("format", set.clone())];
-        checked.record(format.checked, &labels);
-        mismatch.record(format.mismatched, &labels);
-        accuracy.record(format.accuracy(), &labels);
+    // A set's name is its log format, the label the issue names.
+    for (name, set) in &report.sets {
+        let labels = [KeyValue::new("format", name.clone())];
+        checked.record(set.checked, &labels);
+        mismatch.record(set.mismatched, &labels);
+        accuracy.record(set.accuracy(), &labels);
     }
     provider.force_flush().map_err(|err| err.to_string())?;
     provider.shutdown().map_err(|err| err.to_string())

@@ -1,8 +1,15 @@
 //! Flag parsing for the harness binaries: `--name value` pairs, each at most once.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+
+/// Where the producer writes the expectations file and the verifier reads it.
+pub const DEFAULT_EXPECTATIONS: &str = "target/loghub/expectations.jsonl";
+
+/// The NATS server when neither `--nats-url` nor `NATS_URL` names one.
+pub const DEFAULT_NATS_URL: &str = "nats://127.0.0.1:4222";
 
 /// The flags a binary was given.
 #[derive(Debug, Default)]
@@ -35,6 +42,21 @@ impl Flags {
     #[must_use]
     pub fn get(&self, flag: &str) -> Option<&str> {
         self.0.get(flag).map(String::as_str)
+    }
+
+    /// `--expectations`, else [`DEFAULT_EXPECTATIONS`].
+    #[must_use]
+    pub fn expectations(&self) -> PathBuf {
+        PathBuf::from(self.get("--expectations").unwrap_or(DEFAULT_EXPECTATIONS))
+    }
+
+    /// `--nats-url`, else `NATS_URL`, else [`DEFAULT_NATS_URL`].
+    #[must_use]
+    pub fn nats_url(&self) -> String {
+        self.get("--nats-url")
+            .map(str::to_owned)
+            .or_else(|| std::env::var("NATS_URL").ok())
+            .unwrap_or_else(|| DEFAULT_NATS_URL.to_owned())
     }
 
     /// The value of `flag` parsed as `T`, else `default`.

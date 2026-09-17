@@ -3,9 +3,10 @@
 //!
 //! Each message goes to `logs.<tenant>.loghub`, one tenant per set, with the record id in
 //! `Fusion-Record-Id` (and in `Nats-Msg-Id`, so a retried publish the server already stored
-//! is dropped as a duplicate) and a payload of the raw line, its set in `resource.log.format`
-//! and its `LineId` in `attributes["loghub.line_id"]`. An expectation is written only once the
-//! message's `PubAck` is in, so the file lists exactly what the stream holds.
+//! is dropped as a duplicate) and the payload [`loghub::payload`] builds: the raw line, its set
+//! in `resource.log.format`, its `LineId` in `attributes["loghub.line_id"]` and the send time
+//! in `observed_time_unix_nano`. An expectation is written only once the message's `PubAck` is
+//! in, so the file lists exactly what the stream holds.
 //!
 //! Exits 1 when a message could not be published, or when the timing the plan relies on did
 //! not hold: a duplicate trailed its original by more than [`DUP_LAG`], a body came back
@@ -81,14 +82,8 @@ fn options() -> Result<Options, String> {
     Ok(Options {
         config,
         sets,
-        expectations: flags
-            .get("--expectations")
-            .map_or_else(|| "target/loghub/expectations.jsonl".into(), PathBuf::from),
-        nats_url: flags
-            .get("--nats-url")
-            .map(str::to_owned)
-            .or_else(|| std::env::var("NATS_URL").ok())
-            .unwrap_or_else(|| "nats://127.0.0.1:4222".to_owned()),
+        expectations: flags.expectations(),
+        nats_url: flags.nats_url(),
         testdata: flags
             .get("--testdata")
             .map_or_else(loghub::testdata, PathBuf::from),
@@ -235,6 +230,16 @@ async fn run(options: &Options) -> Result<bool, String> {
     Ok(tally.failed == 0 && timing_ok)
 }
 
+/// The wall clock in nanoseconds since the Unix epoch, for `observed_time_unix_nano`; zero
+/// before the epoch, saturated past `u64`.
+fn observed_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
+        })
+}
+
 /// One message ready to publish, with the expectation to write once it is acked.
 struct Publish {
     subject: String,
@@ -250,21 +255,8 @@ impl Publish {
         let mut headers = HeaderMap::new();
         headers.insert(RECORD_ID, message.id.to_string().as_str());
         headers.insert(MSG_ID, message.id.to_string().as_str());
-        let payload = serde_json::json!({
-            "body": line.body,
-            "resource": {"log.format": set.name},
-            "attributes": {"loghub.line_id": line.line_id},
-        })
-        .to_string();
-        let expectation = expectation(
-            message.id,
-            set.name,
-            line.line_id,
-            message.cycle,
-            message.dup_of,
-            line.attributes.clone(),
-        )
-        .unwrap_or_else(|| unreachable!("the producer loads vendored sets only"));
+        let payload = loghub::payload(set, line, observed_now()).to_string();
+        let expectation = expectation(message.id, set, line, message.cycle, message.dup_of);
         Self {
             subject: format!("logs.{}.loghub", set.tenant),
             headers,

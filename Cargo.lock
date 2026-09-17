@@ -422,6 +422,7 @@ dependencies = [
  "async-nats",
  "bytes",
  "csv",
+ "fusion-core",
  "fusion-nats",
  "futures",
  "opentelemetry",
