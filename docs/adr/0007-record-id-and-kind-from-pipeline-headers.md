@@ -22,7 +22,7 @@ A header that does not parse (an id that is not a decimal `u64`, a kind outside 
 
 JetStream stores a message's headers with it and redelivers them unchanged, so a redelivered message has the same id and kind.
 
-**The payload's `id` and `kind` are the producer's data.** They are never read, not even as a fallback, and never written by the pipeline. The `Record` type keeps both fields with their types: a stage may change them within core's write rules, and the sink writes what the last stage left. A stage that sets `id: 99` changes the payload, not `Meta`.
+**The payload's `id` and `kind` are the producer's data.** The pipeline never reads them for a decision, not even as a fallback, and never writes them. The `Record` type keeps both fields with their types: a stage may change them within core's write rules, and the sink writes what the last stage left. A stage that sets `id: 99` changes the payload, not `Meta`.
 
 **The sink writes `Fusion-Record-Id` from `Meta`,** next to the tenant and time headers, so a pipeline consuming another's output keeps the first pipeline's id, and its record trace. It writes no kind header: every record it writes was walked, so a log, and absent is `log`.
 
@@ -41,6 +41,7 @@ JetStream stores a message's headers with it and redelivers them unchanged, so a
 
 - Every producer sets `Fusion-Record-Id`. `deploy/nats-smoke.sh`, `deploy/metrics-check.sh` and the #13 loghub producer do. A shipper that cannot set headers (OTel Collector, Vector, Fluent Bit) needs a relay in front that adds it; until then its messages are dead-lettered as `missing_id`.
 - `missing_id` and its failure kind keep their meaning and a live producer: a message without the header.
+- The `Record` type still types the payload's `id` (a `u64`, or its decimal text) and `kind` (one of the three), so a payload with `"id": "3f2a-..."` or `"kind": "event"` does not decode and is dead-lettered as `undecodable`, whatever its headers say. The pipeline decides nothing from those values; loosening their types is a follow-up if a producer needs it.
 - A message whose kind is not `log` but whose payload does not decode is still dead-lettered as `undecodable`, since the source decodes before the engine resolves. The dead letter carries its kind, so a replay is rejected.
 - The in-memory source says the id and kind through `push_arrival`, as it does the tenant. A bare `MemoryInput::push` has no record id and is nakked. The pipeline test harness plays a producer that sends the record's `id` in the header too, in one place, and the tests about where the id comes from set the two apart.
 - ADR 0005's "read for two things only" and "the record id is not a header" are amended. CLAUDE.md's `Meta` and kind invariants follow this ADR.

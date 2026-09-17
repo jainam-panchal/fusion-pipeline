@@ -27,6 +27,8 @@ The OpenTelemetry SDK's tracer always generates its own ids and has no end time 
 ## Consequences
 
 - A record without an id has no trace; its `nak` line is the only link.
+
+  Amended 2026-09-17 (issue #50, ADR 0007): the record id is the `Fusion-Record-Id` header's, so this is a message without that header. A stage that rewrites the payload's `id` does not move the record's trace.
 - A record whose producer reuses an id within one tenant shares a trace with the earlier one. Delivery count and time tell the two apart.
 - Changing the trace id function breaks links to traces already stored. Changing the salt or the hash does the same.
 - Drops are not logged. `records_dropped_total` answers "where did my logs go", and a line per drop would flood Loki.
