@@ -92,7 +92,11 @@ fn record_from_host(id: u64, severity: &str, format: &str, host: &str) -> Record
 
 #[test]
 fn every_deploy_config_parses() {
-    for name in ["pipeline.yaml", "pipeline-routing.yaml"] {
+    for name in [
+        "pipeline.yaml",
+        "pipeline-routing.yaml",
+        "pipeline-poc.yaml",
+    ] {
         Config::from_yaml(&deploy_config(name))
             .unwrap_or_else(|err| panic!("{name} parses: {err}"));
     }
@@ -129,7 +133,11 @@ fn compose_creates_the_dead_letter_stream_every_deploy_pipeline_needs() {
     for flag in ["--discard old", "--max-msgs-per-subject ", "--dupe-window "] {
         assert!(dlq.contains(flag), "`{flag}` missing from: {dlq}");
     }
-    for name in ["pipeline.yaml", "pipeline-routing.yaml"] {
+    for name in [
+        "pipeline.yaml",
+        "pipeline-routing.yaml",
+        "pipeline-poc.yaml",
+    ] {
         let config = Config::from_yaml(&deploy_config(name)).expect("config parses");
         let source = config.source.expect("a deploy pipeline names its source");
         let params: SourceParams = source.parse_params().expect("source params parse");
@@ -143,7 +151,11 @@ fn compose_creates_the_dead_letter_stream_every_deploy_pipeline_needs() {
 
 #[test]
 fn every_deploy_config_compiles_with_the_types_the_binary_registers() {
-    for name in ["pipeline.yaml", "pipeline-routing.yaml"] {
+    for name in [
+        "pipeline.yaml",
+        "pipeline-routing.yaml",
+        "pipeline-poc.yaml",
+    ] {
         let sinks = MemorySinks::new();
         fusion_core::pipeline::Pipeline::from_yaml(&deploy_config(name), &registry(&sinks))
             .unwrap_or_else(|err| panic!("{name} compiles: {err}"));
@@ -324,5 +336,88 @@ fn the_routing_example_archives_every_record_of_half_the_linux_hosts() {
         "{} of {hosts} hosts archived",
         archived_hosts.len()
     );
+    h.finish();
+}
+
+/// Every `STRIDE`th distinct line of each loghub set goes through the POC config.
+const LOGHUB_STRIDE: usize = 25;
+
+/// Issue #13: the loghub harness judges the POC pipeline against a route table and the
+/// structured CSV, not against a run of the pipeline. This checks that the table is the
+/// config's: each set reaches exactly the subjects the table names, under its tenant and
+/// record id, and the verifier's own verdict over what the sinks got passes, with every set's
+/// extraction compared. How well each pattern extracts is `extract_loghub.rs`'s question, and
+/// the live run's report; it is not gated here.
+#[test]
+fn the_poc_pipeline_sends_each_loghub_set_where_the_harness_expects_it() {
+    use fusion_harness::expect::expectation;
+    use fusion_harness::loghub::{self, SETS};
+    use fusion_harness::verdict::{Delivery, judge};
+
+    let yaml = deploy_config("pipeline-poc.yaml");
+    let config = Config::from_yaml(&yaml).expect("config parses");
+    let subjects: Vec<(String, String)> = config
+        .nodes
+        .iter()
+        .filter(|node| node.kind == "sink.nats")
+        .map(|node| {
+            let params: SinkParams = node.parse_params().expect("sink params parse");
+            (node.id.clone(), params.subject)
+        })
+        .collect();
+
+    let sinks = MemorySinks::new();
+    let h = start_with(&yaml, 4, sinks.clone(), registry(&sinks));
+    let mut expectations = Vec::new();
+    let mut probes = Vec::new();
+    for set in &SETS {
+        let lines = loghub::load(&loghub::testdata(), set).expect("set loads");
+        for line in lines.iter().step_by(LOGHUB_STRIDE) {
+            let id = expectations.len() as u64 + 1;
+            let record = Record::from_json(
+                &serde_json::json!({
+                    "id": id,
+                    "body": line.body,
+                    "resource": {"log.format": set.name},
+                    "attributes": {"loghub.line_id": line.line_id},
+                })
+                .to_string(),
+            )
+            .expect("record parses");
+            probes.push(h.push_as(set.tenant, record));
+            expectations.push(
+                expectation(id, set.name, line.line_id, 0, None, line.attributes.clone())
+                    .expect("a vendored set"),
+            );
+        }
+    }
+    for probe in &probes {
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    }
+
+    let deliveries: Vec<Delivery> = subjects
+        .iter()
+        .flat_map(|(node, subject)| {
+            sinks.outgoing(node).into_iter().map(|out| Delivery {
+                subject: subject.clone(),
+                record_id: Some(out.meta.record_id.0.to_string()),
+                tenant: Some(out.meta.tenant.to_string()),
+                attributes: out.record.attributes,
+            })
+        })
+        .collect();
+    let report = judge(&expectations, &deliveries, &[]);
+    assert!(report.passed(), "{report}");
+    assert_eq!(report.extra_copies, 0, "{report}");
+    let linux = expectations.iter().filter(|e| e.set == "Linux").count() as u64;
+    assert_eq!(
+        report.received,
+        expectations.len() as u64 + linux,
+        "Linux reaches two subjects, every other set one: {report}"
+    );
+    assert_eq!(report.formats.len(), SETS.len(), "{report}");
+    for (set, format) in &report.formats {
+        assert!(format.checked > 0, "{set}: {report}");
+    }
     h.finish();
 }
