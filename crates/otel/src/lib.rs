@@ -198,7 +198,7 @@ impl Telemetry {
     }
 }
 
-/// The resource every metric is exported under: the service name and an instance id.
+/// The resource every metric, log record and span is exported under: the service name and an instance id.
 ///
 /// The instance id is the hostname, or the process id when the hostname is unreadable.
 #[must_use]
