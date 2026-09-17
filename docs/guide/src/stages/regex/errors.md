@@ -14,7 +14,7 @@ The pipeline refuses these configs at start. The message follows `pipelined: `.
 {{#include ../../../examples/stages/regex/rejected-open-group/expected.yaml}}
 ```
 
-Close the group: `user=(?<user>\w+)`. A pattern neither engine can read is reported by PCRE2, so the message says `backtracking engine` even for a pattern the fast engine would run.
+Close the group: `user=(?<user>\w+)`. A pattern neither engine can read is reported by PCRE2, so the message says `backtracking engine` even when the pattern uses no PCRE2-only syntax.
 
 ## A risky pattern
 
@@ -81,5 +81,5 @@ Each follows ``node `<id>`: ``.
 | a bad `field` or `fields` path | `` field `<path>`: `` and the reason, see [Field paths](../../field-paths.md#what-the-pipeline-refuses) |
 | `fields: []` | `` `fields` needs at least one field path `` |
 | a group name that cannot be an attribute key | `` group `<name>` cannot name an attribute: `` and the reason |
-| a canary trip | `` pattern `<pattern>`: canary tripped: `` and the input that was too slow |
+| a canary trip | `` pattern `<pattern>`: canary tripped: `` and the limit hit, with the shape and size of the test input |
 | other pattern problems | see [Regex limits](../../regex-limits.md#what-the-pipeline-refuses) |

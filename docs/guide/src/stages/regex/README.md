@@ -18,7 +18,7 @@ Both stages run a regular expression on text fields.
   replace: '[ip]'
 ```
 
-Both take `limits` and `on_redos_risk`. The pipeline runs each pattern on a fast engine when it can, and on PCRE2 for lookaround and the like. It checks every pattern when it starts, and drops a record that goes over a limit with the reason `regex_limit`. [Regex limits](../../regex-limits.md) has the details.
+Both take `limits` and `on_redos_risk`. The pipeline runs each pattern on a fast engine when it can, and on PCRE2 for lookaround and back references. It checks every pattern when it starts, and drops a record that trips a limit with the reason `regex_limit`. [Regex limits](../../regex-limits.md) has the details.
 
 ## Writing patterns in YAML
 

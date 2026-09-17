@@ -37,7 +37,7 @@ Every match in every listed field is replaced. Fields that are not listed stay a
 
 `port` is a number, so it is skipped, and `host` is not listed. A record with no match in any field goes on unchanged and counts once on `regex_nonmatch_total`.
 
-A pattern that can match empty text also matches between characters, and `replace` is inserted there. Make sure the pattern needs at least one character.
+A pattern that can match empty text also matches at the start, at the end and between characters, and `replace` is inserted there. Make sure the pattern needs at least one character.
 
 ## replace is plain text
 
@@ -62,7 +62,7 @@ To keep a label and mask only what follows it, match only the secret with a look
 
 ## All fields or none
 
-`redact` checks every listed field before it changes any. If any field goes over a limit, the whole record is dropped with the reason `regex_limit`, so a record is never half masked:
+`redact` checks every listed field before it changes any. If any field trips a limit, the whole record is dropped with the reason `regex_limit`, so a record is never half masked:
 
 ```yaml
 # messages in
@@ -79,4 +79,4 @@ To keep a label and mask only what follows it, match only the secret with a look
 {{#include ../../../examples/stages/regex/redact-limit/expected.yaml}}
 ```
 
-Record 1's body is 13 bytes, over the limit of 12, so the record is dropped, even though `attributes.peer` was short enough.
+Record 1's body is 13 bytes, over the limit of 12, so the record is dropped, even though `attributes.peer` was short enough. The drop still counts as done, so the message is acked.

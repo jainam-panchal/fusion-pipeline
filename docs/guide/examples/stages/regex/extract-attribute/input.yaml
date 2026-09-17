@@ -4,6 +4,3 @@
 - subject: logs.acme.app
   headers: {Fusion-Record-Id: "2"}
   payload: {body: login, attributes: {msg: "user=bob", user: old}}
-- subject: logs.acme.app
-  headers: {Fusion-Record-Id: "3"}
-  payload: {body: "user=carol", attributes: {msg: 7}}

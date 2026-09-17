@@ -1,8 +1,8 @@
 nodes:
-  - id: parse_id
+  - id: parse
     type: extract
     field: body
-    pattern: '(?<=id=)(?<id>\d+)'
+    pattern: 'disk (full|failing)'
   - id: out
     type: sink.nats
     stream: PROCESSED

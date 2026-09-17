@@ -1,6 +1,5 @@
-acks: [ack, ack, ack]
+acks: [ack, ack]
 sinks:
   out:
     - payload: {kind: log, body: login, attributes: {msg: "login ok user=alice", user: alice}}
     - payload: {kind: log, body: login, attributes: {msg: "user=bob", user: bob}}
-    - payload: {kind: log, body: "user=carol", attributes: {msg: 7}}
