@@ -680,9 +680,9 @@ reliability stories (28-31), and names its evidence and its limits.
   and a canary at load. [ADR 0002](docs/adr/0002-regex-first-facade-pcre2-jit-off.md). One
   class of slow PCRE2-only pattern is still bounded only by `input_bytes` (see below).
 - **The stage model, as built.** Eight stages (`filter`, `route`, `dedupe`, `extract`,
-  `redact`, `sample`, `edit`, `lua`), covering four of the five log features `pipeline_atomic_features.csv` puts in `Priority
-  Tier` 1
-  (not log-to-metric), five of its ten Tier 2 ones (static tags, rename, scripted transform,
+  `redact`, `sample`, `edit`, `lua`), covering four of the five log features
+  `pipeline_atomic_features.csv` puts in `Priority Tier` 1 (not log-to-metric), five of its
+  ten Tier 2 ones (static tags, rename, scripted transform,
   dedupe, route; not lookups, GeoIP, event aggregation, JSON extraction or rate limiting)
   and a few Tier 3 ones (`edit`'s hash and delete), are each one synchronous function from a
   record to an outcome, with state behind one handle and failure policy in the engine. `deploy/pipeline-poc.yaml` uses all of them in one DAG with fan-out and fan-in. That
