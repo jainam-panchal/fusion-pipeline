@@ -1,6 +1,6 @@
 # NATS
 
-The pipeline reads messages from a NATS JetStream consumer and writes records to JetStream streams. This page covers the config, what the server must have, and the headers.
+The pipeline reads messages from a NATS JetStream consumer and writes records to JetStream streams.
 
 ## The source
 
@@ -17,7 +17,7 @@ source:
 | Key | Default | What it does |
 |---|---|---|
 | `type` | required | `nats`, the only source type. |
-| `url` | `nats://127.0.0.1:4222` | The server. `NATS_URL` replaces it when set. |
+| `url` | `nats://127.0.0.1:4222` | The server. `NATS_URL` replaces it when set and not empty. |
 | `stream` | required | The stream to read from. It must exist. |
 | `consumer` | required | The consumer on that stream. It must exist. |
 | `tenant_prefix` | `logs` | The first word of subjects that name a tenant: `<tenant_prefix>.<tenant>.<anything>`. |
@@ -37,15 +37,17 @@ Any other key is an error. The pipeline reads every message the consumer deliver
 
 | Key | Default | What it does |
 |---|---|---|
-| `url` | `nats://127.0.0.1:4222` | The server. `NATS_URL` replaces it when set. |
+| `url` | `nats://127.0.0.1:4222` | The server. `NATS_URL` replaces it when set and not empty. |
 | `stream` | required | The stream that stores `subject`. It must exist, and its subjects must include `subject`. |
 | `subject` | required | Every record is published to this subject. |
 
 The subject is the same for every record. To split records across subjects, use a [`route`](stages/route.md) with one sink per label.
 
-A sink counts a record as written once the stream confirms it has stored it. The sink waits up to 5 seconds for that. If it does not come, the branch fails, and the source message is nakked and delivered again. Records that other branches already wrote are written again then, so readers of these streams should expect duplicates.
+A sink counts a record as written once the stream confirms it has stored it. The sink waits up to 5 seconds for that. If it does not come, the branch fails, and the source message is nakked and delivered again, or becomes a dead letter on its last delivery. Records that other branches already wrote are written again then, so readers of these streams should expect duplicates.
 
-Sinks on the same server share one connection.
+The source and the sinks share one connection per server URL.
+
+The sink writes the record as the last stage left it. It always writes `kind`, so a payload that had none comes out with `kind: log`.
 
 ```yaml
 # config
@@ -91,11 +93,11 @@ nats consumer add LOGS pipeline --pull --ack explicit --wait 30s \
   --max-deliver 5 --deliver all --replay instant --defaults
 ```
 
-Only one pipeline should read a consumer at a time. Two processes on one consumer each get some of the messages.
+Copies of the same config can share a consumer, and each gets some of the messages. Two different configs must not share one, or each would process only part of the stream.
 
 ## Start-up checks
 
-The pipeline checks the sinks, then the source, and stops at the first problem. It prints ``pipelined: node `<id>`: `` and one of these (the source's id is `source`):
+After it has read the config and the Dragonfly and telemetry settings, the pipeline checks the sinks, then the source, and stops at the first problem. It prints ``pipelined: node `<id>`: `` and one of these (the source's id is `source`):
 
 | Problem | Message |
 |---|---|
@@ -144,11 +146,14 @@ The subject wins over the header because NATS permissions control who can publis
 | `Fusion-Record-Kind` | `log`, `metric` or `span` | the message is a log |
 | `Fusion-Tenant` | any text without control characters, not empty | the tenant is `unknown`, unless the subject names one |
 | `Fusion-Ingestion-Time` | nanoseconds since 1970, digits only | the time NATS stored the message is used |
-| `Fusion-Ingestion-Time-Kind` | `reported` or `clock` | (must come with `Fusion-Ingestion-Time`) |
+| `Fusion-Ingestion-Time-Kind` | `reported` or `clock` | `Fusion-Ingestion-Time` is ignored too, and the stored time is used |
 
 Names must match exactly, including case.
 
-A header that does not fit its format, or that appears twice, is ignored as if it were missing. The pipeline writes a line to standard error and counts it on `source_invalid_headers_total`. It never naks a message for a bad header. The two time headers only count together: one without the other is ignored. A `Fusion-Record-Kind` that is bad or repeated is the exception: the message is not a known log, so it is dropped and acked.
+A header that does not fit its format, or that appears twice, is ignored as if it were missing. The pipeline writes a line to standard error and counts it on `source_invalid_headers_total`. The two time headers only count together: one without the other is ignored. A bad header never makes a nak by itself, with two effects to know:
+
+- A bad `Fusion-Record-Id` leaves the message without a record id, and a message without one is nakked.
+- A bad or repeated `Fusion-Record-Kind` means the message is not a known log, so it is dropped and acked. So is a message whose kind is `metric` or `span`.
 
 ```yaml
 # messages in
@@ -210,16 +215,16 @@ In a dead-letter subject, characters that cannot be in a NATS subject word (`.`,
 A dead letter carries:
 
 - the producer's own headers, minus any starting with `Nats-` or `Fusion-` (in any case)
-- `Fusion-Record-Id`, `Fusion-Tenant`, `Fusion-Ingestion-Time` and `Fusion-Ingestion-Time-Kind` from the message, and `Fusion-Record-Kind` when it had one
+- `Fusion-Tenant` with the tenant the pipeline gave the message (`unknown` if none), `Fusion-Ingestion-Time` and `Fusion-Ingestion-Time-Kind` with its ingestion time, `Fusion-Record-Id` when the message had a valid one, and `Fusion-Record-Kind` when it had a valid one
 - `Fusion-Dlq-Reason`: the node that failed and its error, at most 1024 bytes. The node is `source` for a message with no record id or a payload that is not a record.
 - `Fusion-Dlq-Subject`: the subject the message arrived on
-- `Nats-Msg-Id`: `<stream>:<sequence>`, so the dead-letter stream stores a second copy only once
+- `Nats-Msg-Id`: `<stream>:<sequence>`, so the dead-letter stream drops a second copy of the same message within its duplicate window
 
 Publishing a dead letter back to its `Fusion-Dlq-Subject` replays it with the same record id, tenant and time.
 
-If the dead-letter publish fails four times, the message is not stopped. It stays in the input stream, and the pipeline logs its sequence number and counts it on `dlq_publish_errors_total`. If the pipeline dies during the last delivery, NATS gives up on the message after `ack_wait`, and it stays in the input stream too.
+If the dead-letter publish fails four times, the pipeline naks the message with no wait. NATS then stops delivering it, but the message stays in the input stream. The pipeline logs its sequence number and counts it on `dlq_publish_errors_total`. If the pipeline dies during the last delivery, NATS gives up on the message after `ack_wait`, and it stays in the input stream too.
 
-The examples in this guide always deliver a message once, so they cannot show redelivery or dead letters. `deploy/nats-smoke.sh` runs them against the compose stack:
+The examples in this guide always deliver a message once, so they cannot show redelivery or dead letters. Against the compose stack, a message without a record id shows a dead letter:
 
 ```sh
 nats pub logs.acme.syslog '{"body": "no id header"}'   # fails every delivery
@@ -228,7 +233,7 @@ nats sub 'dlq.>' --count 1                             # about 15 seconds later
 
 ## Stopping
 
-The first Ctrl-C (or `SIGINT`) stops reading new messages and lets the workers finish the ones they have. Messages the consumer had fetched but not handed over yet are delivered again after `ack_wait`. A second Ctrl-C exits at once.
+The first Ctrl-C (`SIGINT`) stops reading new messages and lets the workers finish the ones they have. The compose stack stops the pipeline with `SIGINT`. Other signals, such as `SIGTERM`, end the process without that step. Messages the consumer had fetched but not handed over yet are delivered again after `ack_wait`. A second Ctrl-C exits at once.
 
 ## Environment variables
 
