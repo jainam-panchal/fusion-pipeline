@@ -60,7 +60,7 @@ Record 1 matches both conditions. `errors` comes first, so only `errors_out` get
 
 ## default: drop
 
-`drop` is a reserved label. With `default: drop`, records that match nothing are dropped with the reason `route_default_drop`, and the message is acked. `drop` needs no node to read it.
+`drop` is a reserved label. With `default: drop`, records that match nothing are dropped with the reason `route_default_drop`, which counts as done for the ack. `drop` needs no node to read it.
 
 ```yaml
 # messages in
@@ -79,11 +79,11 @@ Record 1 matches both conditions. `errors` comes first, so only `errors_out` get
 
 A rule cannot be called `drop`, and no node can read `<route id>.drop`.
 
-## Every label needs a reader
+## Every label needs a consumer
 
-Each label, the `default` label included, must have at least one node that reads it. Otherwise the pipeline does not start. This keeps records from going nowhere by mistake.
+A node that reads a label is its consumer. Each label, the `default` label included, must have at least one consumer. Otherwise the pipeline does not start. This keeps records from going nowhere by mistake.
 
-A label can have several readers, and each gets its own copy. One node can read several labels by listing them in `from`:
+A label can have several consumers, and each gets its own copy. One node can read several labels by listing them in `from`:
 
 ```yaml
 # messages in
@@ -100,7 +100,7 @@ A label can have several readers, and each gets its own copy. One node can read 
 {{#include ../../examples/stages/route/fan-out-in/expected.yaml}}
 ```
 
-The message for record 1 is acked once, after both `archive` and `search` have stored it. A reader does not have to be a sink. Any stage can read a label.
+The message for record 1 is acked once, after both `archive` and `search` have stored it. A consumer does not have to be a sink. Any stage can read a label.
 
 ## Patterns
 
@@ -165,5 +165,5 @@ The other messages:
 | `routes` is empty | `` node `<id>`: `routes` must name at least one label `` |
 | a label or condition that is not text | `` node `<id>`: route labels must be strings `` or `` node `<id>`: route `<label>` must map to a condition string `` |
 | `from` names a label the route does not have | `` node `<node>` reads label `<label>` from route `<route>`, which does not declare it `` |
-| `from` names a label of a node that is not a route | `` node `<node>` reads label `<label>` from `<node>`, which is not a route `` |
+| `from` names a label of a node that is not a route | `` node `<node>` reads label `<label>` from `<target>`, which is not a route `` |
 | a bad condition | `` node `<id>`: route `<label>` `<condition>`:  `` and the reason, see [Conditions](../conditions.md#what-the-pipeline-refuses) |

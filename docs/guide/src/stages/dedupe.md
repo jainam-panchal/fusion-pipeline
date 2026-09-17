@@ -16,7 +16,7 @@
 | `window` | required | How long a record blocks its repeats: a whole number and a unit, `ms`, `s`, `m` or `h`. At least `1ms`. |
 | `on_state_error` | `pass` | What to do when Dragonfly does not answer: `pass` or `nak`. See [State and failure policy](../state-and-failure.md). |
 
-A dropped record counts under the reason `dedupe`, and the message is acked. `dedupe` keeps its memory in Dragonfly, so every worker and every copy of the pipeline shares it.
+A dropped record counts under the reason `dedupe`, and counts as done for the ack. `dedupe` keeps its memory in Dragonfly, so every worker shares it, and so do replicas of the pipeline that have the same `name`.
 
 ## Repeats inside the window
 
@@ -39,7 +39,7 @@ The first record with a key passes and holds the key. A different record with th
 
 ## Time is ingestion time
 
-"Later" is measured in ingestion time: when the message entered NATS. The payload's time fields play no part. A record that arrives `window` or more after the holder passes and becomes the new holder. The repeats after it are checked against it:
+"Later" is measured in ingestion time: the `Fusion-Ingestion-Time` header when an upstream pipeline set one, else when the message entered NATS. The payload's time fields play no part. A record that arrives `window` or more after the holder passes and, in most cases, becomes the new holder. The repeats after it are checked against it:
 
 ```yaml
 # messages in
@@ -117,7 +117,7 @@ Each tenant has its own keys:
 
 A message that comes back with the same record id is not a repeat of itself, so it passes again. See [State and failure policy](../state-and-failure.md#windows-use-ingestion-time) for an example.
 
-A record that came in before the current holder passes too. This happens when a message is redelivered after its key was taken over:
+A record that came in before the current holder passes too. This happens when a message is redelivered after its key was taken over, or when workers handle records out of order:
 
 ```yaml
 # messages in
@@ -136,13 +136,13 @@ A record that came in before the current holder passes too. This happens when a 
 
 ## Known gaps
 
-Dragonfly removes a key `window` after it was stored, by its own clock. If the pipeline falls behind by more than the window, for example after a restart or while Dragonfly is paused, a repeat can find the key gone and pass ([issue #54](https://github.com/jainam-panchal/fusion-pipeline/issues/54)). This, and the late record above, can let an extra copy through. `dedupe` never drops a record that is not a repeat.
+Dragonfly removes a key `window` after it was stored, by its own clock. If the pipeline falls behind by more than the window, for example after a restart or while Dragonfly is paused, a repeat can find the key gone and pass ([issue #54](https://github.com/jainam-panchal/fusion-pipeline/issues/54)). This, and the late record above, can let an extra copy through. The key values are stored as a 64-bit hash, so two different values could in theory share a key and one of them be dropped. The chance is small: about 3% of one collision with a billion live keys for one tenant and node.
 
-Each key in Dragonfly takes about 200 bytes. The number of keys is the number of different key values seen in one window.
+Each key in Dragonfly takes about 200 bytes. The number of keys is the number of different key values seen in one window, for each tenant and each `dedupe` node.
 
 ## When Dragonfly fails
 
-With `on_state_error: pass`, records go on without the check, so repeats get through. With `nak`, the message is nakked and comes back later. If Dragonfly cannot be reached at start, the pipeline does not start. See [State and failure policy](../state-and-failure.md).
+With `on_state_error: pass`, records go on without the check, so repeats get through. With `nak`, the message is nakked and comes back later, until its last delivery, when it becomes a dead letter. If Dragonfly cannot be reached at start, the pipeline does not start. See [State and failure policy](../state-and-failure.md).
 
 ## What the pipeline refuses
 
@@ -171,8 +171,9 @@ The other messages, each after `` node `<id>`:  ``:
 | Problem | Message |
 |---|---|
 | `window` without a unit | `` window `10`: needs a unit: `ms`, `s`, `m` or `h` `` |
-| an unknown unit | `` window `10sec`: unknown unit `sec`; use `ms`, `s`, `m` or `h` `` |
-| no number, or a fraction such as `1.5s` | `` window `ten`: write `<integer><ms\|s\|m\|h>`, e.g. `10s` `` (a fraction gives the unknown unit message) |
+| an unknown unit, or a fraction such as `1.5s` | `` window `10sec`: unknown unit `sec`; use `ms`, `s`, `m` or `h` `` |
+| a window too long to count in milliseconds | `` window `<text>`: too large `` |
+| no number | `` window `ten`: write `<integer><ms\|s\|m\|h>`, e.g. `10s` `` |
 | `0s` | `` window `0s`: must be at least 1ms `` |
 | a bad `key` path | `` key `<path>`:  `` and the reason, see [Field paths](../field-paths.md#what-the-pipeline-refuses) |
 | `on_state_error` other than `pass` or `nak` | `` unknown variant `drop`, expected `pass` or `nak` `` |

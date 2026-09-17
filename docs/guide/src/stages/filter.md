@@ -16,7 +16,7 @@
 | `limits` | see [Regex limits](../regex-limits.md) | Limits for `=~` and `!~` in the condition. |
 | `on_redos_risk` | `reject` | What to do with a risky pattern. See [Regex limits](../regex-limits.md). |
 
-A dropped record counts under the reason `filter`, and the message is acked.
+A dropped record counts under the reason `filter`, and counts as done for the ack.
 
 ## Keep
 
