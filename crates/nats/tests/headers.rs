@@ -341,16 +341,25 @@ mod dead_letter {
         }
     }
 
+    /// The arrival of the message every letter here gives up on. It names no tenant: the
+    /// letter's tenant is the `Meta` one.
+    static ARRIVAL: Arrival = Arrival {
+        record_id: Some(RecordId(7)),
+        kind: Some(Kind::Log),
+        tenant: None,
+        ingestion_time: Some(IngestionTime::Reported(9)),
+        delivery_count: 5,
+        bytes: None,
+    };
+
     fn letter<'a>(headers: Option<&'a HeaderMap>, failure: &'a Failure) -> DeadLetter<'a> {
         DeadLetter {
             stream: "LOGS",
             stream_sequence: 42,
             subject: "logs.acme.syslog",
             headers,
-            record_id: Some(RecordId(7)),
-            kind: Some(Kind::Log),
+            arrival: &ARRIVAL,
             tenant: "acme",
-            ingestion_time: Some(IngestionTime::Reported(9)),
             failure,
         }
     }
@@ -374,11 +383,11 @@ mod dead_letter {
         assert_eq!(value(&written, INGESTION_TIME), Some("9"));
         assert_eq!(value(&written, INGESTION_TIME_KIND), Some("reported"));
 
-        let mut bare = letter(None, &failure);
-        bare.record_id = None;
-        bare.kind = None;
-        bare.ingestion_time = None;
-        let written = headers::for_dead_letter(&bare);
+        let bare = Arrival::default();
+        let written = headers::for_dead_letter(&DeadLetter {
+            arrival: &bare,
+            ..letter(None, &failure)
+        });
         assert_eq!(value(&written, RECORD_ID), None);
         assert_eq!(value(&written, RECORD_KIND), None);
         assert_eq!(value(&written, INGESTION_TIME), None);

@@ -486,13 +486,13 @@ fn push_through(yaml: &str, record: Record, arrival: Arrival) -> common::Harness
     h
 }
 
-/// A second delivery of record 7 for tenant `acme`, ingested at 9 s.
-fn acme_arrival() -> Arrival {
+/// A second delivery of record `id` for tenant `acme`, ingested at 9 s.
+fn acme_arrival(id: u64) -> Arrival {
     Arrival {
         tenant: Some(common::TENANT.to_owned()),
         ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
         delivery_count: 2,
-        ..with_id(7)
+        ..with_id(id)
     }
 }
 
@@ -516,7 +516,7 @@ nodes:
     let h = push_through(
         yaml,
         record(&json!({"id": 7, "resource": {"tenant.id": "beta"}})),
-        acme_arrival(),
+        acme_arrival(7),
     );
     assert_eq!(h.sinks.records("acme_out").len(), 1);
     assert!(h.sinks.records("other_out").is_empty());
@@ -538,7 +538,11 @@ nodes:
   - id: out
     type: sink.memory
 "#;
-    let h = push_through(yaml, record(&json!({"id": 7, "body": "x"})), acme_arrival());
+    let h = push_through(
+        yaml,
+        record(&json!({"id": 7, "body": "x"})),
+        acme_arrival(7),
+    );
     let out = h.sinks.records("out");
     assert_eq!(out[0].resource.get("tenant.id"), Some(&json!("acme")));
     assert_eq!(out[0].observed_time_unix_nano, Some(9_000_000_000));
@@ -565,10 +569,7 @@ nodes:
     for (id, payload_tenant) in [(1, "beta"), (2, "gamma")] {
         let probe = h.source.push_arrival(
             record(&json!({"id": id, "resource": {"tenant.id": payload_tenant}})),
-            Arrival {
-                record_id: Some(RecordId(id)),
-                ..acme_arrival()
-            },
+            acme_arrival(id),
         );
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     }
@@ -602,7 +603,7 @@ nodes:
     let h = push_through(
         yaml,
         record(&json!({"id": 7, "resource": {"tenant.id": "beta"}})),
-        acme_arrival(),
+        acme_arrival(7),
     );
     let out = h.sinks.records("out");
     assert_eq!(
@@ -633,7 +634,7 @@ nodes:
   - id: out
     type: sink.memory
 "#;
-    let h = push_through(yaml, record(&json!({"id": 7})), acme_arrival());
+    let h = push_through(yaml, record(&json!({"id": 7})), acme_arrival(7));
     assert_eq!(
         h.counter(
             CounterMetric::LuaErrors,
@@ -667,13 +668,9 @@ nodes:
     let sinks = MemorySinks::new();
     let h = start_with(yaml, 1, sinks.clone(), registry(&sinks));
     for id in [1, 2] {
-        let probe = h.source.push_arrival(
-            record(&json!({"id": id})),
-            Arrival {
-                record_id: Some(RecordId(id)),
-                ..acme_arrival()
-            },
-        );
+        let probe = h
+            .source
+            .push_arrival(record(&json!({"id": id})), acme_arrival(id));
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     }
     for r in h.sinks.records("out") {

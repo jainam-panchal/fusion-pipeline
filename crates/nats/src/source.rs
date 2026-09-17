@@ -63,8 +63,8 @@ use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{self, AckKind, message::Acker};
 use fusion_core::events::{Event, EventKind};
 use fusion_core::io::{AckHandle, Envelope, Failure, FailureKind, Intake, Source, SourceError};
-use fusion_core::meta::{IngestionTime, Meta};
-use fusion_core::record::{Kind, Record, RecordId};
+use fusion_core::meta::{Arrival, Meta};
+use fusion_core::record::Record;
 use fusion_core::signals::Signals;
 use fusion_core::trace::TraceKey;
 use futures::StreamExt;
@@ -236,10 +236,8 @@ impl DeadLetters {
             stream_sequence: position.stream_sequence,
             subject: &delivery.message.subject,
             headers: delivery.message.headers.as_ref(),
-            record_id: delivery.record_id,
-            kind: delivery.kind,
+            arrival: &delivery.arrival,
             tenant: &delivery.tenant,
-            ingestion_time: delivery.ingestion_time,
             failure,
         });
         let mut pauses = DEAD_LETTER_RETRIES.iter();
@@ -302,12 +300,10 @@ struct Position {
 struct Delivery {
     /// The message as it arrived: subject, headers and payload.
     message: async_nats::Message,
-    /// The record id, kind and ingestion time the arrival gave, and the tenant the record's
-    /// `Meta` gets: what a dead letter carries.
-    record_id: Option<RecordId>,
-    kind: Option<Kind>,
+    /// What the transport said about it, for its dead letter.
+    arrival: Arrival,
+    /// The tenant the record's `Meta` gets.
     tenant: String,
-    ingestion_time: Option<IngestionTime>,
     /// The subject a settlement is published to.
     reply: Option<Subject>,
     /// `None` when the message info could not be read; the delivery is then never final.
@@ -408,10 +404,8 @@ impl NatsSource {
             let decoded = serde_json::from_slice::<Record>(&message.payload);
             let delivery = Delivery {
                 message,
-                record_id: arrival.record_id,
-                kind: arrival.kind,
+                arrival: arrival.clone(),
                 tenant: tenant.to_string(),
-                ingestion_time: arrival.ingestion_time,
                 reply,
                 position,
             };

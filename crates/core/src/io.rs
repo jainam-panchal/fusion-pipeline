@@ -36,7 +36,7 @@ closed_set! {
         SinkError = "sink_error",
         /// A stage or sink panicked. Only a dev build gets here: a release build aborts.
         Panic = "panic",
-        /// The record arrived without an `id`.
+        /// The message arrived without a record id.
         MissingId = "missing_id",
         /// The payload is not a record. Set by a source, never by the engine.
         Undecodable = "undecodable",
@@ -48,8 +48,8 @@ closed_set! {
 pub struct Failure {
     /// The node that failed, or `source` for a failure before any node ran.
     pub node: String,
-    /// The `Meta` record id of the failed record; `None` for a record without an id or a
-    /// payload that is not a record. A source names the record by it when it logs.
+    /// The `Meta` record id of the failed record; `None` for a message without a record id
+    /// or a payload that is not a record. A source names the record by it when it logs.
     pub record_id: Option<RecordId>,
     /// What kind of failure it was.
     pub kind: FailureKind,

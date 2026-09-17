@@ -14,19 +14,18 @@
 //! `metric` or `span`; absent is `log`) when it sends anything but logs (ADR 0007). The sink
 //! writes no kind: every record it writes was walked, so a log.
 //!
-//! The source reads them back into the message's [`Arrival`] with [`arrival()`], so a pipeline
-//! consuming another's output keeps the first pipeline's record id, tenant and ingestion
-//! time. The
-//! subject's tenant wins over the header, because NATS permissions back the subject and any
-//! producer can set a header; the header's time wins over the JetStream publish time, so the
-//! first pipeline's time survives every hop. A header that does not parse is ignored,
+//! The source reads them back into the message's [`Arrival`] with [`arrival()`], so a
+//! pipeline consuming another's output keeps the first pipeline's record id, tenant and
+//! ingestion time. The subject's tenant wins over the header, because NATS permissions back
+//! the subject and any producer can set a header; the header's time wins over the JetStream
+//! publish time, so the first pipeline's time survives every hop. A header that does not parse is ignored,
 //! reported and counted once, never a reason to nak: the record is still valid.
 //!
 //! A dead letter carries the message as it arrived, with [`for_dead_letter`]: the
 //! producer's headers, the record id, kind, tenant and ingestion time the arrival gave (so a
-//! replay keeps them), `Fusion-Dlq-Reason` (the failing node and its error), `Fusion-Dlq-Subject` (where
-//! it arrived) and `Nats-Msg-Id` (its stream and sequence, so a second dead letter of the
-//! same message is dropped as a duplicate). No `Nats-*` header of the producer's is kept:
+//! replay keeps them), `Fusion-Dlq-Reason` (the failing node and its error),
+//! `Fusion-Dlq-Subject` (where it arrived) and `Nats-Msg-Id` (its stream and sequence, so a
+//! second dead letter of the same message is dropped as a duplicate). No `Nats-*` header of the producer's is kept:
 //! `Nats-Expected-Stream` and its kind would make the publish fail.
 
 use async_nats::{HeaderMap, HeaderValue};
@@ -119,21 +118,18 @@ pub struct DeadLetter<'m> {
     pub subject: &'m str,
     /// The headers it arrived with, if any.
     pub headers: Option<&'m HeaderMap>,
-    /// The record id its arrival gave, if any.
-    pub record_id: Option<RecordId>,
-    /// The kind its arrival gave, if any.
-    pub kind: Option<Kind>,
-    /// The tenant its arrival gave (`unknown` when none): the `Meta` tenant.
+    /// Its arrival: the dead letter carries the record id, kind and ingestion time it gave.
+    pub arrival: &'m Arrival,
+    /// The tenant its arrival gave (`unknown` when none): the `Meta` tenant, which is what
+    /// the dead letter carries, not the arrival's own.
     pub tenant: &'m str,
-    /// The ingestion time its arrival gave, if any.
-    pub ingestion_time: Option<IngestionTime>,
     /// Why the pipeline gave up on it.
     pub failure: &'m Failure,
 }
 
 /// The headers of `letter`'s dead letter: the producer's headers except `Nats-*` and
-/// `Fusion-*`, then the record id, kind, tenant and ingestion time, [`DLQ_REASON`], [`DLQ_SUBJECT`] and
-/// [`MSG_ID`].
+/// `Fusion-*`, then the record id, kind, tenant and ingestion time, [`DLQ_REASON`],
+/// [`DLQ_SUBJECT`] and [`MSG_ID`].
 #[must_use]
 pub fn for_dead_letter(letter: &DeadLetter<'_>) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -146,12 +142,13 @@ pub fn for_dead_letter(letter: &DeadLetter<'_>) -> HeaderMap {
             headers.append(name.clone(), value.clone());
         }
     }
+    let arrival = letter.arrival;
     write_meta(
         &mut headers,
-        letter.record_id,
-        letter.kind,
+        arrival.record_id,
+        arrival.kind,
         letter.tenant,
-        letter.ingestion_time,
+        arrival.ingestion_time,
     );
     let failure = letter.failure;
     insert(
@@ -278,20 +275,25 @@ pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<Inv
     (arrival, invalid)
 }
 
-/// The value `parse` makes of a header `read` gave once; `None` when the header is absent or
-/// ignored, with the reason pushed onto `invalid` when it was present.
+/// The value `parse` makes of a header `read` gave once, `None` when it is absent, or why it
+/// is ignored.
+fn parse_header<'h, T>(
+    read: Result<Option<&'h str>, InvalidHeader>,
+    parse: impl FnOnce(&'h str) -> Result<T, InvalidHeader>,
+) -> Result<Option<T>, InvalidHeader> {
+    read.and_then(|text| text.map(parse).transpose())
+}
+
+/// As [`parse_header`], with the reason a present header is ignored pushed onto `invalid`.
 fn parsed<'h, T>(
     read: Result<Option<&'h str>, InvalidHeader>,
     invalid: &mut Vec<InvalidHeader>,
     parse: impl FnOnce(&'h str) -> Result<T, InvalidHeader>,
 ) -> Option<T> {
-    match read.and_then(|text| text.map(parse).transpose()) {
-        Ok(value) => value,
-        Err(problem) => {
-            invalid.push(problem);
-            None
-        }
-    }
+    parse_header(read, parse)
+        .map_err(|problem| invalid.push(problem))
+        .ok()
+        .flatten()
 }
 
 /// The `Fusion-Tenant` header when it is given once and passes [`is_valid_tenant`];
@@ -301,9 +303,11 @@ fn header_tenant<'h>(
     invalid: &mut Vec<InvalidHeader>,
 ) -> Option<&'h str> {
     parsed(header(headers, TENANT), invalid, |tenant| {
-        Some(tenant)
-            .filter(|tenant| is_valid_tenant(tenant))
-            .ok_or(InvalidHeader::Tenant)
+        if is_valid_tenant(tenant) {
+            Ok(tenant)
+        } else {
+            Err(InvalidHeader::Tenant)
+        }
     })
 }
 
@@ -316,13 +320,11 @@ fn ingestion_time(
     kind: Result<Option<&str>, InvalidHeader>,
     invalid: &mut Vec<InvalidHeader>,
 ) -> Option<IngestionTime> {
-    let time = time.and_then(|time| {
-        time.map(|text| parse_decimal(text).ok_or_else(|| InvalidHeader::Time(text.to_owned())))
-            .transpose()
+    let time = parse_header(time, |text| {
+        parse_decimal(text).ok_or_else(|| InvalidHeader::Time(text.to_owned()))
     });
-    let kind = kind.and_then(|kind| {
-        kind.map(|text| TimeKind::parse(text).ok_or_else(|| InvalidHeader::Kind(text.to_owned())))
-            .transpose()
+    let kind = parse_header(kind, |text| {
+        TimeKind::parse(text).ok_or_else(|| InvalidHeader::Kind(text.to_owned()))
     });
     match (time, kind) {
         (Ok(Some(nanos)), Ok(Some(kind))) => Some(IngestionTime::new(kind, nanos)),
