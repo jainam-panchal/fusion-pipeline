@@ -23,8 +23,8 @@
 //! valid.
 //!
 //! A dead letter carries the message as it arrived, with [`for_dead_letter`]: the
-//! producer's headers, the record id, kind, tenant and ingestion time the arrival gave (so a
-//! replay keeps them), `Fusion-Dlq-Reason` (the failing node and its error),
+//! producer's headers, the record id, kind and ingestion time the arrival gave and the tenant
+//! its `Meta` gets (so a replay keeps them), `Fusion-Dlq-Reason` (the failing node and its error),
 //! `Fusion-Dlq-Subject` (where it arrived) and `Nats-Msg-Id` (its stream and sequence, so a
 //! second dead letter of the same message is dropped as a duplicate). No `Nats-*` header of
 //! the producer's is kept: `Nats-Expected-Stream` and its kind would make the publish fail.

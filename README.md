@@ -54,7 +54,8 @@ A producer names each message's record id in the `Fusion-Record-Id` header (a de
 The record arrives exactly as published, and the message carries the pipeline's view of it
 as headers: `Fusion-Record-Id: 1`, `Fusion-Tenant: acme` (from the subject),
 `Fusion-Ingestion-Time` (the JetStream publish time, in nanoseconds) and
-`Fusion-Ingestion-Time-Kind: reported`. The pipeline never writes those into the record; a config that wants the tenant in the payload says so with
+`Fusion-Ingestion-Time-Kind: reported`. The pipeline never writes those into the record; a
+config that wants the tenant in the payload says so with
 `edit copy {from: meta.tenant, to: resource.tenant.id}`. A pipeline reading `processed.logs`
 takes the record id, tenant and ingestion time back from the headers (the subject's tenant, when the
 subject names one, wins over the header). Only a subject of the form
