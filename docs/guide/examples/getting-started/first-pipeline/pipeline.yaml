@@ -1,0 +1,15 @@
+name: first
+source:
+  type: nats
+  url: nats://127.0.0.1:4222
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: drop_debug
+    type: filter
+    condition: severity_text == "DEBUG"
+    action: drop
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

@@ -1,0 +1,8 @@
+- subject: logs.acme.checkout
+  payload:
+    body: no record id header
+- subject: logs.acme.checkout
+  headers:
+    Fusion-Record-Id: "2"
+  payload:
+    body: has a record id

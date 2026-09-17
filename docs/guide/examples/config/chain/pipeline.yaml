@@ -1,0 +1,13 @@
+nodes:
+  - id: drop_debug
+    type: filter
+    condition: severity_text == "DEBUG"
+    action: drop
+  - id: keep_checkout
+    type: filter
+    condition: resource.service.name == "checkout"
+    action: keep
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

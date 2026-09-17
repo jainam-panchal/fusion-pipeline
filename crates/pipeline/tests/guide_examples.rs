@@ -15,6 +15,9 @@
 //!   sink node wrote, in order. A written record's `headers`, when given, are compared with
 //!   what the NATS sink writes. A sink node the file leaves out must write nothing.
 //!
+//! An example of a config the pipeline refuses has no `input.yaml`, and its `expected.yaml`
+//! holds only `rejected`: the error text the pipeline gives at load.
+//!
 //! Messages are pushed through one worker, so each sink sees them in input order.
 
 mod common;
@@ -26,10 +29,12 @@ use common::{WAIT, files_under, guide_dir, nats_sink_registry, start_with};
 use fusion_core::config::Config;
 use fusion_core::memory::{AckOutcome, MemorySinks, OutgoingRecord};
 use fusion_core::meta::Arrival;
+use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_nats::SourceParams;
 use fusion_nats::config::DEFAULT_TENANT_PREFIX;
 use fusion_nats::headers::{Received, arrival, for_meta};
+use fusion_pipeline::StartError;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -58,9 +63,11 @@ enum HeaderValues {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Expected {
+    #[serde(default)]
     acks: Vec<Settled>,
     #[serde(default)]
     sinks: BTreeMap<String, Vec<Written>>,
+    rejected: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -79,6 +86,14 @@ struct Written {
 }
 
 /// An example folder, read and checked against itself.
+enum Loaded {
+    /// A config that loads, with messages to run through it.
+    Runs(Example),
+    /// A config the pipeline refuses at load, with the error it should give.
+    Rejected { yaml: String, error: String },
+}
+
+/// A config that loads, with the messages to run through it and what should come out.
 struct Example {
     yaml: String,
     tenant_prefix: String,
@@ -109,8 +124,19 @@ fn read(dir: &Path, file: &str) -> Result<String, String> {
     std::fs::read_to_string(dir.join(file)).map_err(|err| format!("{file}: {err}"))
 }
 
-fn load(dir: &Path) -> Result<Example, String> {
+fn load(dir: &Path) -> Result<Loaded, String> {
     let yaml = read(dir, "pipeline.yaml")?;
+    let mut expected: Expected = serde_yaml_ng::from_str(&read(dir, "expected.yaml")?)
+        .map_err(|err| format!("expected.yaml: {err}"))?;
+    if let Some(error) = expected.rejected.take() {
+        if !expected.acks.is_empty() || !expected.sinks.is_empty() {
+            return Err("expected.yaml with `rejected` lists no acks or sinks".to_owned());
+        }
+        if dir.join("input.yaml").exists() {
+            return Err("a rejected config has no input.yaml".to_owned());
+        }
+        return Ok(Loaded::Rejected { yaml, error });
+    }
     let config = Config::from_yaml(&yaml).map_err(|err| format!("config does not load: {err}"))?;
     let tenant_prefix = match &config.source {
         Some(source) => {
@@ -123,8 +149,6 @@ fn load(dir: &Path) -> Result<Example, String> {
     };
     let input: Vec<Message> = serde_yaml_ng::from_str(&read(dir, "input.yaml")?)
         .map_err(|err| format!("input.yaml: {err}"))?;
-    let expected: Expected = serde_yaml_ng::from_str(&read(dir, "expected.yaml")?)
-        .map_err(|err| format!("expected.yaml: {err}"))?;
     if expected.acks.len() != input.len() {
         return Err(format!(
             "expected.yaml lists {} acks for {} input messages",
@@ -143,13 +167,38 @@ fn load(dir: &Path) -> Result<Example, String> {
             "expected.yaml names `{unknown}`, which is not a sink node"
         ));
     }
-    Ok(Example {
+    Ok(Loaded::Runs(Example {
         yaml,
         tenant_prefix,
         sink_ids,
         input,
         expected,
-    })
+    }))
+}
+
+/// The error `pipelined` gives for `yaml`, checked in the order `fusion_pipeline::run`
+/// checks it: the YAML, then the `source` block, then the graph and every node.
+fn load_error(yaml: &str) -> Option<StartError> {
+    let config = match Config::from_yaml(yaml) {
+        Ok(config) => config,
+        Err(err) => return Some(err.into()),
+    };
+    if config.source.is_none() {
+        return Some(StartError::NoSource);
+    }
+    let sinks = MemorySinks::new();
+    Pipeline::compile(&config, &nats_sink_registry(&sinks))
+        .err()
+        .map(StartError::from)
+}
+
+/// What is wrong when `yaml` does not fail to load with exactly `error`.
+fn check_rejected(yaml: &str, error: &str) -> Vec<String> {
+    match load_error(yaml) {
+        None => vec![format!("expected the config to be rejected with: {error}")],
+        Some(got) if got.to_string() == error => Vec::new(),
+        Some(got) => vec![format!("rejected\n  expected {error}\n  got      {got}")],
+    }
 }
 
 /// The arrival NATS would give `message`, and its payload as bytes on the wire.
@@ -292,7 +341,8 @@ fn every_guide_example_produces_its_expected_output() {
         .iter()
         .filter_map(|dir| {
             let problems = match load(dir) {
-                Ok(example) => compare(&example, &drive(&example)),
+                Ok(Loaded::Runs(example)) => compare(&example, &drive(&example)),
+                Ok(Loaded::Rejected { yaml, error }) => check_rejected(&yaml, &error),
                 Err(problem) => vec![problem],
             };
             (!problems.is_empty()).then(|| {
@@ -305,7 +355,7 @@ fn every_guide_example_produces_its_expected_output() {
 }
 
 #[test]
-fn every_example_folder_has_its_three_files_and_nothing_else() {
+fn every_example_folder_has_its_files_and_nothing_else() {
     for dir in example_folders() {
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .expect("example folder is readable")
@@ -318,10 +368,10 @@ fn every_example_folder_has_its_three_files_and_nothing_else() {
             })
             .collect();
         names.sort();
-        assert_eq!(
-            names,
-            ["expected.yaml", "input.yaml", "pipeline.yaml"],
-            "{}",
+        assert!(
+            names == ["expected.yaml", "input.yaml", "pipeline.yaml"]
+                || names == ["expected.yaml", "pipeline.yaml"],
+            "{}: {names:?}",
             dir.display()
         );
     }

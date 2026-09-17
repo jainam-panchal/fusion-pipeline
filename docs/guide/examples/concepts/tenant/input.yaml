@@ -1,0 +1,17 @@
+- subject: logs.acme.checkout
+  headers:
+    Fusion-Record-Id: "1"
+    Fusion-Tenant: globex
+  payload:
+    body: the subject names acme
+- subject: processed.logs
+  headers:
+    Fusion-Record-Id: "2"
+    Fusion-Tenant: globex
+  payload:
+    body: the subject names no tenant
+- subject: processed.logs
+  headers:
+    Fusion-Record-Id: "3"
+  payload:
+    body: nothing names a tenant

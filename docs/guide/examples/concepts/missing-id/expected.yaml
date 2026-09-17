@@ -1,0 +1,4 @@
+acks: [nak, ack]
+sinks:
+  out:
+    - payload: {kind: log, body: has a record id}

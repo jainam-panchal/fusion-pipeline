@@ -1,0 +1,14 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: drop_debug
+    type: filter
+    condition: severity_text == "DEBUG"
+    action: drop
+  - id: out
+    type: sink.nats
+    from: drop_debgu
+    stream: PROCESSED
+    subject: processed.logs

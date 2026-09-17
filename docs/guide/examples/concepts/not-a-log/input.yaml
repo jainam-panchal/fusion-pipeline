@@ -1,0 +1,12 @@
+- subject: logs.acme.checkout
+  headers:
+    Fusion-Record-Id: "1"
+    Fusion-Record-Kind: metric
+  payload:
+    body: a metric
+- subject: logs.acme.checkout
+  headers:
+    Fusion-Record-Id: "2"
+    Fusion-Record-Kind: log
+  payload:
+    body: a log

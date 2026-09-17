@@ -1,0 +1,14 @@
+acks: [ack]
+sinks:
+  out:
+    - headers:
+        Fusion-Record-Id: "7"
+        Fusion-Tenant: acme
+        Fusion-Ingestion-Time: "1758000000000000000"
+        Fusion-Ingestion-Time-Kind: reported
+      payload:
+        id: 99
+        kind: log
+        body: payment failed
+        resource:
+          tenant.id: globex

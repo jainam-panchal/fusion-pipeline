@@ -1,0 +1,4 @@
+acks: [ack]
+sinks:
+  all:
+    - payload: {kind: log, severity_text: ERROR, body: disk full}
