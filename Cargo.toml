@@ -9,6 +9,7 @@ members = [
     "crates/otel",
     "crates/lua",
     "crates/pipeline",
+    "crates/harness",
 ]
 
 [workspace.package]
@@ -26,8 +27,10 @@ fusion-nats = { path = "crates/nats" }
 fusion-state = { path = "crates/state" }
 fusion-otel = { path = "crates/otel" }
 fusion-lua = { path = "crates/lua" }
+fusion-harness = { path = "crates/harness" }
 
 async-nats = "0.50"
+bytes = "1"
 crossbeam-channel = "0.5"
 csv = "1"
 mimalloc = { version = "0.1", default-features = false }
