@@ -390,7 +390,7 @@
       "id": 8,
       "type": "table",
       "title": "Where did my logs go: drops by stage and reason",
-      "description": "Every record a stage chose not to forward in the time range, by the node that dropped it and the reason. `source` is the pipeline's intake: `missing_id` records have no id, `invalid_record` ones are not logs.",
+      "description": "Every record a stage chose not to forward in the time range, by the node that dropped it and the reason. `source` is the pipeline's intake: `missing_id` messages have no `Fusion-Record-Id`, `invalid_record` ones have a `Fusion-Record-Kind` that is not `log` or cannot be read.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
