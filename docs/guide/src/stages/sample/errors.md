@@ -74,6 +74,18 @@ The pipeline refuses these configs at start. The message follows `pipelined: `.
 {{#include ../../../examples/stages/sample/rejected-unknown-key/expected.yaml}}
 ```
 
+## A bad `on_state_error`
+
+```yaml
+# config
+{{#include ../../../examples/stages/sample/rejected-bad-policy/pipeline.yaml}}
+```
+
+```yaml
+# result
+{{#include ../../../examples/stages/sample/rejected-bad-policy/expected.yaml}}
+```
+
 ## All messages
 
 Each message starts with ``node `<id>`: ``.
@@ -87,6 +99,7 @@ Each message starts with ``node `<id>`: ``.
 | `percent` of 0 or less, or above 100 | `` `percent` must be above 0 and at most 100, not 0 `` |
 | no `n` | `` `n` is required: keep one record in n `` |
 | `n: 0` | `` `n` must be at least 1 `` |
+| `on_state_error` other than `pass` or `nak` | `` unknown variant `drop`, expected `pass` or `nak` `` |
 | `n` above 9223372036854775807 | `` `n` is too large `` |
 | no `key` | `` `key` is required: the field paths records are kept or dropped together by `` |
 | `key: []` | `` `key` needs at least one field path `` |

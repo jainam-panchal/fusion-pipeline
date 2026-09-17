@@ -1,9 +1,0 @@
-nodes:
-  - id: keep_all
-    type: sample
-    mode: random
-    percent: 100
-  - id: out
-    type: sink.nats
-    stream: PROCESSED
-    subject: processed.logs
