@@ -4,9 +4,13 @@
 //! Each message goes to `logs.<tenant>.loghub`, one tenant per set, with the record id in
 //! `Fusion-Record-Id` (and in `Nats-Msg-Id`, so a retried publish the server already stored
 //! is dropped as a duplicate) and the payload [`loghub::payload`] builds: the raw line, its set
-//! in `resource.log.format`, its `LineId` in `attributes["loghub.line_id"]` and the send time
-//! in `observed_time_unix_nano`. An expectation is written only once the message's `PubAck` is
-//! in, so the file lists exactly what the stream holds.
+//! in `resource.log.format`, its `LineId` and cycle in `attributes["loghub.line_id"]` and
+//! `attributes["loghub.cycle"]`, and the send time in `observed_time_unix_nano`. An
+//! expectation is written only once the message's `PubAck` is in, so the file lists exactly
+//! what the stream holds.
+//!
+//! Once it is done it writes the done marker beside the expectations file (`published` or
+//! `failed`), which a verifier following the run waits for; it removes a stale one first.
 //!
 //! Exits 1 when a message could not be published, or when the timing the plan relies on did
 //! not hold: a duplicate trailed its original by more than [`DUP_LAG`], a body came back
@@ -24,6 +28,7 @@ use async_nats::HeaderMap;
 use async_nats::jetstream::{self, Context};
 use fusion_harness::cli;
 use fusion_harness::expect::{Expectation, expectation};
+use fusion_harness::follow::{self, ProducerOutcome};
 use fusion_harness::loghub::{self, Line, Set};
 use fusion_harness::plan::{DUP_LAG, PlanConfig, Planned, REPEAT_MARGIN, plan};
 use fusion_nats::headers::{MSG_ID, RECORD_ID};
@@ -105,14 +110,26 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(&options)) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
+    let marker = follow::done_marker(&options.expectations);
+    if let Err(err) = std::fs::remove_file(&marker)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("loghub-producer: {}: {err}", marker.display());
+        return ExitCode::FAILURE;
+    }
+    let (outcome, code) = match runtime.block_on(run(&options)) {
+        Ok(true) => (ProducerOutcome::Published, ExitCode::SUCCESS),
+        Ok(false) => (ProducerOutcome::Failed, ExitCode::FAILURE),
         Err(message) => {
             eprintln!("loghub-producer: {message}");
-            ExitCode::FAILURE
+            (ProducerOutcome::Failed, ExitCode::FAILURE)
         }
+    };
+    if let Err(err) = follow::write_done(&marker, outcome) {
+        eprintln!("loghub-producer: {}: {err}", marker.display());
+        return ExitCode::FAILURE;
     }
+    code
 }
 
 /// One set's lines with its name, so a planned message can be turned into a publish.
@@ -255,7 +272,7 @@ impl Publish {
         let mut headers = HeaderMap::new();
         headers.insert(RECORD_ID, message.id.to_string().as_str());
         headers.insert(MSG_ID, message.id.to_string().as_str());
-        let payload = loghub::payload(set, line, observed_now()).to_string();
+        let payload = loghub::payload(set, line, message.cycle, observed_now()).to_string();
         let expectation = expectation(message.id, set, line, message.cycle, message.dup_of);
         Self {
             subject: format!("logs.{}.loghub", set.tenant),

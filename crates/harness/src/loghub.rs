@@ -120,16 +120,17 @@ pub enum LoadError {
     },
 }
 
-/// The payload the producer sends for `line` of `set`: the raw line, the set as the log
-/// format, the `LineId`, and when the producer observed it. No id, no kind and no tenant:
-/// those travel in the headers and the subject (ADRs 0005 and 0007).
+/// The payload the producer sends for `line` of `set` in `cycle`: the raw line, the set as
+/// the log format, the `LineId` and the cycle (the POC config's `sample` key), and when the
+/// producer observed it. No id, no kind and no tenant: those travel in the headers and the
+/// subject (ADRs 0005 and 0007).
 #[must_use]
-pub fn payload(set: &Set, line: &Line, observed_unix_nanos: u64) -> Value {
+pub fn payload(set: &Set, line: &Line, cycle: u64, observed_unix_nanos: u64) -> Value {
     json!({
         "observed_time_unix_nano": observed_unix_nanos,
         "body": line.body,
         "resource": {"log.format": set.name},
-        "attributes": {"loghub.line_id": line.line_id},
+        "attributes": {"loghub.line_id": line.line_id, "loghub.cycle": cycle},
     })
 }
 
