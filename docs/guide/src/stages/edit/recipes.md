@@ -40,21 +40,21 @@ The producer sent its own `resource.tenant.id`. `copy` replaces it with the tena
 
 ## Keep only records a parser handled
 
-Run [`extract`](../regex/extract.md) first, then an `edit` with `on_unapplied: drop` that renames a field only the parser writes. Records the parser did not match are dropped:
+`extract` writes `attributes.text` only when its pattern matches. A rename of that field with `on_unapplied: drop` then drops every record the parser did not handle:
 
 ```yaml
 # messages in
-{{#include ../../../examples/stages/edit/unapplied-drop/input.yaml}}
+{{#include ../../../examples/stages/edit/recipe-only-parsed/input.yaml}}
 ```
 
 ```yaml
 # config
-{{#include ../../../examples/stages/edit/unapplied-drop/pipeline.yaml}}
+{{#include ../../../examples/stages/edit/recipe-only-parsed/pipeline.yaml}}
 ```
 
 ```yaml
 # result
-{{#include ../../../examples/stages/edit/unapplied-drop/expected.yaml}}
+{{#include ../../../examples/stages/edit/recipe-only-parsed/expected.yaml}}
 ```
 
 `deploy/pipeline.yaml` does this on a branch of its own, so the main branch still keeps every record.

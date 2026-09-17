@@ -17,7 +17,7 @@ Ops run from top to bottom, and each one sees what the ones before it did.
 {{#include ../../../examples/stages/edit/order/expected.yaml}}
 ```
 
-The rename moves `moved` to `b`, then `set` replaces it.
+The rename moves the value of `a` to `b`, then `set` replaces it.
 
 ## set
 
@@ -78,7 +78,7 @@ If `to` does not take the value, nothing changes, and `from` stays. `from` and `
 {{#include ../../../examples/stages/edit/copy/expected.yaml}}
 ```
 
-`from` can be a `meta.*` path. This is the only way to put a Meta value into a record:
+`from` can be a `meta.*` path. It is the only op that can put a Meta value into a record. A [`lua`](../lua/README.md) script can do it too.
 
 ```yaml
 # messages in
@@ -97,7 +97,7 @@ If `to` does not take the value, nothing changes, and `from` stays. `from` and `
 
 `meta.tenant` is text. `meta.id`, `meta.ingestion_time` and `meta.delivery_count` are numbers.
 
-The pipeline does not check at start that `to` takes the value `from` will have. A `copy` from `meta.tenant` to `severity_number` loads, and then fails with cause `type` on every record.
+The pipeline does not check at start that `to` takes the value `from` will have. A `copy` from `meta.tenant` to `severity_number` loads, and then is unapplied with cause `type` on every record.
 
 ## hash
 
@@ -162,4 +162,4 @@ Every record field is yours: `id`, `kind` and `resource.tenant.id` too. Changing
 {{#include ../../../examples/stages/edit/kind-and-id/expected.yaml}}
 ```
 
-The sink still writes `Fusion-Record-Id: "1"`, and later stages still see the record as a log.
+The sink still writes `Fusion-Record-Id: "1"`. The pipeline decided the record is a log when the message arrived, from its `Fusion-Record-Kind` header, and it keeps processing it. Later stages that read `kind` see `span`. A removed `kind` reads as `log`.

@@ -1,6 +1,6 @@
 # edit
 
-`edit` changes fields with a list of simple steps, called ops.
+`edit` changes fields with a list of ops.
 
 ```yaml
 - id: normalise
@@ -48,10 +48,10 @@ Each entry in `ops` holds one op. The details are on [Ops](ops.md).
 
 ## When an op cannot apply
 
-`rename`, `copy` and `hash` read a field first. An op cannot apply when that field is missing or `null` (cause `absent`), or when the target does not take the value (cause `type`). The record is left as it was by that op, and the op is counted on `edit_unapplied_total`. Then `on_unapplied` decides:
+`rename`, `copy` and `hash` read a field first. An op cannot apply when that field is missing or `null` (cause `absent`), or when the value does not fit (cause `type`): the target does not take it, or `hash` got a list or object. The record is left as it was by that op, and the op is counted on `edit_unapplied_total`. Then `on_unapplied` decides:
 
 - `skip`: go on with the next op.
-- `drop`: drop the record with the reason `edit_unapplied`. Later ops do not run. The message is acked.
+- `drop`: drop the record with the reason `edit_unapplied`. Later ops do not run. The drop counts as done for the ack.
 
 With `skip`, the second record goes on without the rename:
 

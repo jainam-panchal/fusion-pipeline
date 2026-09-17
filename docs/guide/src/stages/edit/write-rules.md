@@ -11,13 +11,13 @@ The short version:
 - `kind` takes `log`, `metric` or `span`.
 - `meta.*` takes nothing. No op can write or remove it.
 
-`null` removes `id`, a time field, `severity_text`, `severity_number`, `trace_id` or `span_id`. Under a map key, `null` is kept as a value.
+`null` removes `id`, a time field, `severity_text`, `severity_number`, `trace_id` or `span_id`. Under a map key or in `body`, `null` is kept as a value.
 
 ## Checked at start
 
 - `set`: the value against the field.
 - `hash`: that the field takes text.
-- Every op: that no target is a `meta.*` path.
+- Every op: that it writes or removes no `meta.*` path. Only `copy` may read one.
 
 ## Checked on each record
 
