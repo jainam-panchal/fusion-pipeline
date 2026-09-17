@@ -237,7 +237,6 @@ impl DeadLetters {
             subject: &delivery.message.subject,
             headers: delivery.message.headers.as_ref(),
             arrival: &delivery.arrival,
-            tenant: &delivery.tenant,
             failure,
         });
         let mut pauses = DEAD_LETTER_RETRIES.iter();
@@ -302,7 +301,8 @@ struct Delivery {
     message: async_nats::Message,
     /// What the transport said about it, for its dead letter.
     arrival: Arrival,
-    /// The tenant the record's `Meta` gets.
+    /// The tenant the record's `Meta` gets: [`Meta::tenant_of`] the arrival, kept so every
+    /// series the source counts for the message reads it without rebuilding it.
     tenant: String,
     /// The subject a settlement is published to.
     reply: Option<Subject>,

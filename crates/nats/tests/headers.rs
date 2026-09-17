@@ -3,6 +3,8 @@
 //! and what the source writes on a dead letter.
 //! The live round trip is in `jetstream.rs`.
 
+use std::sync::LazyLock;
+
 use async_nats::HeaderMap;
 use fusion_core::io::{Failure, FailureKind};
 use fusion_core::meta::{Arrival, IngestionTime, Meta};
@@ -341,16 +343,15 @@ mod dead_letter {
         }
     }
 
-    /// The arrival of the message every letter here gives up on. It names no tenant: the
-    /// letter's tenant is the `Meta` one.
-    static ARRIVAL: Arrival = Arrival {
+    /// The arrival of the message every letter here gives up on.
+    static ARRIVAL: LazyLock<Arrival> = LazyLock::new(|| Arrival {
         record_id: Some(RecordId(7)),
         kind: Some(Kind::Log),
-        tenant: None,
+        tenant: Some("acme".to_owned()),
         ingestion_time: Some(IngestionTime::Reported(9)),
         delivery_count: 5,
         bytes: None,
-    };
+    });
 
     fn letter<'a>(headers: Option<&'a HeaderMap>, failure: &'a Failure) -> DeadLetter<'a> {
         DeadLetter {
@@ -359,7 +360,6 @@ mod dead_letter {
             subject: "logs.acme.syslog",
             headers,
             arrival: &ARRIVAL,
-            tenant: "acme",
             failure,
         }
     }
@@ -392,6 +392,22 @@ mod dead_letter {
         assert_eq!(value(&written, RECORD_KIND), None);
         assert_eq!(value(&written, INGESTION_TIME), None);
         assert_eq!(value(&written, INGESTION_TIME_KIND), None);
+    }
+
+    #[test]
+    fn carries_the_meta_tenant_not_an_arrival_tenant_meta_refuses() {
+        let failure = failure("x");
+        for tenant in [None, Some(String::new()), Some("line\nbreak".to_owned())] {
+            let arrival = Arrival {
+                tenant,
+                ..ARRIVAL.clone()
+            };
+            let written = headers::for_dead_letter(&DeadLetter {
+                arrival: &arrival,
+                ..letter(None, &failure)
+            });
+            assert_eq!(value(&written, TENANT), Some("unknown"), "{arrival:?}");
+        }
     }
 
     #[test]

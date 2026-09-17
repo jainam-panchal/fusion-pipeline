@@ -1,5 +1,5 @@
 //! Pipeline headers: a record's `Meta` on the wire, beside the record and never in it
-//! (ADR 0005).
+//! (ADR 0005), and the arrival-only `Fusion-Record-Kind`, which no `Meta` carries (ADR 0007).
 //!
 //! The sink writes four headers on every message it publishes:
 //!
@@ -18,15 +18,16 @@
 //! pipeline consuming another's output keeps the first pipeline's record id, tenant and
 //! ingestion time. The subject's tenant wins over the header, because NATS permissions back
 //! the subject and any producer can set a header; the header's time wins over the JetStream
-//! publish time, so the first pipeline's time survives every hop. A header that does not parse is ignored,
-//! reported and counted once, never a reason to nak: the record is still valid.
+//! publish time, so the first pipeline's time survives every hop. A header that does not
+//! parse is ignored, reported and counted once, never a reason to nak: the record is still
+//! valid.
 //!
 //! A dead letter carries the message as it arrived, with [`for_dead_letter`]: the
 //! producer's headers, the record id, kind, tenant and ingestion time the arrival gave (so a
 //! replay keeps them), `Fusion-Dlq-Reason` (the failing node and its error),
 //! `Fusion-Dlq-Subject` (where it arrived) and `Nats-Msg-Id` (its stream and sequence, so a
-//! second dead letter of the same message is dropped as a duplicate). No `Nats-*` header of the producer's is kept:
-//! `Nats-Expected-Stream` and its kind would make the publish fail.
+//! second dead letter of the same message is dropped as a duplicate). No `Nats-*` header of
+//! the producer's is kept: `Nats-Expected-Stream` and its kind would make the publish fail.
 
 use async_nats::{HeaderMap, HeaderValue};
 use fusion_core::io::Failure;
@@ -70,27 +71,22 @@ pub fn for_meta(meta: &Meta) -> HeaderMap {
     write_meta(
         &mut headers,
         Some(meta.record_id),
-        None,
         &meta.tenant,
         Some(meta.ingestion_time),
     );
     headers
 }
 
-/// Insert the tenant and, when given, the record id, the kind and the two ingestion time
-/// headers. A value that cannot be a header is left out.
+/// Insert the tenant and, when given, the record id and the two ingestion time headers. A
+/// value that cannot be a header is left out.
 fn write_meta(
     headers: &mut HeaderMap,
     record_id: Option<RecordId>,
-    kind: Option<Kind>,
     tenant: &str,
     ingestion_time: Option<IngestionTime>,
 ) {
     if let Some(record_id) = record_id {
         insert(headers, RECORD_ID, &record_id.to_string());
-    }
-    if let Some(kind) = kind {
-        insert(headers, RECORD_KIND, kind.as_str());
     }
     insert(headers, TENANT, tenant);
     if let Some(time) = ingestion_time {
@@ -118,17 +114,15 @@ pub struct DeadLetter<'m> {
     pub subject: &'m str,
     /// The headers it arrived with, if any.
     pub headers: Option<&'m HeaderMap>,
-    /// Its arrival: the dead letter carries the record id, kind and ingestion time it gave.
+    /// Its arrival: the dead letter carries the record id, kind and ingestion time it gave,
+    /// and the tenant [`Meta::tenant_of`] makes of it.
     pub arrival: &'m Arrival,
-    /// The tenant its arrival gave (`unknown` when none): the `Meta` tenant, which is what
-    /// the dead letter carries, not the arrival's own.
-    pub tenant: &'m str,
     /// Why the pipeline gave up on it.
     pub failure: &'m Failure,
 }
 
 /// The headers of `letter`'s dead letter: the producer's headers except `Nats-*` and
-/// `Fusion-*`, then the record id, kind, tenant and ingestion time, [`DLQ_REASON`],
+/// `Fusion-*`, then the record id, kind, `Meta` tenant and ingestion time, [`DLQ_REASON`],
 /// [`DLQ_SUBJECT`] and [`MSG_ID`].
 #[must_use]
 pub fn for_dead_letter(letter: &DeadLetter<'_>) -> HeaderMap {
@@ -146,10 +140,12 @@ pub fn for_dead_letter(letter: &DeadLetter<'_>) -> HeaderMap {
     write_meta(
         &mut headers,
         arrival.record_id,
-        arrival.kind,
-        letter.tenant,
+        &Meta::tenant_of(arrival),
         arrival.ingestion_time,
     );
+    if let Some(kind) = arrival.kind {
+        insert(&mut headers, RECORD_KIND, kind.as_str());
+    }
     let failure = letter.failure;
     insert(
         &mut headers,
@@ -247,12 +243,12 @@ pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<Inv
         bytes,
     } = received;
     let mut invalid = Vec::new();
-    let record_id = parsed(header(headers, RECORD_ID), &mut invalid, |text| {
+    let record_id = parse_or_report(header(headers, RECORD_ID), &mut invalid, |text| {
         parse_decimal(text)
             .map(RecordId)
             .ok_or_else(|| InvalidHeader::RecordId(text.to_owned()))
     });
-    let kind = parsed(header(headers, RECORD_KIND), &mut invalid, |text| {
+    let kind = parse_or_report(header(headers, RECORD_KIND), &mut invalid, |text| {
         Kind::parse(text).ok_or_else(|| InvalidHeader::RecordKind(text.to_owned()))
     });
     let tenant = tenant_from_subject(subject, tenant_prefix)
@@ -285,7 +281,7 @@ fn parse_header<'h, T>(
 }
 
 /// As [`parse_header`], with the reason a present header is ignored pushed onto `invalid`.
-fn parsed<'h, T>(
+fn parse_or_report<'h, T>(
     read: Result<Option<&'h str>, InvalidHeader>,
     invalid: &mut Vec<InvalidHeader>,
     parse: impl FnOnce(&'h str) -> Result<T, InvalidHeader>,
@@ -302,7 +298,7 @@ fn header_tenant<'h>(
     headers: Option<&'h HeaderMap>,
     invalid: &mut Vec<InvalidHeader>,
 ) -> Option<&'h str> {
-    parsed(header(headers, TENANT), invalid, |tenant| {
+    parse_or_report(header(headers, TENANT), invalid, |tenant| {
         if is_valid_tenant(tenant) {
             Ok(tenant)
         } else {
