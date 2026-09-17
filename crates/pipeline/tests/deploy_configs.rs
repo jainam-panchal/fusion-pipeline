@@ -9,27 +9,17 @@ mod common;
 
 use std::sync::OnceLock;
 
-use common::{WAIT, arrival_as, deploy_config, for_each_worker_count, host_record, start_with};
+use common::{
+    WAIT, arrival_as, deploy_config, for_each_worker_count, host_record, nats_sink_registry,
+    start_with,
+};
 use fusion_core::config::Config;
 use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::meta::{Arrival, IngestionTime};
 use fusion_core::metrics::CounterMetric;
 use fusion_core::record::{Record, RecordId};
-use fusion_core::registry::Registry;
 use fusion_nats::config::{SinkParams, SourceParams};
 use fusion_nats::subject::covers_every_tenant;
-use fusion_pipeline::default_registry;
-
-/// The default registry with `sink.nats` parsing real sink params and collecting in memory.
-fn registry(sinks: &MemorySinks) -> Registry {
-    let mut registry = default_registry();
-    let collector = sinks.clone();
-    registry.register_sink("sink.nats", move |node: &_| {
-        let _: SinkParams = fusion_core::config::NodeConfig::parse_params(node)?;
-        fusion_core::registry::SinkFactory::build(&collector, node)
-    });
-    registry
-}
 
 /// How many Linux hosts [`archived_host`] tries. At `percent: 50` about half are kept; any
 /// `percent` that keeps one host in this many still finds one.
@@ -47,7 +37,7 @@ fn archived_host() -> &'static str {
             &deploy_config("pipeline-routing.yaml"),
             1,
             sinks.clone(),
-            registry(&sinks),
+            nats_sink_registry(&sinks),
         );
         let probes: Vec<_> = (1..=FIXTURE_HOSTS)
             .map(|id| h.push(record_from_host(id, "INFO", "Linux", &format!("web-{id}"))))
@@ -158,8 +148,11 @@ fn every_deploy_config_compiles_with_the_types_the_binary_registers() {
         "pipeline-poc.yaml",
     ] {
         let sinks = MemorySinks::new();
-        fusion_core::pipeline::Pipeline::from_yaml(&deploy_config(name), &registry(&sinks))
-            .unwrap_or_else(|err| panic!("{name} compiles: {err}"));
+        fusion_core::pipeline::Pipeline::from_yaml(
+            &deploy_config(name),
+            &nats_sink_registry(&sinks),
+        )
+        .unwrap_or_else(|err| panic!("{name} compiles: {err}"));
     }
 }
 
@@ -175,7 +168,7 @@ fn the_compose_pipeline_delivers_every_record_and_keeps_only_parsed_lines_on_the
             &deploy_config("pipeline.yaml"),
             workers,
             sinks.clone(),
-            registry(&sinks),
+            nats_sink_registry(&sinks),
         );
         let parsed = h.push(common::body_record(1, SYSLOG_LINE));
         let plain = h.push(common::body_record(2, "disk full"));
@@ -250,7 +243,7 @@ fn the_routing_example_drops_debug_and_fans_each_format_to_its_sinks() {
             &deploy_config("pipeline-routing.yaml"),
             workers,
             sinks.clone(),
-            registry(&sinks),
+            nats_sink_registry(&sinks),
         );
 
         let probes = [
@@ -278,7 +271,7 @@ fn a_failing_branch_of_the_routing_example_naks_the_record_once() {
         &deploy_config("pipeline-routing.yaml"),
         1,
         sinks.clone(),
-        registry(&sinks),
+        nats_sink_registry(&sinks),
     );
 
     let linux = h.push(record(1, "ERROR", "Linux"));
@@ -300,7 +293,7 @@ fn the_routing_example_archives_every_record_of_half_the_linux_hosts() {
         &deploy_config("pipeline-routing.yaml"),
         4,
         sinks.clone(),
-        registry(&sinks),
+        nats_sink_registry(&sinks),
     );
     let hosts = 40;
     let probes: Vec<_> = (0..hosts)
@@ -457,7 +450,7 @@ fn the_poc_pipeline_treats_each_loghub_set_as_the_harness_expects() {
 
     let sinks = MemorySinks::new();
     let yaml = deploy_config("pipeline-poc.yaml");
-    let h = start_with(&yaml, 4, sinks.clone(), registry(&sinks));
+    let h = start_with(&yaml, 4, sinks.clone(), nats_sink_registry(&sinks));
     let lines = loghub_lines(LOGHUB_STRIDE);
     let expectations = send_loghub_cycles(&h, &lines, LOGHUB_CYCLES);
 
@@ -512,7 +505,7 @@ fn the_poc_pipeline_forwards_every_copy_while_the_state_store_is_down() {
 
     let sinks = MemorySinks::new();
     let yaml = deploy_config("pipeline-poc.yaml");
-    let h = start_with(&yaml, 4, sinks.clone(), registry(&sinks));
+    let h = start_with(&yaml, 4, sinks.clone(), nats_sink_registry(&sinks));
     h.state.fail_all(true);
     let lines = loghub_lines(4 * LOGHUB_STRIDE);
     let expectations = send_loghub_cycles(&h, &lines, 1);

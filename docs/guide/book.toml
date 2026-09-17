@@ -1,0 +1,11 @@
+[book]
+title = "fusion-pipeline guide"
+language = "en"
+src = "src"
+
+[build]
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/jainam-panchal/fusion-pipeline"
+edit-url-template = "https://github.com/jainam-panchal/fusion-pipeline/edit/main/docs/guide/{path}"

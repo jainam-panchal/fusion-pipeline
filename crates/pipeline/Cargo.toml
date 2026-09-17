@@ -22,6 +22,8 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+async-nats.workspace = true
+serde.workspace = true
 fusion-harness.workspace = true
 csv.workspace = true
 serde_json.workspace = true

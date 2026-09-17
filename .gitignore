@@ -1,6 +1,7 @@
 .claude/
 .agents/
 /target/
+/docs/guide/book/
 **/*.rs.bk
 .scratch/
 .env

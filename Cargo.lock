@@ -473,6 +473,7 @@ dependencies = [
 name = "fusion-pipeline"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "csv",
  "fusion-core",
  "fusion-harness",
@@ -482,6 +483,7 @@ dependencies = [
  "fusion-stages",
  "fusion-state",
  "mimalloc",
+ "serde",
  "serde_json",
  "serde_yaml_ng",
  "thiserror",
