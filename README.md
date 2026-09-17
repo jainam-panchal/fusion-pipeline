@@ -23,7 +23,7 @@ Prometheus, Loki, Tempo, Grafana, and the pipeline, built from this checkout:
 docker compose -f deploy/compose.yaml up -d --build
 ```
 
-The pipeline runs the demo config, `deploy/pipeline.yaml`: drop `TRACE` records, drop a body
+The compose pipeline runs `deploy/pipeline.yaml`, the demo config: drop `TRACE` records, drop a body
 repeated within 10s, parse syslog-shaped bodies into attributes, tag the service, mask IPv4
 addresses, run a small Lua script, write everything to `processed.logs`, and on a fan-out
 write only the records whose body the syslog pattern parsed to `processed.parsed`. Its header comment says
@@ -66,8 +66,8 @@ reason `edit_unapplied`. For what the headers mean, dead letters and a sink fail
 | http://127.0.0.1:3100, http://127.0.0.1:3200 | Loki and Tempo APIs |
 
 The Grafana, Loki and Tempo ports follow `GRAFANA_PORT`, `LOKI_PORT` and `TEMPO_PORT`.
-`deploy/metrics-check.sh` sends traffic and checks every metric, a log line and a trace
-arrived. Details: [Metrics, logs and traces](#metrics-logs-and-traces).
+`deploy/metrics-check.sh` sends traffic and checks that every metric, an event and a record
+trace arrived. Details: [Metrics, logs and traces](#metrics-logs-and-traces).
 
 **4. Run the loghub check and the chaos run.**
 
@@ -77,11 +77,10 @@ make chaos      # the same, with the pipeline killed at 20s (back at 25s) and Dr
 ```
 
 Both switch the stack to `deploy/pipeline-poc.yaml`, the full DAG with every node type, and
-exit 0 on a pass: nothing missing, unexpected, dead-lettered or wrongly written. `make chaos`
-also checks the chaos landed. The coverage panel on the internal dashboard climbs while they
-run. Details, the last report and the extraction accuracy: [Loghub harness](#loghub-harness).
+exit 0 on a pass. The coverage panel on the internal dashboard climbs while they run. What a
+pass is, the last report and the extraction accuracy: [Loghub harness](#loghub-harness).
 
-**5. Put the demo config back, or stop.**
+**5. Put the compose pipeline's config back, or stop.**
 
 ```sh
 docker compose -f deploy/compose.yaml up -d      # back to pipeline.yaml after make loghub/chaos
@@ -634,7 +633,8 @@ were tuned on these same lines (the Linux fix above). `cargo test -p fusion-pipe
 extract_loghub` checks every 20th line of each set without the stack.
 
 `deploy/loghub-check.sh` exits 0 on a pass (nothing missing, unexpected, dead-lettered or wrongly written by `edit`
-or `lua`, and at least 80% of the planned duplicates dropped), 1 on a fail, 2 when the run
+or `lua`, and at least 80% of the planned duplicates dropped), 1 on a fail or, under
+`--chaos`, when any message was nakked, 2 when the run
 could not be judged (the producer failed, the pipeline did not settle, or under `--chaos` the
 chaos did not land). Extraction accuracy is reported, never gated; the mismatching `LineId`s
 are listed. The stack keeps running the POC config afterwards;
@@ -669,8 +669,8 @@ nodes:
 
 ## What the POC concluded
 
-Each point answers one of the spec's decision-maker stories and names its evidence and its
-limits.
+Each point answers one of the spec's decision-maker stories (58-61), or for delivery its
+reliability stories (28-31), and names its evidence and its limits.
 
 - **Rust over Go**, decided by Lua embedding: `mlua` embeds real Lua 5.4 with the memory cap
   and instruction hook the `lua` stage needs, where Go offers Lua 5.1 in pure Go or a cgo
@@ -680,7 +680,8 @@ limits.
   and a canary at load. [ADR 0002](docs/adr/0002-regex-first-facade-pcre2-jit-off.md). One
   class of slow PCRE2-only pattern is still bounded only by `input_bytes` (see below).
 - **The stage model, as built.** Eight stages (`filter`, `route`, `dedupe`, `extract`,
-  `redact`, `sample`, `edit`, `lua`), covering four of the catalogue's five Tier 1 log features
+  `redact`, `sample`, `edit`, `lua`), covering four of the five log features `pipeline_atomic_features.csv` puts in `Priority
+  Tier` 1
   (not log-to-metric), five of its ten Tier 2 ones (static tags, rename, scripted transform,
   dedupe, route; not lookups, GeoIP, event aggregation, JSON extraction or rate limiting)
   and a few Tier 3 ones (`edit`'s hash and delete), are each one synchronous function from a
@@ -696,14 +697,18 @@ limits.
 - **Regex extraction on these four formats.** Hand-written patterns matched the loghub ground
   truth on every checked group of the Apache, Linux, Mac and OpenSSH samples (2,000 lines
   each, 1,461 to 2,000 of them distinct; table under [Loghub harness](#loghub-harness)),
-  after one fix to the Linux pattern found on the same data. That is enough for these
-  samples. It says nothing about other formats or about lines unlike the samples.
+  after one fix to the Linux pattern found on the same data. For these formats regex-based
+  parsing was good enough, so the POC gives no reason to bring dedicated parsers forward for
+  them; for any other format it gives no answer either way.
 
 What the POC does not conclude:
 
 - throughput or latency: performance is observed, not asserted. The engine's throughput on
   the compose stages is printed by
   `cargo test --release -p fusion-pipeline --test throughput -- --ignored --nocapture`;
+- that the outstanding-branch ack counter survives a crash between the two sinks of a
+  fan-out: the chaos run does not force the kill to land there (story 31 is met only as
+  far as the hint above);
 - anything about formats other than the four loghub sets, or about dedicated parsers;
 - multi-node NATS, an HA state store, TLS or auth;
 - whether a real agent can feed it: OTel Collector, Vector and Fluent Bit cannot set
@@ -736,9 +741,12 @@ Known limits, decided and recorded:
   only by `input_bytes` (spec amendment of 2026-09-09).
 - `sample` in `every_nth` mode counts deliveries, not records, so a redelivered record
   usually loses its place (issue #7).
+- A `lua` script's upvalues are per worker VM, and a `memory` error rebuilds the VM with
+  them, so a script that counts gives a redelivered record a different answer (spec
+  amendment of 2026-09-16, issue #8).
 - `edit`'s `hash` is an unsalted digest, a join key rather than anonymisation.
 
-Open issues:
+Open issues as of 2026-09-17 (`gh issue list` for the current list):
 
 - #9 core: versioned compiled pipeline behind atomic swap
 - #30 nats: state-error naks carry a delay long enough to outlive a store outage
