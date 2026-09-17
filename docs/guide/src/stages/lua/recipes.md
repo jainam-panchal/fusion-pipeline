@@ -2,41 +2,43 @@
 
 Small scripts to start from. Each one is a tested example.
 
-## Add a field from Meta
+## Parse key=value pairs
 
 ```yaml
 # messages in
-{{#include ../../../examples/stages/lua/tag-with-meta/input.yaml}}
+{{#include ../../../examples/stages/lua/kv-pairs/input.yaml}}
 ```
 
 ```yaml
 # config
-{{#include ../../../examples/stages/lua/tag-with-meta/pipeline.yaml}}
+{{#include ../../../examples/stages/lua/kv-pairs/pipeline.yaml}}
 ```
 
 ```yaml
 # result
-{{#include ../../../examples/stages/lua/tag-with-meta/expected.yaml}}
+{{#include ../../../examples/stages/lua/kv-pairs/expected.yaml}}
 ```
 
-## One record per line
+Values come out as text. `string.gmatch` uses Lua patterns, not regular expressions. For a regular expression, use [`extract`](../regex/extract.md).
+
+## Shorten long bodies
 
 ```yaml
 # messages in
-{{#include ../../../examples/stages/lua/split-lines/input.yaml}}
+{{#include ../../../examples/stages/lua/truncate/input.yaml}}
 ```
 
 ```yaml
 # config
-{{#include ../../../examples/stages/lua/split-lines/pipeline.yaml}}
+{{#include ../../../examples/stages/lua/truncate/pipeline.yaml}}
 ```
 
 ```yaml
 # result
-{{#include ../../../examples/stages/lua/split-lines/expected.yaml}}
+{{#include ../../../examples/stages/lua/truncate/expected.yaml}}
 ```
 
-A body with no text lines would give an empty list, which is an error. Check for it and return `record` in that case, as `deploy/pipeline.yaml` does.
+`#` counts bytes, and `string.sub` cuts by bytes, so a cut can split a multi-byte character. Use the `utf8` library to cut by characters.
 
 ## Status class from a status code
 
@@ -76,19 +78,4 @@ A body with no text lines would give an empty list, which is an error. Check for
 
 The key expires after 60 seconds, so the same body passes again after that. The [`dedupe`](../dedupe.md) stage does this without a script.
 
-## Count records per body
-
-```yaml
-# messages in
-{{#include ../../../examples/stages/lua/state-counter/input.yaml}}
-```
-
-```yaml
-# config
-{{#include ../../../examples/stages/lua/state-counter/pipeline.yaml}}
-```
-
-```yaml
-# result
-{{#include ../../../examples/stages/lua/state-counter/expected.yaml}}
-```
+More scripts are on the other pages: [adding a field from Meta](README.md#the-script), [one record per line](script-api.md#return-values) and [a counter](state-api.md).

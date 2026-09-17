@@ -1,6 +1,6 @@
 # lua state API
 
-`state` stores values in Dragonfly. Every worker and every copy of the pipeline share them. The pipeline opens a Dragonfly connection only when a script uses the word `state`. It finds Dragonfly through `DRAGONFLY_URL` (default `redis://127.0.0.1:6379`).
+`state` stores values in Dragonfly. Every worker and every copy of the pipeline share them. The pipeline connects to Dragonfly only when a script uses the global `state`. A field such as `record.state`, or the word inside a string or comment, does not count. Each worker then has one connection, shared by all its nodes that use state. It finds Dragonfly through `DRAGONFLY_URL` (default `redis://127.0.0.1:6379`).
 
 | Call | Returns | What it does |
 |---|---|---|
@@ -9,7 +9,7 @@
 | `state.incr(key, by, ttl_ms)` | the new number | Adds `by` to a number, starting from 0. The expiry is reset on every call. |
 | `state.del(key)` | nothing | Removes a key. A missing key is fine. |
 
-Keys are private to the node and the tenant. The pipeline puts `<pipeline name>:<tenant>:<node id>:` in front of every key, so two tenants never see each other's values. The pipeline name is the config's `name`, `pipeline` by default.
+Keys are private to the node and the tenant. The pipeline puts `<pipeline name>:<tenant>:<node id>:` in front of every key, so two tenants never see each other's values. The pipeline name is the config's `name`, `pipeline` by default. A `:` or `%` in the tenant is written as `%3A` or `%25`.
 
 A counter per body:
 
@@ -54,6 +54,6 @@ A `state` call that fails stops the script. `on_error` does not apply, and `pcal
 - `nak` (the default): the message is nakked and comes back later.
 - `pass`: the record goes on as it came into the node, as if the script had not run.
 
-The default is `nak` because a script often does work, such as masking data, that should not be skipped. `dedupe` and `sample` default to `pass`. See [State and failure policy](../../state-and-failure.md).
+The default is `nak` because a script may build its output from what it stores, and a record that skipped the script may be missing work it needed. `dedupe` and `sample` default to `pass`, since a record that skips them is only an extra copy. See [State and failure policy](../../state-and-failure.md).
 
-Calling `state` outside `process` is an error.
+Calling `state` in the code outside `process` stops the pipeline at start.

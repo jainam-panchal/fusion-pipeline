@@ -16,11 +16,11 @@
 |---|---|---|
 | `source` | | The script, written in the config. |
 | `script` | | A path to a script file. Give `source` or `script`, not both. |
-| `limits` | see below | `instructions`, `memory_kib` and `output_kib`. See [Budgets and errors](budgets-and-errors.md). |
+| `limits` | see [Budgets and errors](budgets-and-errors.md) | `instructions`, `memory_kib` and `output_kib`. |
 | `on_error` | `pass` | What happens to a record when the script fails: `pass`, `drop` or `nak`. |
 | `on_state_error` | `nak` | What happens when a `state` call gets no answer from Dragonfly: `nak` or `pass`. Only allowed when the script uses `state`. |
 
-A `script` path is read from the directory the pipeline runs in, not the directory of the config file ([issue #41](https://github.com/jainam-panchal/fusion-pipeline/issues/41)). Use `source` or an absolute path to be safe.
+A `script` path is read from the directory the pipeline runs in, not the directory of the config file ([issue #41](https://github.com/jainam-panchal/fusion-pipeline/issues/41)). Use `source` or an absolute path.
 
 ## The script
 
@@ -36,7 +36,7 @@ What `process` returns decides what happens:
 | a record table | the record goes on |
 | `nil` | the record is dropped, reason `lua_drop` |
 | a list of record tables | each one goes on as its own record |
-| anything else | an error, handled by `on_error` |
+| `false`, `{}`, an empty list, or anything else | an error, handled by `on_error` |
 
 ```yaml
 # messages in

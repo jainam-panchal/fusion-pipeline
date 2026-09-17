@@ -15,7 +15,7 @@ Every key is optional, and the values above are the defaults.
 - `memory_kib` covers everything the script keeps, values between records included. When it runs out, the pipeline throws away that worker's copy of the script and builds a new one for the next record.
 - `output_kib` applies to each returned record on its own.
 
-A script that loops forever fails with the `instructions` limit:
+A script that loops forever fails with the `instructions` limit. Here `on_error: pass` sends the record on as it came in:
 
 ```yaml
 # messages in
@@ -47,10 +47,9 @@ The kind is counted on `lua_errors_total`, and one line with the reason goes to 
 |---|---|---|
 | `pass` (default) | goes on as it came into the node | acked when its branches finish |
 | `drop` | dropped, reason `lua_error` | acked |
-| `nak` | stops | nakked, and redelivered |
+| `nak` | fails | nakked, and redelivered |
 
 The same script with each setting. Record 1 works. Record 2 has a `http.status` that is not a number, so `//` raises an error:
-
 
 ### `on_error: pass`
 
@@ -103,7 +102,7 @@ The same script with each setting. Record 1 works. Record 2 has a `http.status` 
 {{#include ../../../examples/stages/lua/on-error-nak/expected.yaml}}
 ```
 
-With `nak`, think about the next delivery. A script that fails on a record will fail again on every redelivery, so the message ends as a dead letter after the last one. A `state` failure is different: it is handled by `on_state_error`, see [State API](state-api.md).
+With `nak`, think about the next delivery. A `runtime` or `output` error usually happens again on every redelivery, so the message ends as a dead letter after the last one. A `state` failure is different: it is handled by `on_state_error`, see [State API](state-api.md).
 
 ## What the pipeline refuses
 
@@ -190,4 +189,3 @@ Other messages, each after ``node `<id>`: ``:
 | neither `script` nor `source` | ``give `script` (a file path) or `source` (the script inline)`` |
 | a `script` file that cannot be read | ``` `script`: cannot read `<path>`: ``` and the reason |
 | code outside `process` that loops forever | `instruction budget exceeded` |
-| code outside `process` that calls `state` | ``the pipeline API is only available inside `process` `` |

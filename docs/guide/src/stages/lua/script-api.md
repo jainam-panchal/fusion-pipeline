@@ -78,7 +78,7 @@ Before a returned record leaves the stage, the pipeline checks it:
 - Every top-level key must be a record field. A key such as `colour` is an error.
 - Each field must have the right type. `kind` must be `log`, `metric` or `span`, and `id` a whole number that is not negative.
 - A whole number written as a float, such as `18 / 2`, is turned into the number `9`. For `id` only, a text of digits such as `"7"` becomes the number.
-- The text in one record must fit in `limits.output_kib`.
+- The text values in one record, added up, must fit in `limits.output_kib`.
 - Tables may nest at most 128 levels.
 
 ```yaml
@@ -98,7 +98,7 @@ Before a returned record leaves the stage, the pipeline checks it:
 
 ## JSON values
 
-A Lua table with keys `1..n` becomes a JSON list. Any other table becomes an object. Two helpers cover the cases Lua cannot say on its own:
+A Lua table with keys `1..n` and nothing else becomes a JSON list. A table with no such keys becomes an object. A table with `1..n` and other keys is refused. Two helpers cover the cases Lua cannot say on its own:
 
 - `json.null` is JSON `null`. Use it inside a list or object. A field set to `json.null` is removed, the same as `nil`. `json.null` counts as true in an `if`, so compare with `== json.null`.
 - `json.list(t)` marks `t` as a list, so an empty table stays `[]`. `json.list()` makes a new empty list.
@@ -123,7 +123,7 @@ A list may only have the positions `1..n`. For a gap, write `json.null`, not `ni
 ## What a script can call
 
 - The Lua libraries `string`, `table`, `math` and `utf8`.
-- The basic functions such as `pairs`, `ipairs`, `type`, `tostring`, `tonumber`, `error`, `assert`, `select`, `next` and the `raw*` functions.
+- The basic functions `assert`, `error`, `getmetatable`, `ipairs`, `next`, `pairs`, `rawequal`, `rawget`, `rawlen`, `rawset`, `select`, `setmetatable`, `tonumber`, `tostring`, `type` and `warn`, and the values `_G` and `_VERSION`.
 - `pcall` and `xpcall`. They catch errors the script raises itself. They do not catch a budget or memory trip or a `state` failure.
 - `record:copy()`, a full copy of a record.
 - `log.info(text)` and `log.warn(text)`. Each call writes one line to the pipeline's standard error, with the node id and record id. The lines are not rate limited ([issue #42](https://github.com/jainam-panchal/fusion-pipeline/issues/42)).
@@ -131,7 +131,7 @@ A list may only have the positions `1..n`. For a gap, write `json.null`, not `ni
 - `state`, see [State API](state-api.md).
 - `json.null` and `json.list`.
 
-A script that names `os`, `io`, `package`, `require`, `load`, `loadfile`, `dofile`, `loadstring`, `debug` or `print` is refused at start. `collectgarbage` and `coroutine` are not there either, so using them fails when the script runs.
+A script that names `os`, `io`, `package`, `require`, `load`, `loadfile`, `dofile`, `loadstring`, `debug` or `print` is refused at start. `collectgarbage` and `coroutine` are not there either, so using them is an error: at start when the code outside `process` uses them, or when a record runs otherwise.
 
 ## Values that live between records
 
