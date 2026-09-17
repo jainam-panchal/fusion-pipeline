@@ -475,7 +475,7 @@ The script brings the stack up with `PIPELINE_CONFIG=pipeline-poc.yaml`, purges 
   behind the plan, and says how it ended in `expectations.jsonl.done`.
 - `loghub-verifier` follows the run: it reads the expectations as they are written and every
   `processed.>` and `dlq.>` subject as the pipeline writes it, and every 5s judges what it has
-  and exports it to the collector (the internal dashboard's *Coverage* row, where `arrived`,
+  and exports it to the collector (the internal dashboard's *Coverage* row, where `reached`,
   the line and subject pairs some copy reached, climbs to `expected`; `published` counts
   messages and `received` record and subject pairs, so those two never meet). Once the producer is done, the `pipeline` consumer has settled and
   both streams are read to their end, it prints the final report. A line's copies count

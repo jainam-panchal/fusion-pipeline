@@ -1415,8 +1415,8 @@
     {
       "id": 1101,
       "type": "timeseries",
-      "title": "Did every record arrive?  (arrived converging to expected; published, received)",
-      "description": "The loghub verifier's judgement, exported every 5s while a run goes on and once more when it is final (settled = 1). expected: (line, subject) pairs the run must deliver, a Linux line counting on main and audit and a sampled-out line on neither main nor, outside Linux, anywhere. arrived: those some copy of the line reached; while records are in flight it trails expected, and on a run without loss it meets it, also after the chaos run's kill and pause. published: messages the producer got a PubAck for. received: distinct (record, subject) pairs read back, duplicates that got through included. sampled out: lines the sample node leaves off the main subject. The series go stale 5 minutes after the run.",
+      "title": "Did every record arrive?  (reached converging to expected; published, received)",
+      "description": "The loghub verifier's judgement, exported every 5s while a run goes on and once more when it is final (settled = 1). expected: (line, subject) pairs the run must deliver, a Linux line counting on main and audit and a sampled-out line on neither main nor, outside Linux, anywhere. reached: those some copy of the line reached; while records are in flight it trails expected, and on a run without loss it meets it, also after the chaos run's kill and pause. published: messages the producer got a PubAck for. received: distinct (record, subject) pairs read back, duplicates that got through included. sampled out: lines the sample node leaves off the main subject. The series go stale 5 minutes after the run.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1520,7 +1520,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "arrived"
+              "options": "reached"
             },
             "properties": [
               {
@@ -1579,8 +1579,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(last_over_time(loghub_arrived[15s]))",
-          "legendFormat": "arrived",
+          "expr": "max(last_over_time(loghub_reached[15s]))",
+          "legendFormat": "reached",
           "refId": "F"
         },
         {

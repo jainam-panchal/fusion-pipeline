@@ -19,17 +19,17 @@
 # container is killed (`docker kill`) and at 25s started again (`docker start`); at 40s
 # Dragonfly is paused (`docker pause`) and at 45s unpaused. The pipeline and the collector are
 # restarted before the run, so every pipeline counter read afterwards counts this run alone.
-# After the verifier, the run must show that the chaos landed: the source consumer redelivered
-# messages (its deliveries grew by more than the messages published), `dedupe_body` counted
-# state errors (`state_errors_total`), and no message was nakked (`source_naks_total`), since
-# `on_state_error: pass` forwards a record the store could not answer for rather than failing
-# it. The counters are read as their highest value since the producer started, so what the
+# After the verifier, a nak fails the run (`source_naks_total` above 0: `on_state_error: pass`
+# must forward a record the store could not answer for, never fail it), and the run must show
+# that the chaos landed, else it is not judged: the source consumer redelivered messages (its
+# deliveries grew by more than the messages published) and `dedupe_body` counted state errors
+# (`state_errors_total`). The counters are read as their highest value since the producer started, so what the
 # killed process counted before 20s is not lost. The schedule needs a run longer than 45s: on
 # a shorter one (PRODUCER_ARGS) the verifier can settle before the pause, and the run is not
 # judged.
 #
 # Exits 0 when nothing is missing, unexpected, dead-lettered or wrongly written, 1 when
-# something is (the verifier's verdict), 2 when the run could not be judged: the producer
+# something is (the verifier's verdict) or under --chaos a message was nakked, 2 when the run could not be judged: the producer
 # failed, the pipeline did not settle, a command the script runs (docker, nats, curl) failed,
 # or under --chaos the chaos did not land. Needs docker
 # compose, the `nats` CLI, curl, jq and cargo. Host ports follow the compose overrides
@@ -52,7 +52,8 @@ KILL_AT=20
 START_AT=25
 PAUSE_AT=40
 UNPAUSE_AT=45
-# The loghub tenants, whose counters the chaos evidence reads.
+# The loghub tenants, whose counters the chaos evidence reads: those of `loghub::SETS` in
+# crates/harness/src/loghub.rs.
 TENANTS='tenant=~"linux|openssh|apache|mac"'
 
 CHAOS=0
@@ -79,9 +80,19 @@ runs_poc() {
     "${COMPOSE[@]}" exec -T pipeline cat /etc/pipeline/pipeline.yaml | grep -q '^name: poc$'
 }
 
-# delivered: the source consumer's delivery count and the last stream sequence it delivered.
+# delivered: the source consumer's delivery count and the last stream sequence it delivered,
+# as two integers; exits 2 when they cannot be read.
 delivered() {
-    nats consumer info LOGS pipeline --json | jq -r '"\(.delivered.consumer_seq) \(.delivered.stream_seq)"'
+    local out
+    out=$(nats consumer info LOGS pipeline --json \
+        | jq -r '"\(.delivered.consumer_seq) \(.delivered.stream_seq)"')
+    [[ "$out" =~ ^[0-9]+\ [0-9]+$ ]] || fail "unreadable LOGS/pipeline delivery counts: $out"
+    echo "$out"
+}
+
+# pulling: whether a pipeline is waiting on the source consumer for messages.
+pulling() {
+    [[ "$(nats consumer info LOGS pipeline --json | jq '.num_waiting')" -gt 0 ]]
 }
 
 # prom_max <selector>: the sum over the matching series of each one's highest value since
@@ -152,13 +163,15 @@ if ((CHAOS)); then
     "${COMPOSE[@]}" restart otel-collector pipeline 2>&1 | tail -2
 fi
 wait_for 30 "the LOGS/pipeline consumer" nats consumer info LOGS pipeline
+wait_for 60 "the pipeline to pull from LOGS/pipeline" pulling
 
 step "purge LOGS, PROCESSED and DLQ"
 for stream in LOGS PROCESSED DLQ; do
     nats stream purge "$stream" -f >/dev/null
 done
 rm -f "$EXPECTATIONS" "$EXPECTATIONS.done"
-read -r CONSUMER_SEQ_BEFORE STREAM_SEQ_BEFORE < <(delivered)
+before=$(delivered)
+read -r CONSUMER_SEQ_BEFORE STREAM_SEQ_BEFORE <<<"$before"
 
 if ((CHAOS)); then step "produce and verify, with chaos"; else step "produce and verify"; fi
 OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:4318} \
@@ -179,7 +192,8 @@ VERIFIER=
 ((CHAOS)) || exit 0
 
 step "did the chaos land?"
-read -r consumer_seq stream_seq < <(delivered)
+after=$(delivered)
+read -r consumer_seq stream_seq <<<"$after"
 redelivered=$(((consumer_seq - CONSUMER_SEQ_BEFORE) - (stream_seq - STREAM_SEQ_BEFORE)))
 # One pipeline export (5s) and one scrape (5s) after the pipeline settled.
 sleep 12
@@ -188,9 +202,13 @@ naks=$(prom_max "source_naks_total{$TENANTS}")
 echo "redelivered messages          $redelivered   (the kill at ${KILL_AT}s: more than 0)"
 echo "dedupe_body state errors      $state_errors   (the pause at ${PAUSE_AT}s: more than 0)"
 echo "naks                          $naks   (on_state_error: pass: 0)"
+if [[ "$naks" != 0 ]]; then
+    echo "FAIL: messages were nakked: a paused store must not fail a record under" \
+        "on_state_error: pass" >&2
+    exit 1
+fi
 landed=1
 ((redelivered > 0)) || { echo "the kill left no message to redeliver" >&2; landed=0; }
 [[ "$state_errors" != 0 ]] || { echo "the pause caused no dedupe state error" >&2; landed=0; }
-[[ "$naks" == 0 ]] || { echo "messages were nakked" >&2; landed=0; }
 ((landed)) || fail "the chaos did not land as specified; the run is not judged"
 echo "verdict: PASS under chaos"
