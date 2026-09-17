@@ -102,7 +102,9 @@ pub fn plan(config: &PlanConfig, lens: &[usize], base: u64) -> Result<Vec<Planne
         return invalid("--dup-percent must be from 0 to 50");
     }
     if config.count >= MAX_COUNT {
-        return invalid("--count must be below 4194304");
+        return Err(PlanError::InvalidFlag(format!(
+            "--count must be below {MAX_COUNT}"
+        )));
     }
     let Some(&shortest) = lens.iter().min() else {
         return invalid("--datasets names no set");

@@ -9,11 +9,12 @@ mod common;
 
 use std::sync::OnceLock;
 
-use common::{WAIT, deploy_config, for_each_worker_count, host_record, start_with};
+use common::{WAIT, arrival_as, deploy_config, for_each_worker_count, host_record, start_with};
 use fusion_core::config::Config;
 use fusion_core::memory::{AckOutcome, MemorySinks};
+use fusion_core::meta::Arrival;
 use fusion_core::metrics::CounterMetric;
-use fusion_core::record::Record;
+use fusion_core::record::{Record, RecordId};
 use fusion_core::registry::Registry;
 use fusion_nats::config::{SinkParams, SourceParams};
 use fusion_nats::subject::covers_every_tenant;
@@ -374,9 +375,9 @@ fn the_poc_pipeline_sends_each_loghub_set_where_the_harness_expects_it() {
         let lines = loghub::load(&loghub::testdata(), set).expect("set loads");
         for line in lines.iter().step_by(LOGHUB_STRIDE) {
             let id = expectations.len() as u64 + 1;
+            // As the producer sends it: the id in `Fusion-Record-Id` only, not in the payload.
             let record = Record::from_json(
                 &serde_json::json!({
-                    "id": id,
                     "body": line.body,
                     "resource": {"log.format": set.name},
                     "attributes": {"loghub.line_id": line.line_id},
@@ -384,7 +385,11 @@ fn the_poc_pipeline_sends_each_loghub_set_where_the_harness_expects_it() {
                 .to_string(),
             )
             .expect("record parses");
-            probes.push(h.push_as(set.tenant, record));
+            let arrival = Arrival {
+                record_id: Some(RecordId(id)),
+                ..arrival_as(set.tenant)
+            };
+            probes.push(h.source.push_arrival(record, arrival));
             expectations.push(
                 expectation(id, set.name, line.line_id, 0, None, line.attributes.clone())
                     .expect("a vendored set"),

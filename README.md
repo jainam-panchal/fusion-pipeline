@@ -462,10 +462,11 @@ The script brings the stack up with `PIPELINE_CONFIG=pipeline-poc.yaml`, purges 
 
 - `loghub-producer` (`--rate`, `--count`, `--datasets Linux,OpenSSH,Apache,Mac`,
   `--dup-percent`, `--seed`, `--dedupe-window`, `--expectations`) publishes each distinct
-  loghub line raw in `body` on `logs.<set>.loghub`, with `Fusion-Record-Id`, about 30% of
-  them sent twice within 500ms under a new id, and writes one expectation per acked
-  message to `target/loghub/expectations.jsonl`: which subjects, `drop: dedupe` for a
-  duplicate, and the line's row of the structured CSV.
+  loghub line raw in `body` on `logs.<tenant>.loghub` (one tenant per set) with
+  `Fusion-Record-Id`, about 30% of them sent twice within 500ms under a new id, and writes
+  one expectation per acked message to `target/loghub/expectations.jsonl`: which subjects,
+  `drop: dedupe` for a duplicate, and the line's row of the structured CSV. It fails the run
+  when a publish needed a retry or its timing fell behind the plan.
 - `loghub-verifier` waits for the `pipeline` consumer to settle, reads
   `processed.loghub.>` and `dlq.>`, prints the report and exports it to the collector (the
   internal dashboard's *Loghub harness* row). A line's copies count together: it is missing

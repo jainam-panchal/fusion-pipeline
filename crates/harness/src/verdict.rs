@@ -23,6 +23,9 @@ use crate::loghub;
 /// How many examples of each failure the summary lists.
 const SHOWN: usize = 20;
 
+/// How many mismatching `LineId`s the summary lists per set.
+const SHOWN_LINE_IDS: usize = 100;
+
 /// One message read from a sink subject.
 #[derive(Debug, Clone)]
 pub struct Delivery {
@@ -123,7 +126,7 @@ impl fmt::Display for Report {
                 let shown: Vec<String> = format
                     .mismatched_lines
                     .iter()
-                    .take(SHOWN * 5)
+                    .take(SHOWN_LINE_IDS)
                     .map(ToString::to_string)
                     .collect();
                 let more = format.mismatched_lines.len().saturating_sub(shown.len());
@@ -254,16 +257,9 @@ pub fn judge(expectations: &[Expectation], deliveries: &[Delivery], dead: &[Dead
 fn extraction_matches(e: &Expectation, attributes: &Map<String, Value>) -> bool {
     let columns = loghub::set(&e.set).map_or(&[][..], |set| set.columns);
     columns.iter().all(|column| {
-        let got = attributes.get(*column).map(|value| {
-            let text = match value {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            if *column == "Content" {
-                text.trim_end().to_owned()
-            } else {
-                text
-            }
+        let got = attributes.get(*column).map(|value| match value {
+            Value::String(text) => loghub::normalise(column, text),
+            other => loghub::normalise(column, &other.to_string()),
         });
         got.as_ref() == e.attributes.get(*column)
     })

@@ -3,7 +3,7 @@
 #   PIPELINE_CONFIG=pipeline-poc.yaml docker compose -f deploy/compose.yaml up -d
 #   deploy/loghub-check.sh
 #
-# The producer publishes the vendored loghub lines on `logs.<tenant>.<set>`, one tenant per
+# The producer publishes the vendored loghub lines on `logs.<tenant>.loghub`, one tenant per
 # set, with the set's name in `resource.log.format`. DEBUG records are dropped (loghub lines
 # carry no severity, so none is). A body seen again within 2s of ingestion time is dropped as
 # a repeat: the producer's deliberate duplicates follow their original within 500ms, and it

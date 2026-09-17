@@ -1,14 +1,16 @@
 //! `loghub-producer`: replay the vendored loghub lines into the `LOGS` stream and write what
 //! the pipeline should do with each message to the expectations file.
 //!
-//! Each message goes to `logs.<tenant>.loghub`, one tenant per set, with the record id in `Fusion-Record-Id` (and
-//! in `Nats-Msg-Id`, so a retried publish the server already stored is dropped as a
-//! duplicate) and a payload of the raw line, its set in `resource.log.format` and its
-//! `LineId` in `attributes["loghub.line_id"]`. An expectation is written only once the
+//! Each message goes to `logs.<tenant>.loghub`, one tenant per set, with the record id in
+//! `Fusion-Record-Id` (and in `Nats-Msg-Id`, so a retried publish the server already stored
+//! is dropped as a duplicate) and a payload of the raw line, its set in `resource.log.format`
+//! and its `LineId` in `attributes["loghub.line_id"]`. An expectation is written only once the
 //! message's `PubAck` is in, so the file lists exactly what the stream holds.
 //!
-//! Exits 1 when a message could not be published, or when sending fell behind far enough
-//! that a body came back, or a duplicate trailed its original, by more than the plan allows.
+//! Exits 1 when a message could not be published, or when the timing the plan relies on did
+//! not hold: a duplicate trailed its original by more than [`DUP_LAG`], a body came back
+//! sooner than the dedupe window, the lag and [`REPEAT_MARGIN`], or a publish needed a retry
+//! (its stored time, which the dedupe window runs on, is then later than planned).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -22,7 +24,7 @@ use async_nats::jetstream::{self, Context};
 use fusion_harness::cli;
 use fusion_harness::expect::{Expectation, expectation};
 use fusion_harness::loghub::{self, Line, Set};
-use fusion_harness::plan::{DUP_LAG, PlanConfig, Planned, plan};
+use fusion_harness::plan::{DUP_LAG, PlanConfig, Planned, REPEAT_MARGIN, plan};
 use fusion_nats::headers::{MSG_ID, RECORD_ID};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -129,6 +131,8 @@ struct Loaded {
 struct Tally {
     acked: u64,
     failed: u64,
+    /// Published messages that needed more than one try.
+    retried: u64,
     /// The longest a duplicate actually trailed its original.
     max_dup_lag: Duration,
     /// The shortest time before a body actually came back in its set's next cycle.
@@ -203,29 +207,32 @@ async fn run(options: &Options) -> Result<bool, String> {
         .map_err(|err| format!("{}: {err}", options.expectations.display()))?;
     let elapsed = start.elapsed();
 
-    let needed_repeat = options.config.dedupe_window + DUP_LAG;
-    let dup_ok = tally.max_dup_lag < options.config.dedupe_window;
+    let needed_repeat = options.config.dedupe_window + DUP_LAG + REPEAT_MARGIN;
+    let dup_ok = tally.max_dup_lag <= DUP_LAG;
     let repeat_ok = tally.min_repeat.is_none_or(|gap| gap >= needed_repeat);
+    let timing_ok = dup_ok && repeat_ok && tally.retried == 0;
     println!(
-        "published {} of {} messages in {:.1}s ({:.0}/s), {} failed",
+        "published {} of {} messages in {:.1}s ({:.0}/s), {} failed, {} retried",
         tally.acked,
         messages.len(),
         elapsed.as_secs_f64(),
         tally.acked as f64 / elapsed.as_secs_f64().max(f64::EPSILON),
-        tally.failed
+        tally.failed,
+        tally.retried
     );
     println!(
-        "longest duplicate lag {:?} (must stay under {:?}), shortest body repeat {:?} (must be at least {:?})",
-        tally.max_dup_lag, options.config.dedupe_window, tally.min_repeat, needed_repeat
+        "longest duplicate lag {:?} (at most {DUP_LAG:?}), \
+         shortest body repeat {:?} (at least {needed_repeat:?})",
+        tally.max_dup_lag, tally.min_repeat
     );
     println!("expectations: {}", options.expectations.display());
-    if !dup_ok || !repeat_ok {
+    if !timing_ok {
         eprintln!(
             "loghub-producer: sending fell behind the plan; the expectations no longer hold. \
              Lower --rate."
         );
     }
-    Ok(tally.failed == 0 && dup_ok && repeat_ok)
+    Ok(tally.failed == 0 && timing_ok)
 }
 
 /// One message ready to publish, with the expectation to write once it is acked.
@@ -285,7 +292,7 @@ impl Publish {
                 Err(err) => Err(err.to_string()),
             };
             match ack {
-                Ok(_) => return Ok(self.expectation),
+                Ok(_) => return Ok((self.expectation, attempt + 1)),
                 Err(err) => last = err,
             }
         }
@@ -293,7 +300,8 @@ impl Publish {
     }
 }
 
-type Sent = Result<Expectation, (Expectation, String)>;
+/// The expectation and how many tries its publish took, or why it was not published.
+type Sent = Result<(Expectation, u32), (Expectation, String)>;
 
 fn settle(
     joined: Result<Sent, tokio::task::JoinError>,
@@ -301,8 +309,11 @@ fn settle(
     tally: &mut Tally,
 ) -> Result<(), String> {
     match joined.map_err(|err| format!("a publish task failed: {err}"))? {
-        Ok(expectation) => {
+        Ok((expectation, tries)) => {
             tally.acked += 1;
+            if tries > 1 {
+                tally.retried += 1;
+            }
             let line = serde_json::to_string(&expectation).map_err(|err| err.to_string())?;
             writeln!(out, "{line}").map_err(|err| format!("expectations: {err}"))
         }
