@@ -41,16 +41,22 @@ cargo run -p fusion-pipeline -- --config deploy/pipeline.yaml
 
 # in another shell
 nats sub processed.logs --count 1 &
-nats pub logs.acme.syslog '{"id": 1, "body": "disk full"}'
+nats pub logs.acme.syslog '{"body": "disk full"}' -H 'Fusion-Record-Id:1'
 nats consumer info LOGS pipeline        # 0 pending, 0 redelivered
 ```
 
+A producer names each message's record id in the `Fusion-Record-Id` header (a decimal
+`u64`) and, for anything but a log, its kind in `Fusion-Record-Kind` (`log`, `metric` or
+`span`; absent is `log`). The pipeline reads neither from the payload: a payload `id` or
+`kind` is the producer's data (ADR 0007). A message without the id header is nakked
+(`missing_id`); one whose kind is not `log` is dropped (`invalid_record`).
+
 The record arrives exactly as published, and the message carries the pipeline's view of it
-as headers: `Fusion-Tenant: acme` (from the subject), `Fusion-Ingestion-Time` (the JetStream
+as headers: `Fusion-Record-Id: 1`, `Fusion-Tenant: acme` (from the subject), `Fusion-Ingestion-Time` (the JetStream
 publish time, in nanoseconds) and `Fusion-Ingestion-Time-Kind: reported`. The pipeline never
 writes those into the record; a config that wants the tenant in the payload says so with
 `edit copy {from: meta.tenant, to: resource.tenant.id}`. A pipeline reading `processed.logs`
-takes the tenant and ingestion time back from the headers (the subject's tenant, when the
+takes the record id, tenant and ingestion time back from the headers (the subject's tenant, when the
 subject names one, wins over the header). Only a subject of the form
 `{tenant_prefix}.{tenant}.>` names a tenant; the source's `tenant_prefix` is `logs` unless the
 config says otherwise, so `processed.logs` names none. A sink
@@ -61,8 +67,9 @@ sink.
 A message that fails its last delivery is dead-lettered: the source publishes it as it
 arrived (payload and the producer's headers, minus any `Nats-*` or `Fusion-*`) to
 `dlq.{tenant}`, waits for the `PubAck` and terminates it. The dead letter carries `Fusion-Dlq-Reason` (the node that
-failed and its error, `source` for a payload that is not a record or a record without an
-`id`), `Fusion-Dlq-Subject` (where it arrived), the tenant and ingestion time headers, so
+failed and its error, `source` for a payload that is not a record or a message without a
+`Fusion-Record-Id`), `Fusion-Dlq-Subject` (where it arrived), the record id, kind, tenant and
+ingestion time headers, so
 republishing it to its subject replays it with the same `Meta`, and `Nats-Msg-Id`
 (`{stream}:{sequence}`), so a second dead letter of one message is dropped. It counts
 `dlq_total{tenant, stage, reason}`, `reason` being `stage_error`, `state_error`,
@@ -73,8 +80,8 @@ JetStream gives up on it at once, `dlq_publish_errors_total` counts it, and the 
 in `LOGS` under the stream sequence the pipeline logs.
 
 ```sh
-nats pub logs.acme.syslog '{"body": "no id"}'   # fails every delivery
-nats sub 'dlq.>' --count 1                       # about 15 s later, with Fusion-Dlq-Reason
+nats pub logs.acme.syslog '{"body": "no id header"}'   # fails every delivery
+nats sub 'dlq.>' --count 1                             # about 15 s later, with Fusion-Dlq-Reason
 ```
  The compose pipeline has a `dedupe` node, so it also needs the compose Dragonfly:
 `DRAGONFLY_URL` names it (default `redis://127.0.0.1:6379`), and a config with no stateful
@@ -105,7 +112,7 @@ record traces all reach them through the one collector:
 docker compose -f deploy/compose.yaml up -d --build
 open http://127.0.0.1:3000/d/fusion-internal     # Grafana, no login
 open http://127.0.0.1:3000/d/fusion-tenant       # one tenant's view
-nats pub logs.acme.syslog '{"id": {{Count}}, "body": "disk full"}' --count 1000
+nats pub logs.acme.syslog '{"body": "disk full"}' -H 'Fusion-Record-Id:{{Count}}' --count 1000
 deploy/metrics-check.sh                          # traffic in; every metric, the log lines and a trace checked, exit non-zero otherwise
 ```
 
@@ -283,8 +290,8 @@ The node never naks: the outcome is fixed by the record's shape. What load can c
 refuses, naming the node and the op's position: paths, a `set` literal of the wrong type,
 a `hash` target that takes no string, `from` equal to `to`, any write to a `meta.*` path.
 Any record field may be edited, `id`, `kind` and `resource.tenant.id` included: the pipeline
-decides from the record's `Meta`, fixed at intake, so an edit changes what the sink writes
-and nothing else (ADR 0005). `copy` may read a `meta.*` path, which is how a pipeline value
+decides from the record's `Meta`, fixed at intake from the transport, so an edit changes what
+the sink writes and nothing else (ADR 0005, ADR 0007). `copy` may read a `meta.*` path, which is how a pipeline value
 enters a record: `copy {from: meta.tenant, to: resource.tenant.id}`.
 
 ```yaml
