@@ -8,7 +8,7 @@ pub const BOTH_ENGINES: [EngineChoice; 2] = [EngineChoice::Linear, EngineChoice:
 
 /// The loghub Linux syslog pattern from the spec: lifts `Month, Date, Time, Level,
 /// Component, PID, Content` and must pass every load-time check.
-pub const LINUX_SYSLOG: &str = r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$";
+pub const LINUX_SYSLOG: &str = r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) +(?<Component>[^\s\[:][^\[:]*)(?:\[(?<PID>\d+)\])?: +(?<Content>\S.*)?$";
 
 pub const LINUX_LINE: &str =
     "Jun 14 15:16:01 combo sshd(pam_unix)[19939]: authentication failure; logname= uid=0";

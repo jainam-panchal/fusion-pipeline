@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use common::{Harness, WAIT, for_each_worker_count, start};
 
 /// The spec's Linux syslog pattern, lifting the structured CSV's columns.
-const LINUX_PATTERN: &str = r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$";
+const LINUX_PATTERN: &str = r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) +(?<Component>[^\s\[:][^\[:]*)(?:\[(?<PID>\d+)\])?: +(?<Content>\S.*)?$";
 
 fn extract_yaml(pattern: &str) -> String {
     format!(

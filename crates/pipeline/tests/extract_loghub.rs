@@ -22,7 +22,7 @@ struct Set {
 
 const LINUX: Set = Set {
     name: "Linux",
-    pattern: r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$",
+    pattern: r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) +(?<Component>[^\s\[:][^\[:]*)(?:\[(?<PID>\d+)\])?: +(?<Content>\S.*)?$",
     columns: &[
         "Month",
         "Date",
@@ -141,6 +141,13 @@ fn extracted(h: &Harness, line_id: usize) -> BTreeMap<String, String> {
 }
 
 fn assert_set_extracts_its_ground_truth(set: &Set) {
+    let lines = raw_lines(set.name).len();
+    let sampled: Vec<usize> = (1..=lines).step_by(STRIDE).collect();
+    assert_eq!(sampled.len(), 100, "{}: 100 lines sampled", set.name);
+    assert_lines_extract_their_ground_truth(set, &sampled);
+}
+
+fn assert_lines_extract_their_ground_truth(set: &Set, sampled: &[usize]) {
     let yaml = format!(
         r#"
 nodes:
@@ -156,8 +163,6 @@ nodes:
     let h = start(&yaml, 4);
     let lines = raw_lines(set.name);
     let truth = ground_truth(set);
-    let sampled: Vec<usize> = (1..=lines.len()).step_by(STRIDE).collect();
-    assert_eq!(sampled.len(), 100, "{}: 100 lines sampled", set.name);
 
     let probes: Vec<_> = sampled
         .iter()
@@ -180,7 +185,7 @@ nodes:
     }
 
     let mut mismatches = Vec::new();
-    for &line_id in &sampled {
+    for &line_id in sampled {
         let mut got = extracted(&h, line_id);
         got.remove("loghub.line_id");
         let want = &truth[&line_id];
@@ -205,6 +210,17 @@ nodes:
 #[test]
 fn linux_lines_extract_to_the_structured_csv_columns() {
     assert_set_extracts_its_ground_truth(&LINUX);
+}
+
+/// Linux lines with more than one space before the component (`combo  -- root[2421]:`) or
+/// after the colon (`kernel:   HighMem zone: ...`): the CSV's `Component` and `Content` start
+/// at the first non-space. Found by the loghub harness (issue #13).
+#[test]
+fn linux_lines_with_extra_spaces_extract_without_them() {
+    assert_lines_extract_their_ground_truth(
+        &LINUX,
+        &[899, 1913, 1914, 1915, 1916, 1917, 1923, 1924, 1926],
+    );
 }
 
 #[test]

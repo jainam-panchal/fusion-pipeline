@@ -424,7 +424,7 @@ nodes:
   - id: parse_linux
     type: extract
     field: body
-    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$'
+    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) +(?<Component>[^\s\[:][^\[:]*)(?:\[(?<PID>\d+)\])?: +(?<Content>\S.*)?$'
     limits: { input_bytes: 8192 }
     on_redos_risk: reject
   - id: mask_ips
@@ -474,23 +474,22 @@ The script brings the stack up with `PIPELINE_CONFIG=pipeline-poc.yaml`, purges 
 
 ```
 published      100000
-received       87618
+received       87622
 missing        0
 unexpected     0
 dead_lettered  0
-extra_copies   14
+extra_copies   18
 extraction:
   Apache   100.000% of 17521 groups, 0 mismatched
-  Linux     99.583% of 17521 groups, 73 mismatched
-    distinct LineIds: 899, 1913, 1914, 1915, 1916, 1917, 1923, 1924, 1926
+  Linux    100.000% of 17521 groups, 0 mismatched
   Mac      100.000% of 17520 groups, 0 mismatched
   OpenSSH  100.000% of 17521 groups, 0 mismatched
 verdict: PASS
 ```
 
-That is the 100k run of 2026-09-17: every Linux mismatch is a line with more than one space
-after the colon (`kernel:   HighMem zone: ...`), which the Linux pattern keeps in `Content` and
-the CSV drops.
+That is the 100k run of 2026-09-17. The first run found nine Linux lines with more than one
+space before the component or after the colon (`kernel:   HighMem zone: ...`); the Linux
+pattern now starts `Component` and `Content` at the first non-space, as the CSV does.
 
 It exits 0 on a pass (nothing missing, unexpected or dead-lettered), 1 on a fail, 2 when
 the run could not be judged. Extraction accuracy is reported, never gated; the mismatching
