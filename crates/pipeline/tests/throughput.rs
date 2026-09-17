@@ -7,6 +7,8 @@
 //! bodies alternate between syslog lines with an address (parsed, masked) and plain text
 //! (a non-match), each distinct so the dedupe node keeps them all.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,11 +23,6 @@ use fusion_core::trace::{RecordTrace, TraceSampling, TraceSink};
 use fusion_pipeline::default_registry;
 
 const WORKERS: usize = 4;
-
-fn pipeline_yaml() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/pipeline.yaml");
-    std::fs::read_to_string(path).expect("deploy/pipeline.yaml is readable")
-}
 
 fn registry(sinks: &MemorySinks) -> Registry {
     let mut registry = default_registry();
@@ -51,8 +48,8 @@ fn record(id: u64) -> Record {
 /// Records per second for `records` records through a fresh engine with `signals`.
 fn measure(records: u64, signals: impl Into<Signals>) -> f64 {
     let sinks = MemorySinks::new();
-    let pipeline =
-        Pipeline::from_yaml(&pipeline_yaml(), &registry(&sinks)).expect("pipeline loads");
+    let pipeline = Pipeline::from_yaml(&common::deploy_config("pipeline.yaml"), &registry(&sinks))
+        .expect("pipeline loads");
     let (source, input) = MemorySource::new();
     let engine = Engine::start(
         pipeline,
