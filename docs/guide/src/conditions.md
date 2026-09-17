@@ -22,7 +22,7 @@ The left side is always a path and the right side always a value. Two fields can
 |---|---|
 | `==` | the field equals the value, with the same type |
 | `!=` | `==` is false |
-| `<`, `>`, `<=`, `>=` | both are numbers, or both are text, and the order holds |
+| `<`, `>`, `<=`, `>=` | both are numbers, or both are text (compared byte by byte), and the order holds |
 | `=~` | the field is text and the pattern matches somewhere in it |
 | `!~` | `=~` is false |
 
@@ -89,7 +89,7 @@ A missing field and a JSON `null` both equal `null`. Any other comparison with a
 {{#include ../examples/conditions/missing-field/expected.yaml}}
 ```
 
-A `body` that is an object or a list equals nothing.
+A field holding an object or a list, such as a structured `body`, equals nothing.
 
 ## Patterns
 
@@ -148,7 +148,7 @@ This works in YAML without quotes around the condition. Patterns follow the rule
 
 ## YAML quoting
 
-Most conditions need no YAML quotes. Wrap a condition in single quotes when it holds `: `, ` #`, starts with a quote, or uses a quoted path.
+Most conditions need no YAML quotes, even with `"` inside. Wrap a condition in single quotes when it holds `: ` or ` #`, which YAML reads as its own syntax.
 
 ## What the pipeline refuses
 
@@ -200,7 +200,7 @@ Quote the pattern: `body =~ "42"`.
 
 Close the quote.
 
-Every message, after ```node `<id>`: condition `<text>`: ``` (or ```route `<label>` `<text>`: ``` in a route):
+Every message, after ``node `<id>`: condition `<text>`: `` (in a route, ``node `<id>`: route `<label>` `<text>`: ``). For a pattern error, the text in backticks is the pattern alone:
 
 | Message | Fix |
 |---|---|

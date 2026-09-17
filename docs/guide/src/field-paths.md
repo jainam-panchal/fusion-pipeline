@@ -29,13 +29,13 @@ Under `attributes`, `resource` and `scope`, everything after the first dot is th
 {{#include ../examples/paths/flat-key/expected.yaml}}
 ```
 
-Record 3 has no `http.status` key, so the filter drops it. The maps are flat: a path cannot reach inside a value.
+Record 3 has no `http.status` key, so the filter drops it. A path cannot reach inside a value.
 
 ## Names with other characters
 
 Letters, digits, `_` and `-` can be written as they are: `resource.k8s.pod-name`, `attributes.5xx.count`. Put anything else, such as a space or a colon, in double quotes: `attributes."Event ID"`. Inside the quotes, write `\"` for a quote and `\\` for a backslash.
 
-YAML reads quotes too. When a path with quotes sits in a condition, wrap the whole condition in single quotes:
+A condition with a quoted path needs no extra YAML quotes:
 
 ```yaml
 # messages in
@@ -56,7 +56,7 @@ Brackets, as in `attributes["http.status"]`, are not allowed.
 
 ## Meta paths
 
-`meta.*` reads the pipeline's own facts about the record, not the payload. Here the filter keeps the record from the `acme` subject, whatever the payload says:
+`meta.*` reads the pipeline's own facts about the record. Here the filter keeps the record from the `acme` subject, whatever the payload says:
 
 ```yaml
 # messages in
@@ -82,13 +82,13 @@ Stages that change a record, `edit`, `extract`, `redact` and `lua`, go through t
 | Path | Accepts |
 |---|---|
 | `attributes.*`, `resource.*`, `scope.*`, `body` | any JSON value |
-| `id`, `time_unix_nano`, `observed_time_unix_nano` | a whole number, 0 or more |
-| `severity_number` | a whole number |
+| `id`, `time_unix_nano`, `observed_time_unix_nano` | a whole number from 0 to 18446744073709551615 |
+| `severity_number` | a whole number from -2147483648 to 2147483647 |
 | `severity_text`, `trace_id`, `span_id` | text |
 | `kind` | `log`, `metric` or `span` |
 | `meta.*` | nothing |
 
-Writing `null` to `id`, a time field, `severity_text`, `severity_number`, `trace_id` or `span_id` removes it. `kind` refuses `null`. Under a map key, `null` is kept as a value. Any field can be removed. A removed `kind` is written as `log`. A write that is refused leaves the record as it was.
+Writing `null` to `id`, a time field, `severity_text`, `severity_number`, `trace_id` or `span_id` removes it. `kind` refuses `null`. Under a map key or in `body`, `null` is kept as a value. (A `lua` script is different: a top-level field it sets to `json.null` is removed.) Any field can be removed. A removed `kind` is written as `log`. A write that is refused leaves the record as it was.
 
 ## What the pipeline refuses
 
@@ -140,7 +140,7 @@ Every message, with the fix:
 |---|---|
 | `` `<name>` is not a record field; instead use one of ... `` | Use one of the listed names. |
 | `` `<path>` has an empty segment; instead use `<field>.<key>` with one dot between names `` | Remove the extra or trailing dot. |
-| `` `<segment>` has `<char>`; instead use `<path>` `` | Quote the segment, as the message shows. |
+| `` `<segment>` has `<char>`; instead use `<path>` `` | Do as the message shows: quote the segment, or inside quotes write `\\` for a backslash. |
 | `` `<path>` has an unclosed quote; instead close it: `attributes."some key"` `` | Close the quote. |
 | `` brackets are not allowed; instead use `<path>` `` | Use the dotted form the message shows. |
 | `` `<path>` is not a meta field; instead use one of `meta.id`, `meta.tenant`, `meta.ingestion_time`, `meta.delivery_count` `` | Use one of those four. |

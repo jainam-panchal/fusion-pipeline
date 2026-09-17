@@ -18,14 +18,14 @@ When some node uses Dragonfly, each worker connects at start. If Dragonfly canno
 
 ## When Dragonfly fails while running
 
-Each call to Dragonfly has 2 seconds. A call that fails or runs out of time is a state error, and the next call opens a fresh connection. The node's `on_state_error` decides what happens to the record:
+Each call to Dragonfly has 2 seconds to answer. A call that fails or runs out of time is a state error. After a connection error or a timeout, the next call opens a fresh connection, with up to 5 seconds to connect. The node's `on_state_error` decides what happens to the record:
 
 | `on_state_error` | The record | The message |
 |---|---|---|
 | `pass` | goes on unchanged, as if the node were not there | acked when its branches finish |
 | `nak` | stops | nakked, and delivered again later |
 
-`pass` keeps records flowing. The cost is that `dedupe` lets duplicates through and `every_nth` keeps records it did not count. `nak` holds records back until Dragonfly answers. Each nak waits 1, 2, 4, 8 seconds and so on, up to 30 seconds, before the next delivery. After the last delivery, the message becomes a dead letter. With the compose stack's 5 deliveries, that is about 15 seconds of outage.
+`pass` keeps records flowing. The cost is that `dedupe` lets duplicates through and `every_nth` keeps records it did not count. `nak` holds records back until Dragonfly answers. Each nak waits 1, 2, 4, 8 seconds and so on, up to 30 seconds, before the next delivery. After the last delivery, the message becomes a dead letter. With the compose stack's 5 deliveries, the waits add up to 15 seconds, plus the time each failed call takes. A longer outage sends messages to the dead-letter stream ([issue #30](https://github.com/jainam-panchal/fusion-pipeline/issues/30) would give these naks a longer wait).
 
 `lua` defaults to `nak` because a record that skips a script may skip work such as masking data. A record that skips `dedupe` is only a duplicate.
 
@@ -107,7 +107,7 @@ There is no `drop` policy. Use `pass` or `nak`.
 {{#include ../examples/state/rejected-policy-random/expected.yaml}}
 ```
 
-Only `every_nth` uses Dragonfly, so only it takes `on_state_error`. A `lua` script that never uses `state` refuses the key in the same way.
+Only `every_nth` uses Dragonfly, so only it takes `on_state_error`. A `lua` script that never uses `state` refuses the key too, with ``node `<id>`: `on_state_error` is given but the script never uses `state` ``.
 
 ```yaml
 # config

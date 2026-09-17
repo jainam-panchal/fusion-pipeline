@@ -18,9 +18,9 @@ Every key is optional. The values above are the defaults.
 
 The pipeline tries each pattern on a fast engine first, the Rust `regex` crate. It runs in time that grows with the length of the text and cannot get stuck. Most patterns run there, and the metrics call it `linear`.
 
-Some syntax needs PCRE2: lookahead and lookbehind (`(?=`, `(?!`, `(?<=`, `(?<!`), backreferences such as `\1`, atomic groups, possessive quantifiers and recursion. Those patterns run on PCRE2, called `backtracking` in the metrics. PCRE2 can be slow on some inputs, which is what most of the limits are for.
+Some patterns need PCRE2: those with syntax the fast engine lacks, and the rare pattern too large for it. The syntax is lookahead and lookbehind (`(?=`, `(?!`, `(?<=`, `(?<!`), backreferences such as `\1`, atomic groups, possessive quantifiers and recursion. Those patterns run on PCRE2, called `backtracking` in the metrics. PCRE2 can be slow on some inputs, which is what most of the limits are for.
 
-The pipeline prints the engine of each pattern to standard error when it starts.
+When it starts, the pipeline prints each pattern to standard error, and one line per node with its engine. A node with several patterns gets the slowest engine among them.
 
 ## The limits
 
@@ -58,7 +58,7 @@ Two more limits are fixed: a pattern may be at most 8192 bytes long, and nest pa
 The pipeline checks every pattern when it starts:
 
 - It looks for shapes that are known to be slow, such as `(a+)+` (a repeat inside a repeat), `(a|aa)*` (overlapping choices under a repeat) and `\w*\d+` (two overlapping repeats in a row). This runs for every pattern.
-- For PCRE2 patterns, it also runs the pattern on generated hostile inputs of up to 64 KiB, within the node's `match` limit and a work budget of its own. This is called the canary.
+- For PCRE2 patterns, it also runs the pattern on generated hostile inputs of up to 64 KiB (or `input_bytes`, if smaller), within the node's `match` limit and a work budget of its own. This is called the canary.
 
 `on_redos_risk` decides what a finding does:
 
@@ -124,7 +124,7 @@ A pattern neither engine can read:
 {{#include ../examples/regex/rejected-syntax/expected.yaml}}
 ```
 
-The message names the setting, the pattern and the engine that reported the problem. The offset is inside the pattern.
+A pattern that neither engine can read is always reported by PCRE2, so the message says `backtracking engine`. The offset is inside the pattern.
 
 A key `limits` does not know:
 
@@ -142,9 +142,10 @@ Every pattern message, after the node id and the setting:
 
 | Message | Fix |
 |---|---|
-| `<engine> engine: <reason> at offset <n>` | Fix the pattern syntax. |
+| `backtracking engine: <reason> at offset <n>` | Fix the pattern syntax. |
 | `ReDoS risk: <shape> at offset <n>` | Rewrite the pattern, or use `on_redos_risk: warn`. |
 | `canary tripped: <reason>` | Rewrite the pattern, or use `on_redos_risk: warn`. |
 | `pattern is <n> bytes, longer than the 8192 byte limit (offset <n>)` | Shorten the pattern. |
 | `parentheses nest deeper than 250 at offset <n>` | Nest less. |
-| `linear engine: compiled program larger than <n> bytes` | Shorten the pattern, or split it across nodes. |
+| `PCRE2 allocation failed` or `PCRE2 internal error <code>: <reason>` | Shorten the pattern. |
+| `on_redos_risk` other than `reject` or `warn` | ``unknown variant `<value>`, expected `reject` or `warn` `` |
