@@ -1,0 +1,13 @@
+nodes:
+  - id: first_seen
+    type: lua
+    source: |
+      function process(record)
+        local new = state.set_nx("body:" .. record.body, "1", 60000)
+        if new then return record end
+        return nil
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

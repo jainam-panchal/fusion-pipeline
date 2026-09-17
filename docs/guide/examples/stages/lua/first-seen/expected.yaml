@@ -1,0 +1,5 @@
+acks: [ack, ack, ack]
+sinks:
+  out:
+    - payload: {kind: log, body: disk full}
+    - payload: {kind: log, body: cpu hot}

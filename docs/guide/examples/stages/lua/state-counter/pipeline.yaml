@@ -1,0 +1,13 @@
+nodes:
+  - id: count
+    type: lua
+    source: |
+      function process(record)
+        local seen = state.incr("body:" .. record.body, 1, 60000)
+        record.attributes["seen"] = seen
+        return record
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

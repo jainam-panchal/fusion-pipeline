@@ -1,0 +1,16 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: enrich
+    type: lua
+    source: |
+      function process(record)
+        record.attributes["host"] = os.getenv("HOSTNAME")
+        return record
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

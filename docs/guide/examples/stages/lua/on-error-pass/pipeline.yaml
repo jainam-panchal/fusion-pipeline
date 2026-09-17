@@ -1,0 +1,14 @@
+nodes:
+  - id: status_class
+    type: lua
+    on_error: pass
+    source: |
+      function process(record)
+        local status = record.attributes["http.status"]
+        record.attributes["class"] = (status // 100) .. "xx"
+        return record
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

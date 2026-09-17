@@ -1,0 +1,6 @@
+- subject: logs.acme.checkout
+  headers: {Fusion-Record-Id: "1"}
+  payload: {severity_text: DEBUG, body: cart loaded}
+- subject: logs.acme.checkout
+  headers: {Fusion-Record-Id: "2"}
+  payload: {severity_text: WARN, body: payment retry}

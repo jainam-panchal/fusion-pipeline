@@ -1,0 +1,12 @@
+nodes:
+  - id: no_debug
+    type: lua
+    source: |
+      function process(record)
+        if record.severity_text == "DEBUG" then return nil end
+        return record
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

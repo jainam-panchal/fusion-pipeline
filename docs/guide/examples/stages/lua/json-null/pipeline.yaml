@@ -1,0 +1,14 @@
+nodes:
+  - id: tags
+    type: lua
+    source: |
+      function process(record)
+        record.attributes["tags"] = json.list({"a", json.null, "b"})
+        record.attributes["empty"] = json.list()
+        record.trace_id = json.null
+        return record
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

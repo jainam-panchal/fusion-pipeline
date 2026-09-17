@@ -1,0 +1,13 @@
+nodes:
+  - id: colour
+    type: lua
+    on_error: pass
+    source: |
+      function process(record)
+        record.colour = "red"
+        return record
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

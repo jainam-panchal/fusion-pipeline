@@ -1,0 +1,13 @@
+nodes:
+  - id: spin
+    type: lua
+    limits: {instructions: 1000}
+    on_error: pass
+    source: |
+      function process(record)
+        while true do end
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

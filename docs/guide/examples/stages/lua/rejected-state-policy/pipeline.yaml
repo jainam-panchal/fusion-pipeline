@@ -1,0 +1,14 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: enrich
+    type: lua
+    on_state_error: pass
+    source: |
+      function process(record) return record end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

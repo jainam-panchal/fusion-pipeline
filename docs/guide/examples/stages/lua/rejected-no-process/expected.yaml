@@ -1,0 +1,1 @@
+rejected: 'node `enrich`: enrich: the script must define a function `process(record, meta)`'
