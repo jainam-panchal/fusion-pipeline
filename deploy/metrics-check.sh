@@ -7,7 +7,8 @@
 #   2. traffic: 1,000 records with distinct bodies, one repeated body the dedupe node drops,
 #      one TRACE record the filter drops, one syslog line the extract node parses and the
 #      redact node masks, one with a non-numeric http.status the lua node raises on, one
-#      with a malformed pipeline header, one record without an id and one sink failure;
+#      with a malformed pipeline header, one message without a Fusion-Record-Id header and one
+#      sink failure;
 #   3. every metric with a producer is in Prometheus with the labels the spec gives it;
 #   4. the `reason` values seen on records_dropped_total and dlq_total are within the spec's
 #      closed sets;
@@ -16,9 +17,9 @@
 #      each report their own CPU and resident memory;
 #   7. Grafana serves the provisioned internal and tenant dashboards, and every tenant
 #      dashboard query runs in Prometheus;
-#   8. Loki has the `nak` line of the record without an id, and the `stage_error` line of the
+#   8. Loki has the `nak` line of the message without a record id, and the `stage_error` line of the
 #      record whose sink failed, whose trace id finds its trace in Tempo.
-# The record without an id fails every delivery and is dead-lettered after the fifth, about
+# The message without a record id fails every delivery and is dead-lettered after the fifth, about
 # 15 s after it is published, which is what dlq_total and dlq_publish_duration_seconds
 # show; no dead-letter publish fails, so dlq_publish_errors_total is reported as pending.
 # Exits non-zero on the first failure. Needs docker compose, the `nats` CLI, curl and jq.
@@ -90,28 +91,34 @@ for job in pipeline nats dragonfly otel-collector prometheus; do
     echo "up: $job"
 done
 
-step "2. traffic: $RECORDS records, one repeat (deduped), one TRACE (filtered), one the lua node raises on, one with a malformed pipeline header, one without an id, one sink failure"
+step "2. traffic: $RECORDS records, one repeat (deduped), one TRACE (filtered), one the lua node raises on, one with a malformed pipeline header, one without a record id, one sink failure"
 nats stream purge LOGS -f >/dev/null
 nats stream purge DLQ -f >/dev/null
 # Distinct bodies, so the dedupe node lets every one of them through.
 nats pub logs.acme.syslog \
     "{\"id\": {{Count}}, \"severity_text\": \"ERROR\", \"body\": \"disk full {{Count}}\", \"observed_time_unix_nano\": {{UnixNano}}}" \
-    --count "$RECORDS" >/dev/null
-nats pub logs.acme.syslog '{"id": 999999, "severity_text": "ERROR", "body": "disk full 1"}' >/dev/null
-nats pub logs.acme.syslog '{"id": 1000000, "severity_text": "TRACE", "body": "noise"}' >/dev/null
-nats pub logs.acme.syslog '{"id": 1000002, "body": "Jun 14 15:16:01 combo sshd(pam_unix)[19939]: authentication failure; rhost=218.188.2.4"}' >/dev/null
+    --count "$RECORDS" -H 'Fusion-Record-Id:{{Count}}' >/dev/null
+nats pub logs.acme.syslog '{"id": 999999, "severity_text": "ERROR", "body": "disk full 1"}' \
+    -H 'Fusion-Record-Id:999999' >/dev/null
+nats pub logs.acme.syslog '{"id": 1000000, "severity_text": "TRACE", "body": "noise"}' \
+    -H 'Fusion-Record-Id:1000000' >/dev/null
+nats pub logs.acme.syslog '{"id": 1000002, "body": "Jun 14 15:16:01 combo sshd(pam_unix)[19939]: authentication failure; rhost=218.188.2.4"}' \
+    -H 'Fusion-Record-Id:1000002' >/dev/null
 # `"abc" // 100` raises inside the lua node: a `runtime` error, forwarded by `on_error: pass`.
-nats pub logs.acme.syslog '{"id": 1000003, "body": "bad status", "attributes": {"http.status": "abc"}}' >/dev/null
+nats pub logs.acme.syslog '{"id": 1000003, "body": "bad status", "attributes": {"http.status": "abc"}}' \
+    -H 'Fusion-Record-Id:1000003' >/dev/null
 # A pipeline header that does not parse: ignored and counted on
 # source_invalid_headers_total, and the record is still walked.
 nats pub logs.acme.syslog '{"id": 1000004, "body": "bad header"}' \
-    -H 'Fusion-Ingestion-Time:soon' -H 'Fusion-Ingestion-Time-Kind:reported' >/dev/null
-# No id: nakked on every delivery, then dead-lettered to dlq.acme and terminated.
-nats pub logs.acme.syslog '{"body": "no id"}' >/dev/null
+    -H 'Fusion-Record-Id:1000004' -H 'Fusion-Ingestion-Time:soon' -H 'Fusion-Ingestion-Time-Kind:reported' >/dev/null
+# No Fusion-Record-Id: nakked on every delivery, then dead-lettered to dlq.acme and
+# terminated. The payload's own `id` is data and does not count.
+nats pub logs.acme.syslog '{"id": 1000005, "body": "no id header"}' >/dev/null
 # Sink failure: the PROCESSED stream is gone, so the write gets no PubAck, the source
 # message is nakked and JetStream redelivers it; nats-init recreates the stream.
 nats stream rm PROCESSED -f >/dev/null
-nats pub logs.acme.syslog '{"id": 1000001, "body": "sink is gone"}' >/dev/null
+nats pub logs.acme.syslog '{"id": 1000001, "body": "sink is gone"}' \
+    -H 'Fusion-Record-Id:1000001' >/dev/null
 wait_for 60 "the nakked record to redeliver" \
     bash -c '[[ "$(nats consumer info LOGS pipeline --json | jq -r .num_redelivered)" -gt 0 ]]'
 "${COMPOSE[@]}" run --rm nats-init >/dev/null 2>&1
