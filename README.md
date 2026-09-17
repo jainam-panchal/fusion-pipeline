@@ -6,6 +6,87 @@ Spec: `docs/specs/2026-09-08-observability-pipeline-poc.md`
 
 Feature catalogue the spec was derived from: `pipeline_atomic_features.csv`
 
+New here: follow [Quick start](#quick-start), then read [What the POC concluded](#what-the-poc-concluded)
+and [Out of scope and still open](#out-of-scope-and-still-open). The sections between them are
+the reference for each part.
+
+## Quick start
+
+**Prerequisites.** Rust 1.85 or newer with cargo, Docker with Compose v2, the
+[`nats` CLI](https://github.com/nats-io/natscli), curl, jq and make. A nightly toolchain only
+for the AddressSanitizer check of the regex crate.
+
+**1. Bring the stack up.** NATS with its streams and consumer, Dragonfly, the collector,
+Prometheus, Loki, Tempo, Grafana, and the pipeline, built from this checkout:
+
+```sh
+docker compose -f deploy/compose.yaml up -d --build
+```
+
+The compose pipeline runs `deploy/pipeline.yaml`, the demo config: drop `TRACE` records, drop a body
+repeated within 10s, parse syslog-shaped bodies into attributes, tag the service, mask IPv4
+addresses, run a small Lua script, write everything to `processed.logs`, and on a fan-out
+write only the records whose body the syslog pattern parsed to `processed.parsed`. Its header comment says
+what each node is there to show. A port another stack already holds moves with
+`GRAFANA_PORT`, `DRAGONFLY_PORT`, `LOKI_PORT` or `TEMPO_PORT`.
+
+**2. Send one record.**
+
+```sh
+nats sub 'processed.>' --count 2 & sleep 1     # let the subscription start
+nats pub logs.acme.syslog '{"body": "Jun 14 15:16:01 combo sshd[19939]: authentication failure; rhost=218.188.2.4"}' \
+  -H 'Fusion-Record-Id:1'
+nats consumer info LOGS pipeline        # Unprocessed Messages: 0, Redelivered Messages: 0
+```
+
+Two messages arrive, both with the headers `Fusion-Record-Id: 1`, `Fusion-Tenant: acme` (from
+the subject), `Fusion-Ingestion-Time` and `Fusion-Ingestion-Time-Kind: reported`:
+
+- on `processed.logs`, the record with `Month` … `Content` extracted, `attributes.service:
+  sshd`, `attributes.pipeline: compose`, and `rhost=[ip]` in the body and the content;
+- on `processed.parsed`, the same line parsed but not masked or tagged, with `Content`
+  renamed `message` (that branch leaves the DAG before the redact node).
+
+A body the syslog pattern does not parse, `'{"body": "disk full"}'`, reaches `processed.logs`
+with only `attributes.pipeline: compose` added, and is dropped on the parsed branch with
+reason `edit_unapplied`. For what the headers mean, dead letters and a sink failure, see
+[Running against NATS](#running-against-nats).
+
+**3. Look at it.**
+
+| URL | What |
+|---|---|
+| http://127.0.0.1:3000/d/fusion-internal | Grafana, internal dashboard: throughput, latency, backlog, failures, one row per node, the harness's *Coverage* row. No login. |
+| http://127.0.0.1:3000/d/fusion-tenant | Grafana, one tenant's view: records in and out, where the drops went, dead letters |
+| http://127.0.0.1:3000/explore | Grafana *Explore*: the pipeline's events in Loki, record traces in Tempo |
+| http://127.0.0.1:9090 | Prometheus |
+| http://127.0.0.1:8889/metrics | the collector's Prometheus endpoint, the pipeline's own metrics |
+| http://127.0.0.1:7777/metrics | `prometheus-nats-exporter`: JetStream consumer pending, redelivered, ack floor |
+| http://127.0.0.1:8222 | NATS monitoring |
+| http://127.0.0.1:3100, http://127.0.0.1:3200 | Loki and Tempo APIs |
+
+The Grafana, Loki and Tempo ports follow `GRAFANA_PORT`, `LOKI_PORT` and `TEMPO_PORT`.
+`deploy/metrics-check.sh` sends traffic and checks that every metric, an event and a record
+trace arrived. Details: [Metrics, logs and traces](#metrics-logs-and-traces).
+
+**4. Run the loghub check and the chaos run.**
+
+```sh
+make loghub     # 100k loghub records through deploy/pipeline-poc.yaml, judged by the verifier
+make chaos      # the same, with the pipeline killed at 20s (back at 25s) and Dragonfly paused at 40s for 5s
+```
+
+Both switch the stack to `deploy/pipeline-poc.yaml`, the full DAG with every node type, and
+exit 0 on a pass. The coverage panel on the internal dashboard climbs while they run. What a
+pass is, the last report and the extraction accuracy: [Loghub harness](#loghub-harness).
+
+**5. Put the compose pipeline's config back, or stop.**
+
+```sh
+docker compose -f deploy/compose.yaml up -d      # back to pipeline.yaml after make loghub/chaos
+docker compose -f deploy/compose.yaml down       # stop; add -v to drop the streams and data
+```
+
 ## Layout
 
 Cargo workspace under `crates/`:
@@ -36,14 +117,18 @@ pipeline never creates streams itself and fails fast at startup when the server,
 consumer is missing, when the consumer has no `max_deliver` or sets `backoff`, and when no
 stream captures every `dlq.<tenant>` subject.
 
+To run the pipeline from the checkout rather than in compose, stop the compose one first;
+otherwise both pull from `LOGS/pipeline`, and a message may go to either process:
+
 ```sh
 docker compose -f deploy/compose.yaml up -d
+docker compose -f deploy/compose.yaml stop pipeline
 cargo run -p fusion-pipeline -- --config deploy/pipeline.yaml
 
 # in another shell
 nats sub processed.logs --count 1 &
 nats pub logs.acme.syslog '{"body": "disk full"}' -H 'Fusion-Record-Id:1'
-nats consumer info LOGS pipeline        # 0 pending, 0 redelivered
+nats consumer info LOGS pipeline        # Unprocessed Messages: 0, Redelivered Messages: 0
 ```
 
 A producer names each message's record id in the `Fusion-Record-Id` header (a decimal
@@ -84,7 +169,8 @@ under the stream sequence the pipeline logs.
 nats pub logs.acme.syslog '{"body": "no id header"}'   # fails every delivery
 nats sub 'dlq.>' --count 1                             # about 15 s later, with Fusion-Dlq-Reason
 ```
- The compose pipeline has a `dedupe` node, so it also needs the compose Dragonfly:
+
+The compose pipeline has a `dedupe` node, so it also needs the compose Dragonfly:
 `DRAGONFLY_URL` names it (default `redis://127.0.0.1:6379`), and a config with no stateful
 node never touches it. `deploy/nats-smoke.sh` runs these checks end to end and exits
 non-zero on any failure.
@@ -528,8 +614,27 @@ run longer than 45s. The first 100k run of
 (`kernel:   HighMem zone: ...`); the Linux pattern now starts `Component` and `Content` at the
 first non-space, as the CSV does.
 
-It exits 0 on a pass (nothing missing, unexpected, dead-lettered or wrongly written by `edit`
-or `lua`, and at least 80% of the planned duplicates dropped), 1 on a fail, 2 when the run
+Extraction accuracy of that chaos run (2026-09-17), per set against the loghub structured CSV:
+
+| Set | Distinct lines | Groups checked | Mismatched | Accuracy |
+|---|---:|---:|---:|---:|
+| Apache | 1,461 | 15,771 | 0 | 100.000% |
+| Linux | 2,000 | 15,738 | 0 | 100.000% |
+| Mac | 1,991 | 15,745 | 0 | 100.000% |
+| OpenSSH | 2,000 | 15,738 | 0 | 100.000% |
+
+Each set's 2,000-line sample is replayed as its distinct lines (Apache and Mac repeat some
+word for word). A group is one line in one replay cycle, each line coming round about nine
+times (about twelve for Apache), and only its first copy on the main subject is compared,
+over the set's CSV columns under the rules in `testdata/loghub/README.md`; sampled-out groups
+are not checked. So the table measures four hand-written patterns against 1,461 to 2,000
+distinct lines each, not 63k independent samples, and the patterns
+were tuned on these same lines (the Linux fix above). `cargo test -p fusion-pipeline --test
+extract_loghub` checks every 20th line of each set without the stack.
+
+`deploy/loghub-check.sh` exits 0 on a pass (nothing missing, unexpected, dead-lettered or wrongly written by `edit`
+or `lua`, and at least 80% of the planned duplicates dropped), 1 on a fail or, under
+`--chaos`, when any message was nakked, 2 when the run
 could not be judged (the producer failed, the pipeline did not settle, or under `--chaos` the
 chaos did not land). Extraction accuracy is reported, never gated; the mismatching `LineId`s
 are listed. The stack keeps running the POC config afterwards;
@@ -561,3 +666,95 @@ nodes:
     type: sink.nats
     from: [by_format.apache, by_format.other]   # fan-in
 ```
+
+## What the POC concluded
+
+Each point answers one of the spec's decision-maker stories (58-61), or for delivery its
+reliability stories (28-31), and names its evidence and its limits.
+
+- **Rust over Go**, decided by Lua embedding: `mlua` embeds real Lua 5.4 with the memory cap
+  and instruction hook the `lua` stage needs, where Go offers Lua 5.1 in pure Go or a cgo
+  crossing per field access. [ADR 0001](docs/adr/0001-rust-over-go.md).
+- **PCRE2 JIT stays off** and every pattern tries the linear `regex` engine first, so PCRE2's
+  limits behave the same on every run; a pattern that needs PCRE2 passes a structural lint
+  and a canary at load. [ADR 0002](docs/adr/0002-regex-first-facade-pcre2-jit-off.md). One
+  class of slow PCRE2-only pattern is still bounded only by `input_bytes` (see below).
+- **The stage model, as built.** Eight stages (`filter`, `route`, `dedupe`, `extract`,
+  `redact`, `sample`, `edit`, `lua`), covering four of the five log features
+  `pipeline_atomic_features.csv` puts in `Priority Tier` 1 (not log-to-metric), five of its
+  ten Tier 2 ones (static tags, rename, scripted transform,
+  dedupe, route; not lookups, GeoIP, event aggregation, JSON extraction or rate limiting)
+  and a few Tier 3 ones (`edit`'s hash and delete), are each one synchronous function from a
+  record to an outcome, with state behind one handle and failure policy in the engine. `deploy/pipeline-poc.yaml` uses all of them in one DAG with fan-out and fan-in. That
+  is the evidence for judging whether the model generalises; the catalogue features left out
+  are listed below and none was tried.
+- **Delivery under failure, in one run.** The 2026-09-17 chaos run (100k published, the
+  pipeline killed and restarted, Dragonfly paused for 5s) ended with nothing missing,
+  unexpected or dead-lettered, 8 messages redelivered, 8 state errors on `dedupe_body` and no
+  naks. That is one run: the kill was not forced to land between the two sinks of a fan-out
+  (36 groups repeated on both Linux subjects against 4 without chaos suggest it did), and the nak path was not exercised under chaos, since `on_state_error: pass` forwards
+  records during the pause. The ack and nak rules themselves are covered by the engine tests.
+- **Regex extraction on these four formats.** Hand-written patterns matched the loghub ground
+  truth on every checked group of the Apache, Linux, Mac and OpenSSH samples (2,000 lines
+  each, 1,461 to 2,000 of them distinct; table under [Loghub harness](#loghub-harness)),
+  after one fix to the Linux pattern found on the same data. For these formats regex-based
+  parsing was good enough, so the POC gives no reason to bring dedicated parsers forward for
+  them; for any other format it gives no answer either way.
+
+What the POC does not conclude:
+
+- throughput or latency: performance is observed, not asserted. The engine's throughput on
+  the compose stages is printed by
+  `cargo test --release -p fusion-pipeline --test throughput -- --ignored --nocapture`;
+- that the outstanding-branch ack counter survives a crash between the two sinks of a
+  fan-out: the chaos run does not force the kill to land there (story 31 is met only as
+  far as the hint above);
+- anything about formats other than the four loghub sets, or about dedicated parsers;
+- multi-node NATS, an HA state store, TLS or auth;
+- whether a real agent can feed it: OTel Collector, Vector and Fluent Bit cannot set
+  `Fusion-Record-Id`, so they need a relay in front, and until then their messages are
+  dead-lettered as `missing_id` (ADR 0007).
+
+## Out of scope and still open
+
+Out of scope, from the spec (its *Out of scope* section has the full list):
+
+- metrics and traces: only `kind: log` is processed;
+- dedicated parsers (syslog, JSON, key=value, XML, Grok, timestamp), raw EVTX, dissect,
+  timestamp detection, GeoIP, lookups, log-to-metric, aggregation and windows, rate limiting,
+  OCSF, and the rest of the catalogue not built;
+- a VRL- or OTTL-style language; the condition grammar is deliberately small;
+- in `edit`: templates, defaults, conditional ops, casts, case changes, a salted `hash`,
+  `on_unapplied: tag`;
+- OTLP protobuf sources and sinks, and more than one record per NATS message;
+- per-key ordering and partitioned consumers;
+- a config reload trigger (the in-memory swap path exists, nothing calls it after startup);
+- more than one pipeline per process, and per-tenant configs;
+- circuit-breaking a failing Lua stage (the error-rate metric is emitted);
+- throughput or latency targets;
+- production hardening: TLS, auth, multi-node, HA state store.
+
+Known limits, decided and recorded:
+
+- An unanchored PCRE2-only pattern built from single-character repeats (`(?<=:)\w+\s+\w+`)
+  still costs one scan per start position, about 5s on a 64 KiB non-matching record, bounded
+  only by `input_bytes` (spec amendment of 2026-09-09).
+- `sample` in `every_nth` mode counts deliveries, not records, so a redelivered record
+  usually loses its place (issue #7).
+- A `lua` script's upvalues are per worker VM, and a `memory` error rebuilds the VM with
+  them, so a script that counts gives a redelivered record a different answer (spec
+  amendment of 2026-09-16, issue #8).
+- `edit`'s `hash` is an unsalted digest, a join key rather than anonymisation.
+
+Open issues as of 2026-09-17 (`gh issue list` for the current list):
+
+- #9 core: versioned compiled pipeline behind atomic swap
+- #30 nats: state-error naks carry a delay long enough to outlive a store outage
+- #31 otel: `op` label on the state store metrics
+- #36 nats: retry a failed publish inside the sink before naking
+- #40 lua: evict a swapped pipeline's VMs from the worker thread-local cache
+- #41 lua: script path resolved against the config file, not the process cwd
+- #42 engine, lua: rate-limit the stderr line per failed record and per `log.*` call
+- #44 lua: last-error sample and script digest beside `lua_errors_total`
+- #54 stages: a dedupe key outlives its window only by wall clock, so a processing delay
+  over the window lets duplicates through
