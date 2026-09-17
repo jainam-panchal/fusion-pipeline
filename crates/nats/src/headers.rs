@@ -20,7 +20,9 @@
 //! the subject and any producer can set a header; the header's time wins over the JetStream
 //! publish time, so the first pipeline's time survives every hop. A header that does not
 //! parse is ignored, reported and counted once, never a reason to nak: the record is still
-//! valid.
+//! valid. `Fusion-Record-Kind` is the exception to "ignored": one that does not parse, or is
+//! given twice, is reported and counted, and the message is not walked, since only an absent
+//! kind or `log` says it is a log.
 //!
 //! A dead letter carries the message as it arrived, with [`for_dead_letter`]: the
 //! producer's headers, the record id, kind and ingestion time the arrival gave and the tenant
@@ -31,7 +33,7 @@
 
 use async_nats::{HeaderMap, HeaderValue};
 use fusion_core::io::Failure;
-use fusion_core::meta::{Arrival, IngestionTime, Meta, TimeKind, is_valid_tenant};
+use fusion_core::meta::{Arrival, ArrivalKind, IngestionTime, Meta, TimeKind, is_valid_tenant};
 use fusion_core::record::{Kind, RecordId};
 
 use crate::subject::tenant_from_subject;
@@ -143,7 +145,7 @@ pub fn for_dead_letter(letter: &DeadLetter<'_>) -> HeaderMap {
         &Meta::tenant_of(arrival),
         arrival.ingestion_time,
     );
-    if let Some(kind) = arrival.kind {
+    if let ArrivalKind::Named(kind) = arrival.kind {
         insert(&mut headers, RECORD_KIND, kind.as_str());
     }
     let failure = letter.failure;
@@ -222,7 +224,7 @@ pub struct Received<'m> {
 /// parse:
 ///
 /// - record id: `Fusion-Record-Id`;
-/// - kind: `Fusion-Record-Kind`;
+/// - kind: `Fusion-Record-Kind`, [`ArrivalKind::Unreadable`] when it is present but ignored;
 /// - tenant: the subject's tenant token, else `Fusion-Tenant`, each only when it passes
 ///   [`is_valid_tenant`]; the header is not read when the subject names a valid tenant;
 /// - ingestion time: `Fusion-Ingestion-Time` with its kind, else the publish time as
@@ -248,9 +250,18 @@ pub fn arrival(tenant_prefix: &str, received: Received<'_>) -> (Arrival, Vec<Inv
             .map(RecordId)
             .ok_or_else(|| InvalidHeader::RecordId(text.to_owned()))
     });
-    let kind = parse_or_report(header(headers, RECORD_KIND), &mut invalid, |text| {
+    // Unlike the other headers, a kind that is present but unusable is not taken as absent:
+    // absent means log, and a producer that named a kind did not say log.
+    let kind = match parse_header(header(headers, RECORD_KIND), |text| {
         Kind::parse(text).ok_or_else(|| InvalidHeader::RecordKind(text.to_owned()))
-    });
+    }) {
+        Ok(None) => ArrivalKind::Unnamed,
+        Ok(Some(kind)) => ArrivalKind::Named(kind),
+        Err(problem) => {
+            invalid.push(problem);
+            ArrivalKind::Unreadable
+        }
+    };
     let tenant = tenant_from_subject(subject, tenant_prefix)
         .filter(|tenant| is_valid_tenant(tenant))
         .or_else(|| header_tenant(headers, &mut invalid))

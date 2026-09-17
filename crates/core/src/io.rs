@@ -73,7 +73,9 @@ impl Failure {
 /// A record together with what the source knows about its message and the handle that
 /// settles it.
 pub struct Envelope {
-    /// The record as decoded by the source.
+    /// The record as decoded by the source. For an arrival that is not
+    /// [`Arrival::is_log`], which the engine rejects unread, a source may skip decoding and
+    /// hand an empty record.
     pub record: Record,
     /// What the source knows about how the message arrived.
     pub arrival: Arrival,

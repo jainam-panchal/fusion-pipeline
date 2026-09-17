@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 use async_nats::HeaderMap;
 use fusion_core::io::{Failure, FailureKind};
-use fusion_core::meta::{Arrival, IngestionTime, Meta};
+use fusion_core::meta::{Arrival, ArrivalKind, IngestionTime, Meta};
 use fusion_core::record::{Kind, RecordId};
 use fusion_nats::headers::{
     self, DLQ_REASON, DLQ_SUBJECT, DeadLetter, INGESTION_TIME, INGESTION_TIME_KIND, InvalidHeader,
@@ -87,7 +87,7 @@ fn what_the_sink_writes_a_downstream_source_reads_back() {
             arrival,
             Arrival {
                 record_id: Some(RecordId(7)),
-                kind: None,
+                kind: ArrivalKind::Unnamed,
                 tenant: Some("acme".to_owned()),
                 ingestion_time: Some(time),
                 delivery_count: 1,
@@ -105,7 +105,7 @@ fn a_message_with_no_headers_takes_the_subjects_tenant_and_the_publish_time() {
         arrival,
         Arrival {
             record_id: None,
-            kind: None,
+            kind: ArrivalKind::Unnamed,
             tenant: Some("acme".to_owned()),
             ingestion_time: Some(IngestionTime::Reported(9_000_000_000)),
             delivery_count: 2,
@@ -126,7 +126,7 @@ fn the_record_id_and_the_kind_are_the_headers() {
         let (arrival, invalid) = arrival_of("logs.acme.syslog", Some(&headers), None, 1);
         assert!(invalid.is_empty(), "{name}");
         assert_eq!(arrival.record_id, Some(RecordId(u64::MAX)), "{name}");
-        assert_eq!(arrival.kind, Some(kind), "{name}");
+        assert_eq!(arrival.kind, ArrivalKind::Named(kind), "{name}");
     }
 }
 
@@ -156,7 +156,7 @@ fn the_header_time_wins_over_the_publish_time() {
 
 #[test]
 fn a_header_that_does_not_parse_is_left_out_and_reported() {
-    let cases: [(&[(&str, &str)], InvalidHeader); 14] = [
+    let cases: [(&[(&str, &str)], InvalidHeader); 12] = [
         (&[(RECORD_ID, "")], InvalidHeader::RecordId(String::new())),
         (
             &[(RECORD_ID, "+5")],
@@ -173,14 +173,6 @@ fn a_header_that_does_not_parse_is_left_out_and_reported() {
         (
             &[(RECORD_ID, "18446744073709551616")],
             InvalidHeader::RecordId("18446744073709551616".to_owned()),
-        ),
-        (
-            &[(RECORD_KIND, "Log")],
-            InvalidHeader::RecordKind("Log".to_owned()),
-        ),
-        (
-            &[(RECORD_KIND, "trace")],
-            InvalidHeader::RecordKind("trace".to_owned()),
         ),
         (&[(TENANT, "")], InvalidHeader::Tenant),
         (&[(TENANT, "a\tb")], InvalidHeader::Tenant),
@@ -210,13 +202,28 @@ fn a_header_that_does_not_parse_is_left_out_and_reported() {
         let (arrival, invalid) = arrival_of("processed", Some(&headers), Some(9), 1);
         assert_eq!(invalid, vec![problem.clone()], "{pairs:?}");
         assert_eq!(arrival.record_id, None, "{pairs:?}");
-        assert_eq!(arrival.kind, None, "{pairs:?}");
+        assert_eq!(arrival.kind, ArrivalKind::Unnamed, "{pairs:?}");
         assert_eq!(arrival.tenant, None, "{pairs:?}");
         assert_eq!(
             arrival.ingestion_time,
             Some(IngestionTime::Reported(9)),
             "{pairs:?}: the publish time stands"
         );
+    }
+}
+
+#[test]
+fn a_kind_header_that_does_not_parse_is_reported_and_leaves_the_kind_unreadable_not_log() {
+    for text in ["", "Log", "LOG", " log", "trace"] {
+        let headers = map(&[(RECORD_ID, "7"), (RECORD_KIND, text)]);
+        let (arrival, invalid) = arrival_of("logs.acme.syslog", Some(&headers), None, 1);
+        assert_eq!(
+            invalid,
+            vec![InvalidHeader::RecordKind(text.to_owned())],
+            "{text:?}"
+        );
+        assert_eq!(arrival.kind, ArrivalKind::Unreadable, "{text:?}");
+        assert!(!arrival.is_log(), "{text:?}");
     }
 }
 
@@ -250,7 +257,11 @@ fn a_header_given_twice_is_refused() {
         ]
     );
     assert_eq!(arrival.record_id, None);
-    assert_eq!(arrival.kind, None);
+    assert_eq!(
+        arrival.kind,
+        ArrivalKind::Unreadable,
+        "not taken as absent, so not a log"
+    );
     assert_eq!(arrival.tenant, None);
 }
 
@@ -346,7 +357,7 @@ mod dead_letter {
     /// The arrival of the message every letter here gives up on.
     static ARRIVAL: LazyLock<Arrival> = LazyLock::new(|| Arrival {
         record_id: Some(RecordId(7)),
-        kind: Some(Kind::Log),
+        kind: ArrivalKind::Named(Kind::Log),
         tenant: Some("acme".to_owned()),
         ingestion_time: Some(IngestionTime::Reported(9)),
         delivery_count: 5,

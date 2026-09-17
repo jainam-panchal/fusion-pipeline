@@ -163,13 +163,13 @@ fn worker_count_comes_from_config_or_defaults_to_cores() {
 fn metric_and_span_messages_are_rejected_and_acked_without_reaching_a_sink() {
     for_each_worker_count(|workers| {
         let h = start(KEEP_ERRORS, workers);
-        let error = |id| {
+        let error_record = |id| {
             Record::from_json(&format!(r#"{{"id": {id}, "severity_text": "ERROR"}}"#))
                 .expect("record parses")
         };
 
-        let metric_probe = h.push_kind(error(9), Kind::Metric);
-        let span_probe = h.push_kind(error(10), Kind::Span);
+        let metric_probe = h.push_kind(error_record(9), Kind::Metric);
+        let span_probe = h.push_kind(error_record(10), Kind::Span);
 
         assert_eq!(
             metric_probe.wait(WAIT),

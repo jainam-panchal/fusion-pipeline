@@ -311,19 +311,19 @@ nodes:
         1,
     );
     h.sinks.fail_writes_to("bad");
-    let sized = |record: Record, kind: Kind, bytes: u64| {
+    let push_kind_sized = |record: Record, kind: Kind, bytes: u64| {
         h.push_as_producer(
             record,
             fusion_core::meta::Arrival {
-                kind: Some(kind),
+                kind: fusion_core::meta::ArrivalKind::Named(kind),
                 bytes: Some(bytes),
                 ..common::arrival_as(TENANT)
             },
         )
     };
 
-    let walked = sized(body_record(1, "x"), Kind::Log, 100);
-    let metric = sized(body_record(2, "x"), Kind::Metric, 30);
+    let walked = push_kind_sized(body_record(1, "x"), Kind::Log, 100);
+    let metric = push_kind_sized(body_record(2, "x"), Kind::Metric, 30);
     let no_size = h.push(body_record(3, "x"));
     for probe in [walked, metric, no_size] {
         assert!(probe.wait(WAIT).is_some());

@@ -185,6 +185,16 @@ impl JetStreamClient {
         self.publish_with_headers(subject, headers, payload);
     }
 
+    /// Publish `payload` on `subject` with the headers `pairs`, none for a message as a
+    /// producer that sets no header sends it.
+    fn publish_headed(&self, subject: &str, pairs: &[(&str, &str)], payload: &str) {
+        let mut headers = async_nats::HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(*name, *value);
+        }
+        self.publish_with_headers(subject, headers, payload);
+    }
+
     /// Publish `payload` on `subject` with `headers`.
     fn publish_with_headers(&self, subject: &str, headers: async_nats::HeaderMap, payload: &str) {
         self.rt
@@ -811,11 +821,9 @@ fn undecodable_payload_is_nakd_and_the_source_keeps_going() {
     let engine = Engine::start(pipeline, Box::new(source), 1, Metrics::noop(), no_state())
         .expect("engine starts");
 
-    fixture.client.publish_with_headers(
-        &fixture.in_subject("acme"),
-        async_nats::HeaderMap::new(),
-        "this is not json",
-    );
+    fixture
+        .client
+        .publish_headed(&fixture.in_subject("acme"), &[], "this is not json");
     fixture.client.publish(
         &fixture.in_subject("acme"),
         44,
@@ -837,13 +845,15 @@ fn undecodable_payload_is_nakd_and_the_source_keeps_going() {
     engine.join().expect("clean shutdown");
 }
 
-/// A message whose `Fusion-Record-Kind` is not `log` is acked without being walked, id or
-/// not, and the log behind it reaches the sink.
+/// A message whose `Fusion-Record-Kind` is not `log`, or cannot be read, is acked without
+/// being walked or its payload decoded, id or not, and the log behind it reaches the sink.
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
-fn a_message_the_transport_says_is_not_a_log_is_acked_and_never_walked() {
+fn a_message_the_transport_does_not_say_is_a_log_is_acked_and_never_walked() {
     let fixture = Fixture::new("kind");
-    let nats = Nats::new(Metrics::noop()).expect("nats runtime");
+    let recorder = InMemoryRecorder::new();
+    let metrics = Metrics::new(recorder.clone());
+    let nats = Nats::new(metrics.clone()).expect("nats runtime");
     let sinks = MemorySinks::new();
     let mut registry = Registry::new();
     registry.register_sink("sink.memory", sinks.clone());
@@ -851,26 +861,30 @@ fn a_message_the_transport_says_is_not_a_log_is_acked_and_never_walked() {
     let source = nats
         .source(&fixture.source_params())
         .expect("source builds");
-    let engine = Engine::start(pipeline, Box::new(source), 1, Metrics::noop(), no_state())
-        .expect("engine starts");
+    let engine =
+        Engine::start(pipeline, Box::new(source), 1, metrics, no_state()).expect("engine starts");
 
-    let mut metric = async_nats::HeaderMap::new();
-    metric.insert(RECORD_ID, "45");
-    metric.insert(RECORD_KIND, "metric");
-    fixture.client.publish_with_headers(
-        &fixture.in_subject("acme"),
-        metric,
-        r#"{"id": 45, "kind": "log", "body": "a metric, whatever the payload says"}"#,
-    );
-    let mut span = async_nats::HeaderMap::new();
-    span.insert(RECORD_KIND, "span");
-    fixture.client.publish_with_headers(
-        &fixture.in_subject("acme"),
-        span,
-        r#"{"body": "a span with no id"}"#,
-    );
+    let subject = fixture.in_subject("acme");
+    let not_logs: [(&[(&str, &str)], &str); 4] = [
+        (
+            &[(RECORD_ID, "45"), (RECORD_KIND, "metric")],
+            r#"{"id": 45, "kind": "log", "body": "a metric, whatever the payload says"}"#,
+        ),
+        (&[(RECORD_KIND, "span")], r#"{"body": "a span with no id"}"#),
+        (
+            &[(RECORD_ID, "47"), (RECORD_KIND, "metric")],
+            "not a record",
+        ),
+        (
+            &[(RECORD_ID, "48"), (RECORD_KIND, "Log")],
+            r#"{"id": 48, "body": "a kind that does not parse"}"#,
+        ),
+    ];
+    for (pairs, payload) in not_logs {
+        fixture.client.publish_headed(&subject, pairs, payload);
+    }
     fixture.client.publish(
-        &fixture.in_subject("acme"),
+        &subject,
         46,
         r#"{"id": 46, "kind": "metric", "body": "a log, whatever the payload says"}"#,
     );
@@ -885,7 +899,18 @@ fn a_message_the_transport_says_is_not_a_log_is_acked_and_never_walked() {
     assert_eq!(
         fixture.consumer_info().num_redelivered,
         0,
-        "nothing is nak'd"
+        "nothing is nak'd, the undecodable metric included"
+    );
+    assert_eq!(
+        recorder.counter(
+            CounterMetric::RecordsDropped,
+            &[
+                ("tenant", "acme"),
+                ("stage", "source"),
+                ("reason", "invalid_record")
+            ]
+        ),
+        4
     );
 
     nats.shutdown();
@@ -1332,11 +1357,9 @@ fn an_undecodable_payload_is_dead_lettered_after_max_deliver() {
     let mut terminated = fixture.advisories("MSG_TERMINATED");
     let engine = fixture.start(&nats, TO_MEMORY, &sinks, metrics);
 
-    fixture.client.publish_with_headers(
-        &fixture.in_subject("acme"),
-        async_nats::HeaderMap::new(),
-        "this is not json",
-    );
+    fixture
+        .client
+        .publish_headed(&fixture.in_subject("acme"), &[], "this is not json");
 
     assert!(
         fixture

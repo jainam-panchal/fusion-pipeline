@@ -8,7 +8,7 @@ use common::{WAIT, registry, start_with, with_id};
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::io::FailureKind;
 use fusion_core::memory::{AckOutcome, MemorySinks};
-use fusion_core::meta::{Arrival, IngestionTime, unix_nanos_now};
+use fusion_core::meta::{Arrival, ArrivalKind, IngestionTime, unix_nanos_now};
 use fusion_core::metrics::{CounterMetric, HistogramMetric};
 use fusion_core::record::{Kind, Record, RecordId};
 use fusion_core::stage::{Context, Stage, StageOutput};
@@ -118,6 +118,19 @@ fn record(json: &Value) -> Record {
     Record::from_json(&json.to_string()).expect("record parses")
 }
 
+/// The records the engine dropped at intake for `reason`, for a tenant the transport did not
+/// name.
+fn source_drops(h: &common::Harness, reason: &str) -> u64 {
+    h.counter(
+        CounterMetric::RecordsDropped,
+        &[
+            ("tenant", "unknown"),
+            ("stage", "source"),
+            ("reason", reason),
+        ],
+    )
+}
+
 fn meta_of(record: &Record, key: &str) -> Value {
     record.attributes[&format!("meta.{key}")].clone()
 }
@@ -192,24 +205,14 @@ fn a_message_the_transport_says_is_not_a_log_is_dropped_whatever_the_payload_say
         let probe = h.source.push_arrival(
             record(&json!({"id": 7, "kind": "log"})),
             Arrival {
-                kind: Some(kind),
+                kind: ArrivalKind::Named(kind),
                 ..with_id(7)
             },
         );
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "{kind}");
     }
     assert!(h.sinks.records("out").is_empty());
-    assert_eq!(
-        h.counter(
-            CounterMetric::RecordsDropped,
-            &[
-                ("tenant", "unknown"),
-                ("stage", "source"),
-                ("reason", "invalid_record")
-            ]
-        ),
-        2
-    );
+    assert_eq!(source_drops(&h, "invalid_record"), 2);
     h.finish();
 }
 
@@ -235,23 +238,37 @@ fn a_message_that_is_not_a_log_is_dropped_even_without_a_record_id() {
     let probe = h.source.push_arrival(
         record(&json!({"body": "x"})),
         Arrival {
-            kind: Some(Kind::Span),
+            kind: ArrivalKind::Named(Kind::Span),
             ..Arrival::default()
         },
     );
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
-    let dropped = |reason| {
-        h.counter(
-            CounterMetric::RecordsDropped,
-            &[
-                ("tenant", "unknown"),
-                ("stage", "source"),
-                ("reason", reason),
-            ],
-        )
-    };
-    assert_eq!(dropped("invalid_record"), 1);
-    assert_eq!(dropped("missing_id"), 0);
+    assert_eq!(source_drops(&h, "invalid_record"), 1);
+    assert_eq!(source_drops(&h, "missing_id"), 0);
+    h.finish();
+}
+
+#[test]
+fn a_message_whose_kind_the_source_cannot_read_is_dropped_not_walked_as_a_log() {
+    let sinks = MemorySinks::new();
+    let h = start_with(PASS_THROUGH, 1, sinks.clone(), registry(&sinks));
+    for arrival in [
+        Arrival {
+            kind: ArrivalKind::Unreadable,
+            ..with_id(7)
+        },
+        Arrival {
+            kind: ArrivalKind::Unreadable,
+            ..Arrival::default()
+        },
+    ] {
+        let probe = h
+            .source
+            .push_arrival(record(&json!({"id": 7, "kind": "log"})), arrival.clone());
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "{arrival:?}");
+    }
+    assert!(h.sinks.records("out").is_empty());
+    assert_eq!(source_drops(&h, "invalid_record"), 2);
     h.finish();
 }
 

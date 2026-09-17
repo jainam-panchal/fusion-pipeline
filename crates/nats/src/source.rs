@@ -157,7 +157,7 @@ impl DeadLetters {
                 .map(|id| TraceKey::new(id, &delivery.tenant).delivery_context(position.delivered)),
             ..Event::of_failure(
                 kind,
-                delivery.tenant.as_str().into(),
+                Arc::clone(&delivery.tenant),
                 failure,
                 position.delivered,
             )
@@ -303,7 +303,7 @@ struct Delivery {
     arrival: Arrival,
     /// The tenant the record's `Meta` gets: [`Meta::tenant_of`] the arrival, kept so every
     /// series the source counts for the message reads it without rebuilding it.
-    tenant: String,
+    tenant: Arc<str>,
     /// The subject a settlement is published to.
     reply: Option<Subject>,
     /// `None` when the message info could not be read; the delivery is then never final.
@@ -401,11 +401,18 @@ impl NatsSource {
             // tenant there is.
             let tenant = Meta::tenant_of(&arrival);
             self.report_invalid_headers(&message.subject, &invalid_headers, &tenant);
-            let decoded = serde_json::from_slice::<Record>(&message.payload);
+            // A message that is not a log is rejected on its arrival alone, so its payload is
+            // not decoded: the engine drops and acks it whatever the payload holds, and
+            // never reads the empty record it is handed.
+            let decoded = if arrival.is_log() {
+                serde_json::from_slice::<Record>(&message.payload)
+            } else {
+                Ok(Record::default())
+            };
             let delivery = Delivery {
                 message,
                 arrival: arrival.clone(),
-                tenant: tenant.to_string(),
+                tenant: Arc::clone(&tenant),
                 reply,
                 position,
             };

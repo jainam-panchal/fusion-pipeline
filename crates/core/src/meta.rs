@@ -31,15 +31,14 @@ pub fn is_valid_tenant(tenant: &str) -> bool {
 
 /// What a source's transport says about a message, apart from the record it carries.
 /// Everything but the delivery count is optional: a message without a record id is not
-/// walked, a kind the transport does not give is `log`, a tenant it does not name is
+/// walked, a kind the transport does not name is `log`, a tenant it does not name is
 /// `unknown`, and a time it does not give is the worker clock's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arrival {
     /// The record id the transport gives (the NATS `Fusion-Record-Id` header).
     pub record_id: Option<RecordId>,
-    /// The signal kind the transport gives (the NATS `Fusion-Record-Kind` header); `None`
-    /// is `log`.
-    pub kind: Option<Kind>,
+    /// The signal kind the transport gives (the NATS `Fusion-Record-Kind` header).
+    pub kind: ArrivalKind,
     /// The tenant the transport names (the NATS subject's, else an upstream pipeline's
     /// `Fusion-Tenant` header).
     pub tenant: Option<String>,
@@ -54,11 +53,35 @@ pub struct Arrival {
     pub bytes: Option<u64>,
 }
 
+impl Arrival {
+    /// Whether the transport says the message is a log: it names no kind, or names `log`.
+    /// A kind it names but the source cannot read is not known to be a log (ADR 0007).
+    #[must_use]
+    pub const fn is_log(&self) -> bool {
+        matches!(
+            self.kind,
+            ArrivalKind::Unnamed | ArrivalKind::Named(Kind::Log)
+        )
+    }
+}
+
+/// The signal kind a transport gives a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrivalKind {
+    /// The transport names no kind: the message is a log.
+    Unnamed,
+    /// The transport names this kind.
+    Named(Kind),
+    /// The transport names a kind the source cannot read (the NATS `Fusion-Record-Kind`
+    /// does not parse, or is given twice). The message is not walked.
+    Unreadable,
+}
+
 impl Default for Arrival {
     fn default() -> Self {
         Self {
             record_id: None,
-            kind: None,
+            kind: ArrivalKind::Unnamed,
             tenant: None,
             ingestion_time: None,
             delivery_count: 1,
@@ -174,14 +197,15 @@ pub struct Rejected {
 pub enum Rejection {
     /// The message arrived without a record id. It is nakked.
     MissingId,
-    /// The message is not a log. It is dropped and acked.
+    /// The transport does not say the message is a log: it names another kind, or one the
+    /// source cannot read. It is dropped and acked.
     NotLog,
 }
 
 impl Meta {
     /// The pipeline's view of a message that arrived with `arrival`, or why its record is
-    /// not walked: a kind other than `log`, or no record id. Everything comes from the
-    /// arrival; the record is never read.
+    /// not walked: an arrival that is not [`Arrival::is_log`], or no record id. Everything
+    /// comes from the arrival; the record is never read.
     ///
     /// # Errors
     ///
@@ -193,7 +217,7 @@ impl Meta {
             tenant: Arc::clone(&tenant),
         };
         // The kind first: a message that is not a log is dropped whatever else it lacks.
-        if arrival.kind.unwrap_or(Kind::Log) != Kind::Log {
+        if !arrival.is_log() {
             return Err(reject(Rejection::NotLog));
         }
         let Some(record_id) = arrival.record_id else {

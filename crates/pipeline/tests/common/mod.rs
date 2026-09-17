@@ -13,7 +13,7 @@ use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::engine::Engine;
 use fusion_core::events::{Event, EventKind, InMemoryEventLog};
 use fusion_core::memory::{AckProbe, MemoryInput, MemorySinks, MemorySource, MemoryStateStore};
-use fusion_core::meta::{Arrival, IngestionTime};
+use fusion_core::meta::{Arrival, ArrivalKind, IngestionTime};
 use fusion_core::metrics::{CounterMetric, HistogramMetric, InMemoryRecorder, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::{Kind, Record, RecordId};
@@ -275,7 +275,7 @@ impl Harness {
         self.push_as_producer(
             record,
             Arrival {
-                kind: Some(kind),
+                kind: ArrivalKind::Named(kind),
                 ..arrival_as(TENANT)
             },
         )
