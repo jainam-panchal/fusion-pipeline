@@ -2,17 +2,13 @@
 //! registers has a page in the book, every file a page includes exists, and every example
 //! file is shown on some page.
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use common::{files_under, guide_dir};
 use fusion_pipeline::default_registry;
-
-fn guide_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/guide")
-        .canonicalize()
-        .expect("docs/guide exists")
-}
 
 /// `path` relative to the guide folder, for messages.
 fn shown(path: &Path) -> String {
@@ -23,24 +19,9 @@ fn shown(path: &Path) -> String {
         .to_string()
 }
 
-/// Every file under `dir` with extension `ext`, recursively.
+/// Every file under `dir` with extension `ext`.
 fn files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .unwrap_or_else(|err| panic!("{} is readable: {err}", dir.display()));
-        for entry in entries {
-            let path = entry.expect("directory entry").path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.extension().is_some_and(|e| e == ext) {
-                found.push(path);
-            }
-        }
-    }
-    found.sort();
-    found
+    files_under(dir, |file| file.extension().is_some_and(|e| e == ext))
 }
 
 /// The link targets of `SUMMARY.md`, as written: `[title](target)`.
@@ -93,7 +74,7 @@ fn every_registered_stage_type_has_a_page_in_the_summary() {
         .map(PathBuf::from)
         .collect();
     let missing: Vec<String> = default_registry()
-        .stage_kinds()
+        .stage_types()
         .filter(|kind| {
             !pages.iter().any(|page| {
                 page.file_stem().is_some_and(|stem| stem == *kind)

@@ -163,7 +163,7 @@ impl Registry {
     }
 
     /// The registered stage types, in name order.
-    pub fn stage_kinds(&self) -> impl Iterator<Item = &str> {
+    pub fn stage_types(&self) -> impl Iterator<Item = &str> {
         self.stages.keys().map(String::as_str)
     }
 }

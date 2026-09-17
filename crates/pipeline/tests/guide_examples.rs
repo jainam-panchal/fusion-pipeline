@@ -5,53 +5,54 @@
 //!
 //! - `pipeline.yaml`: the config. Its `source` block, when there is one, only gives the
 //!   tenant prefix; `sink.nats` nodes parse their real params and collect in memory.
-//! - `input.yaml`: the messages, as NATS delivers them: `subject`, `headers`, `payload`, and
-//!   optionally `published` (JetStream publish time, [`PUBLISHED`] when absent) and
-//!   `delivered` (1 when absent). Headers become the arrival through the NATS source's own
-//!   parsing.
+//! - `input.yaml`: the messages, each a first delivery as NATS hands it over: `subject`,
+//!   `headers` (a value, or a list for a header given more than once), `payload`, and
+//!   optionally `published` (JetStream publish time, [`PUBLISHED`] when absent). The arrival
+//!   comes from the NATS source's own header parsing, and a payload is decoded only when
+//!   the arrival is a log, as the source does. A payload that is not a record is nakked
+//!   without reaching the engine, as the source naks it.
 //! - `expected.yaml`: `acks`, one `ack` or `nak` per message in order, and `sinks`, what each
 //!   sink node wrote, in order. A written record's `headers`, when given, are compared with
-//!   what the NATS sink would write. A sink node the file leaves out must write nothing.
+//!   what the NATS sink writes. A sink node the file leaves out must write nothing.
 //!
 //! Messages are pushed through one worker, so each sink sees them in input order.
 
 mod common;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use common::{WAIT, start_with};
-use fusion_core::config::{Config, NodeConfig};
-use fusion_core::memory::{AckOutcome, MemorySinks};
+use common::{WAIT, files_under, guide_dir, nats_sink_registry, start_with};
+use fusion_core::config::Config;
+use fusion_core::memory::{AckOutcome, MemorySinks, OutgoingRecord};
+use fusion_core::meta::Arrival;
 use fusion_core::record::Record;
-use fusion_core::registry::{Registry, SinkFactory};
+use fusion_nats::SourceParams;
+use fusion_nats::config::DEFAULT_TENANT_PREFIX;
 use fusion_nats::headers::{Received, arrival, for_meta};
-use fusion_nats::{SinkParams, SourceParams};
-use fusion_pipeline::default_registry;
 use serde::Deserialize;
 use serde_json::Value;
 
 /// The JetStream publish time a message gets when its example names none.
 const PUBLISHED: u64 = 1_758_000_000_000_000_000;
 
-/// The tenant prefix when the example's config has no `source` block.
-const TENANT_PREFIX: &str = "logs";
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Message {
     subject: String,
     #[serde(default)]
-    headers: BTreeMap<String, String>,
+    headers: BTreeMap<String, HeaderValues>,
     payload: Value,
     #[serde(default)]
     published: Option<u64>,
-    #[serde(default = "first_delivery")]
-    delivered: u64,
 }
 
-const fn first_delivery() -> u64 {
-    1
+/// A header's value, or its values when the message carries it more than once.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum HeaderValues {
+    One(String),
+    Many(Vec<String>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,61 +78,39 @@ struct Written {
     payload: Value,
 }
 
-fn examples_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/guide/examples")
+/// An example folder, read and checked against itself.
+struct Example {
+    yaml: String,
+    tenant_prefix: String,
+    sink_ids: Vec<String>,
+    input: Vec<Message>,
+    expected: Expected,
 }
 
-/// Every folder under `root` that holds a `pipeline.yaml`, sorted.
-fn example_folders(root: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .unwrap_or_else(|err| panic!("{} is readable: {err}", dir.display()));
-        for entry in entries {
-            let path = entry.expect("directory entry").path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.file_name().is_some_and(|name| name == "pipeline.yaml") {
-                found.push(dir.clone());
-            }
-        }
-    }
-    found.sort();
-    found
+/// What the pipeline did with an example's messages.
+struct Outcome {
+    settled: Vec<Option<Settled>>,
+    written: BTreeMap<String, Vec<OutgoingRecord>>,
 }
 
-fn read(dir: &Path, file: &str) -> String {
-    std::fs::read_to_string(dir.join(file))
-        .unwrap_or_else(|err| panic!("{}/{file} is readable: {err}", dir.display()))
+fn examples_dir() -> std::path::PathBuf {
+    guide_dir().join("examples")
 }
 
-/// The default registry with `sink.nats` parsing its real params and collecting in memory.
-fn registry(sinks: &MemorySinks) -> Registry {
-    let mut registry = default_registry();
-    let collector = sinks.clone();
-    registry.register_sink("sink.nats", move |node: &NodeConfig| {
-        let _: SinkParams = NodeConfig::parse_params(node)?;
-        collector.build(node)
-    });
-    registry
-}
-
-/// The headers `for_meta` writes, one value each.
-fn written_headers(headers: &async_nats::HeaderMap) -> BTreeMap<String, String> {
-    headers
-        .iter()
-        .map(|(name, values)| {
-            let values: Vec<&str> = values.iter().map(|value| value.as_str()).collect();
-            assert_eq!(values.len(), 1, "header {name} written once");
-            (name.to_string(), values[0].to_owned())
-        })
+/// Every folder under the examples folder that holds a `pipeline.yaml`.
+fn example_folders() -> Vec<std::path::PathBuf> {
+    files_under(&examples_dir(), |file| file.ends_with("pipeline.yaml"))
+        .into_iter()
+        .filter_map(|file| file.parent().map(Path::to_path_buf))
         .collect()
 }
 
-/// Run the example in `dir` and return what went wrong, if anything.
-fn run(dir: &Path) -> Result<(), String> {
-    let yaml = read(dir, "pipeline.yaml");
+fn read(dir: &Path, file: &str) -> Result<String, String> {
+    std::fs::read_to_string(dir.join(file)).map_err(|err| format!("{file}: {err}"))
+}
+
+fn load(dir: &Path) -> Result<Example, String> {
+    let yaml = read(dir, "pipeline.yaml")?;
     let config = Config::from_yaml(&yaml).map_err(|err| format!("config does not load: {err}"))?;
     let tenant_prefix = match &config.source {
         Some(source) => {
@@ -140,11 +119,11 @@ fn run(dir: &Path) -> Result<(), String> {
                 .map_err(|err| format!("source block: {err}"))?
                 .tenant_prefix
         }
-        None => TENANT_PREFIX.to_owned(),
+        None => DEFAULT_TENANT_PREFIX.to_owned(),
     };
-    let input: Vec<Message> = serde_yaml_ng::from_str(&read(dir, "input.yaml"))
+    let input: Vec<Message> = serde_yaml_ng::from_str(&read(dir, "input.yaml")?)
         .map_err(|err| format!("input.yaml: {err}"))?;
-    let expected: Expected = serde_yaml_ng::from_str(&read(dir, "expected.yaml"))
+    let expected: Expected = serde_yaml_ng::from_str(&read(dir, "expected.yaml")?)
         .map_err(|err| format!("expected.yaml: {err}"))?;
     if expected.acks.len() != input.len() {
         return Err(format!(
@@ -153,65 +132,112 @@ fn run(dir: &Path) -> Result<(), String> {
             input.len()
         ));
     }
-    let sink_ids: Vec<&str> = config
+    let sink_ids: Vec<String> = config
         .nodes
         .iter()
         .filter(|node| node.is_sink())
-        .map(|node| node.id.as_str())
+        .map(|node| node.id.clone())
         .collect();
-    if let Some(unknown) = expected
-        .sinks
-        .keys()
-        .find(|id| !sink_ids.contains(&id.as_str()))
-    {
+    if let Some(unknown) = expected.sinks.keys().find(|id| !sink_ids.contains(id)) {
         return Err(format!(
             "expected.yaml names `{unknown}`, which is not a sink node"
         ));
     }
+    Ok(Example {
+        yaml,
+        tenant_prefix,
+        sink_ids,
+        input,
+        expected,
+    })
+}
 
+/// The arrival NATS would give `message`, and its payload as bytes on the wire.
+fn arrival_of(message: &Message, tenant_prefix: &str) -> (Arrival, String) {
+    let payload = serde_json::to_string(&message.payload).expect("payload serializes");
+    let mut headers = async_nats::HeaderMap::new();
+    for (name, values) in &message.headers {
+        match values {
+            HeaderValues::One(value) => headers.append(name.as_str(), value.as_str()),
+            HeaderValues::Many(values) => {
+                for value in values {
+                    headers.append(name.as_str(), value.as_str());
+                }
+            }
+        }
+    }
+    let (arrival, _ignored) = arrival(
+        tenant_prefix,
+        Received {
+            subject: &message.subject,
+            headers: Some(&headers),
+            published: Some(message.published.unwrap_or(PUBLISHED)),
+            delivered: 1,
+            bytes: payload.len() as u64,
+        },
+    );
+    (arrival, payload)
+}
+
+fn drive(example: &Example) -> Outcome {
     let sinks = MemorySinks::new();
-    let h = start_with(&yaml, 1, sinks.clone(), registry(&sinks));
-    let probes: Vec<_> = input
+    let h = start_with(&example.yaml, 1, sinks.clone(), nats_sink_registry(&sinks));
+    let probes: Vec<_> = example
+        .input
         .iter()
         .map(|message| {
-            let payload = serde_json::to_string(&message.payload).expect("payload serializes");
-            let record = Record::from_json(&payload).unwrap_or_else(|err| {
-                panic!("{}: a payload is not a record: {err}", dir.display())
-            });
-            let mut headers = async_nats::HeaderMap::new();
-            for (name, value) in &message.headers {
-                headers.insert(name.as_str(), value.as_str());
-            }
-            let (arrival, _ignored) = arrival(
-                &tenant_prefix,
-                Received {
-                    subject: &message.subject,
-                    headers: Some(&headers),
-                    published: Some(message.published.unwrap_or(PUBLISHED)),
-                    delivered: message.delivered,
-                    bytes: payload.len() as u64,
-                },
-            );
-            h.source.push_arrival(record, arrival)
+            let (arrival, payload) = arrival_of(message, &example.tenant_prefix);
+            let decoded = if arrival.is_log() {
+                Record::from_json(&payload)
+            } else {
+                Ok(Record::default())
+            };
+            decoded
+                .ok()
+                .map(|record| h.source.push_arrival(record, arrival))
         })
         .collect();
-    let settled: Vec<Option<Settled>> = probes
+    let settled = probes
         .iter()
-        .map(|probe| {
-            probe.wait(WAIT).map(|outcome| match outcome {
+        .map(|probe| match probe {
+            // The source naks a payload that is not a record before the engine sees it.
+            None => Some(Settled::Nak),
+            Some(probe) => probe.wait(WAIT).map(|outcome| match outcome {
                 AckOutcome::Ack => Settled::Ack,
                 AckOutcome::Nak(_) => Settled::Nak,
-            })
+            }),
         })
         .collect();
-    let written: BTreeMap<&str, _> = sink_ids
+    let written = example
+        .sink_ids
         .iter()
-        .map(|id| (*id, sinks.outgoing(id)))
+        .map(|id| (id.clone(), sinks.outgoing(id)))
         .collect();
     h.finish();
+    Outcome { settled, written }
+}
 
+/// The headers the NATS sink writes beside `outgoing`.
+fn written_headers(outgoing: &OutgoingRecord) -> BTreeMap<String, String> {
+    for_meta(&outgoing.meta)
+        .iter()
+        .map(|(name, values)| {
+            let values: Vec<&str> = values.iter().map(|value| value.as_str()).collect();
+            (name.to_string(), values.join(", "))
+        })
+        .collect()
+}
+
+/// Every difference between what `example` expects and `outcome`.
+fn compare(example: &Example, outcome: &Outcome) -> Vec<String> {
     let mut problems = Vec::new();
-    for (index, (want, got)) in expected.acks.iter().zip(&settled).enumerate() {
+    for (index, (want, got)) in example
+        .expected
+        .acks
+        .iter()
+        .zip(&outcome.settled)
+        .enumerate()
+    {
         if Some(*want) != *got {
             problems.push(format!(
                 "message {}: expected {want:?}, got {got:?}",
@@ -219,8 +245,12 @@ fn run(dir: &Path) -> Result<(), String> {
             ));
         }
     }
-    for (id, outgoing) in &written {
-        let want = expected.sinks.get(*id).map_or(&[][..], Vec::as_slice);
+    for (id, outgoing) in &outcome.written {
+        let want = example
+            .expected
+            .sinks
+            .get(id)
+            .map_or(&[][..], Vec::as_slice);
         if want.len() != outgoing.len() {
             problems.push(format!(
                 "sink `{id}`: expected {} records, got {}",
@@ -240,7 +270,7 @@ fn run(dir: &Path) -> Result<(), String> {
                 ));
             }
             if let Some(want_headers) = &want.headers {
-                let got_headers = written_headers(&for_meta(&got.meta));
+                let got_headers = written_headers(got);
                 if *want_headers != got_headers {
                     problems.push(format!(
                         "sink `{id}` record {}: headers\n  expected {want_headers:?}\n  got      {got_headers:?}",
@@ -250,24 +280,24 @@ fn run(dir: &Path) -> Result<(), String> {
             }
         }
     }
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(problems.join("\n"))
-    }
+    problems
 }
 
 #[test]
 fn every_guide_example_produces_its_expected_output() {
     let root = examples_dir();
-    let folders = example_folders(&root);
+    let folders = example_folders();
     assert!(!folders.is_empty(), "no examples under {}", root.display());
     let failures: Vec<String> = folders
         .iter()
         .filter_map(|dir| {
-            run(dir).err().map(|problem| {
+            let problems = match load(dir) {
+                Ok(example) => compare(&example, &drive(&example)),
+                Err(problem) => vec![problem],
+            };
+            (!problems.is_empty()).then(|| {
                 let name = dir.strip_prefix(&root).unwrap_or(dir).display();
-                format!("{name}:\n{problem}")
+                format!("{name}:\n{}", problems.join("\n"))
             })
         })
         .collect();
@@ -276,8 +306,7 @@ fn every_guide_example_produces_its_expected_output() {
 
 #[test]
 fn every_example_folder_has_its_three_files_and_nothing_else() {
-    let root = examples_dir();
-    for dir in example_folders(&root) {
+    for dir in example_folders() {
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .expect("example folder is readable")
             .map(|entry| {

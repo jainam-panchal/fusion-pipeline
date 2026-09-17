@@ -1,8 +1,8 @@
 //! The engine harness the trait-boundary tests share: a YAML config compiled with the
 //! default registry plus an in-memory sink, an in-memory source to push envelopes through,
 //! an in-memory state store, and the sinks, metrics, events and record traces to assert on.
-//! It also owns where `deploy/` is, so a test that drives a shipped config does not spell
-//! the path itself.
+//! It also owns where `deploy/` and `docs/guide/` are, so a test that drives a shipped
+//! config or a guide example does not spell the path itself.
 
 #![allow(dead_code)]
 
@@ -17,12 +17,43 @@ use fusion_core::meta::{Arrival, ArrivalKind, IngestionTime};
 use fusion_core::metrics::{CounterMetric, HistogramMetric, InMemoryRecorder, Metrics};
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::{Kind, Record, RecordId};
-use fusion_core::registry::Registry;
+use fusion_core::registry::{Registry, SinkFactory};
 use fusion_core::signals::Signals;
 use fusion_core::stage::{Context, Stage, StageOutput};
 use fusion_core::state::StateStoreFactory;
 use fusion_core::trace::{InMemoryTraceSink, RecordTrace, TraceSampling};
 use fusion_pipeline::default_registry;
+
+/// The guide's folder, `docs/guide/`, resolved.
+pub fn guide_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/guide")
+        .canonicalize()
+        .expect("docs/guide exists")
+}
+
+/// Every file under `dir` for which `keep` holds, recursively, sorted.
+pub fn files_under(
+    dir: &std::path::Path,
+    keep: impl Fn(&std::path::Path) -> bool,
+) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|err| panic!("{} is readable: {err}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if keep(&path) {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
 
 /// A config shipped under `deploy/`.
 pub fn deploy_config(name: &str) -> String {
@@ -68,6 +99,18 @@ pub struct Harness {
 pub fn registry(sinks: &MemorySinks) -> Registry {
     let mut registry = default_registry();
     registry.register_sink("sink.memory", sinks.clone());
+    registry
+}
+
+/// The default registry with `sink.nats` parsing its real params and collecting into
+/// `sinks`, so a config written for NATS runs without a server.
+pub fn nats_sink_registry(sinks: &MemorySinks) -> Registry {
+    let mut registry = default_registry();
+    let collector = sinks.clone();
+    registry.register_sink("sink.nats", move |node: &NodeConfig| {
+        let _: fusion_nats::SinkParams = node.parse_params()?;
+        SinkFactory::build(&collector, node)
+    });
     registry
 }
 

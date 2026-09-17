@@ -32,9 +32,9 @@ Most examples leave out the `source` block to stay short. A real config needs on
 {{#include ../examples/intro/keep-errors/expected.yaml}}
 ```
 
-`acks` lists what happened to each message, in order. `ack` means the pipeline is done with it. `nak` means NATS will deliver it again. Record 2 was dropped by the filter, which still counts as done, so it is acked and never reaches `out`.
+`acks` lists what happened to each message, in order. `ack` means the pipeline is done with it. `nak` means it failed: NATS delivers it again, and after the last try the pipeline writes it to the dead-letter stream. Record 2 was dropped by the filter, which still counts as done, so it is acked and never reaches `out`.
 
-`sinks` lists what each sink wrote. The pipeline adds the `Fusion-*` headers to each record it writes. The payload is the record as the last stage left it. The sink always writes `kind`, and it is `log` unless a stage changed it.
+`sinks` lists what each sink wrote. The pipeline adds the `Fusion-*` headers to each record it writes. The payload is the record as the last stage left it. The sink always writes `kind`: the payload's own value, or `log` when the payload has none.
 
 ## Words
 

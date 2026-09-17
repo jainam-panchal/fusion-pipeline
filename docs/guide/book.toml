@@ -7,6 +7,5 @@ src = "src"
 create-missing = false
 
 [output.html]
-site-url = "/fusion-pipeline/"
 git-repository-url = "https://github.com/jainam-panchal/fusion-pipeline"
 edit-url-template = "https://github.com/jainam-panchal/fusion-pipeline/edit/main/docs/guide/{path}"

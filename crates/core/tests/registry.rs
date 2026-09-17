@@ -1,8 +1,10 @@
 //! Registry through its public surface: source factories keyed by the `source` block's type.
 
-use fusion_core::config::{Config, ConfigError};
+use fusion_core::config::{Config, ConfigError, NodeConfig};
 use fusion_core::io::{Intake, Source, SourceError};
+use fusion_core::memory::MemorySinks;
 use fusion_core::registry::Registry;
+use fusion_core::stage::Stage;
 
 struct NoopSource;
 
@@ -49,18 +51,16 @@ fn unregistered_source_type_is_an_unknown_type_error_naming_source() {
 }
 
 #[test]
-fn stage_kinds_lists_every_registered_stage_type_in_name_order() {
+fn stage_types_lists_every_registered_stage_type_in_name_order() {
     let mut registry = Registry::new();
-    let build = |_: &fusion_core::config::NodeConfig| -> Result<
-        Box<dyn fusion_core::stage::Stage>,
-        ConfigError,
-    > { unreachable!("never built") };
+    let build =
+        |_: &NodeConfig| -> Result<Box<dyn Stage>, ConfigError> { unreachable!("never built") };
     registry.register_stage("route", build);
     registry.register_stage("filter", build);
-    registry.register_sink("sink.memory", fusion_core::memory::MemorySinks::new());
+    registry.register_sink("sink.memory", MemorySinks::new());
 
     assert_eq!(
-        registry.stage_kinds().collect::<Vec<_>>(),
+        registry.stage_types().collect::<Vec<_>>(),
         ["filter", "route"]
     );
 }
