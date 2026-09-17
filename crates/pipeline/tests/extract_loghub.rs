@@ -46,6 +46,21 @@ const OPENSSH: Set = Set {
     columns: &["Date", "Day", "Time", "Component", "Pid", "Content"],
 };
 
+const MAC: Set = Set {
+    name: "Mac",
+    pattern: r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<User>\S+) (?<Component>[^\[]+?)(?:\[(?<PID>\d+)\])?(?: \((?<Address>[^)]*)\))?: +(?<Content>\S.*)?$",
+    columns: &[
+        "Month",
+        "Date",
+        "Time",
+        "User",
+        "Component",
+        "PID",
+        "Address",
+        "Content",
+    ],
+};
+
 /// Every 20th `LineId`, so 100 of the 2,000 lines, the same ones every run.
 const STRIDE: usize = 20;
 
@@ -200,4 +215,9 @@ fn apache_lines_extract_to_the_structured_csv_columns() {
 #[test]
 fn openssh_lines_extract_to_the_structured_csv_columns() {
     assert_set_extracts_its_ground_truth(&OPENSSH);
+}
+
+#[test]
+fn mac_lines_extract_to_the_structured_csv_columns() {
+    assert_set_extracts_its_ground_truth(&MAC);
 }
