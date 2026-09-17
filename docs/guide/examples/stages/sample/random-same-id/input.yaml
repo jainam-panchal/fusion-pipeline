@@ -1,0 +1,9 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: first}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: second}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: first again}

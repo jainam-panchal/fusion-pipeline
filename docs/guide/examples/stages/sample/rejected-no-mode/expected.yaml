@@ -1,0 +1,1 @@
+rejected: 'node `keep_some`: `mode` is required: `random`, `every_nth` or `consistent`'

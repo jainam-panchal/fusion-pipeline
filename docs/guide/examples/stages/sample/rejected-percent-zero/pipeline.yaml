@@ -1,0 +1,13 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: keep_some
+    type: sample
+    mode: random
+    percent: 0
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

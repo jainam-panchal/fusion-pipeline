@@ -1,0 +1,9 @@
+nodes:
+  - id: one_in_two
+    type: sample
+    mode: every_nth
+    n: 2
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

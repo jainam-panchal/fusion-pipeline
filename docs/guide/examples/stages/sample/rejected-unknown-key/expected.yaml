@@ -1,0 +1,1 @@
+rejected: 'node `keep_some`: unknown field `seed`, expected one of `mode`, `percent`, `n`, `key`, `on_state_error`'
