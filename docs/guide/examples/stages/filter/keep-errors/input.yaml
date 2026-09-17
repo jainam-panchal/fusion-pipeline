@@ -1,0 +1,9 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {severity_text: ERROR, body: disk full}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {severity_text: INFO, body: user logged in}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "3"}
+  payload: {body: no level}

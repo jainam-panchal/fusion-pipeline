@@ -1,0 +1,9 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {severity_text: DEBUG, body: cache miss}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {severity_text: WARN, body: slow disk}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "3"}
+  payload: {body: no level}

@@ -1,0 +1,13 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: no_repeats
+    type: dedupe
+    key: []
+    window: 10s
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

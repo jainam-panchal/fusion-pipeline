@@ -1,0 +1,6 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: disk full}
+- subject: logs.globex.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: disk full}

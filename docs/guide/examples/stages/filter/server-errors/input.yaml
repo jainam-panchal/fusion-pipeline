@@ -1,0 +1,9 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {attributes: {http.status: 503}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {attributes: {http.status: 200}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "3"}
+  payload: {severity_text: ERROR, attributes: {http.status: 200}}

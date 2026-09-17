@@ -1,0 +1,12 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  published: 1758000000000000000
+  payload: {body: disk full}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  published: 1758000005000000000
+  payload: {body: disk full}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "3"}
+  published: 1758000006000000000
+  payload: {body: cpu hot}

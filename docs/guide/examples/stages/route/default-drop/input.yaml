@@ -1,0 +1,6 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: a, resource: {log.format: Linux}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: c, resource: {log.format: Mac}}

@@ -1,0 +1,9 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: disk full, resource: {host: web-0}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: disk full, resource: {host: web-1}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "3"}
+  payload: {body: disk full, resource: {host: web-0}}

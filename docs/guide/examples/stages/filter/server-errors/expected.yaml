@@ -1,0 +1,5 @@
+acks: [ack, ack, ack]
+sinks:
+  out:
+    - payload: {kind: log, attributes: {http.status: 503}}
+    - payload: {kind: log, severity_text: ERROR, attributes: {http.status: 200}}

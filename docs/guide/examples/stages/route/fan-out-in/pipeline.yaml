@@ -1,0 +1,10 @@
+nodes:
+  - id: by_format
+    type: route
+    routes:
+      linux: resource.log.format == "Linux"
+      apache: resource.log.format == "Apache"
+    default: other
+  - {id: archive, type: sink.nats, from: by_format.linux, stream: PROCESSED, subject: processed.archive}
+  - {id: search, type: sink.nats, from: by_format.linux, stream: PROCESSED, subject: processed.search}
+  - {id: rest, type: sink.nats, from: [by_format.apache, by_format.other], stream: PROCESSED, subject: processed.rest}

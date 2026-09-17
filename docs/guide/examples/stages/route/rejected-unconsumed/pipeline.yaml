@@ -1,0 +1,13 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: by_format
+    type: route
+    routes:
+      linux: resource.log.format == "Linux"
+      apache: resource.log.format == "Apache"
+    default: other
+  - {id: linux_out, type: sink.nats, from: by_format.linux, stream: PROCESSED, subject: processed.linux}
+  - {id: apache_out, type: sink.nats, from: by_format.apache, stream: PROCESSED, subject: processed.apache}

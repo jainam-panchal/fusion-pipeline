@@ -1,0 +1,10 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: by_level
+    type: route
+    routes:
+      errors: severity_text == "ERROR"
+  - {id: out, type: sink.nats, from: by_level.errors, stream: PROCESSED, subject: processed.logs}
