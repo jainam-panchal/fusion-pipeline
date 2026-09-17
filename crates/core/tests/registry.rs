@@ -47,3 +47,20 @@ fn unregistered_source_type_is_an_unknown_type_error_naming_source() {
         "{err}"
     );
 }
+
+#[test]
+fn stage_kinds_lists_every_registered_stage_type_in_name_order() {
+    let mut registry = Registry::new();
+    let build = |_: &fusion_core::config::NodeConfig| -> Result<
+        Box<dyn fusion_core::stage::Stage>,
+        ConfigError,
+    > { unreachable!("never built") };
+    registry.register_stage("route", build);
+    registry.register_stage("filter", build);
+    registry.register_sink("sink.memory", fusion_core::memory::MemorySinks::new());
+
+    assert_eq!(
+        registry.stage_kinds().collect::<Vec<_>>(),
+        ["filter", "route"]
+    );
+}

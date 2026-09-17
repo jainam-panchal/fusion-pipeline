@@ -161,6 +161,11 @@ impl Registry {
             .ok_or_else(|| unknown_type(node))?
             .build(node)
     }
+
+    /// The registered stage types, in name order.
+    pub fn stage_kinds(&self) -> impl Iterator<Item = &str> {
+        self.stages.keys().map(String::as_str)
+    }
 }
 
 fn unknown_type(node: &NodeConfig) -> ConfigError {
