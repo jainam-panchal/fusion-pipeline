@@ -39,7 +39,7 @@ JetStream stores a message's headers with it and redelivers them unchanged, so a
 
 ## Consequences
 
-- Every producer sets `Fusion-Record-Id`. `deploy/nats-smoke.sh`, `deploy/metrics-check.sh` and the #13 loghub producer do. A shipper that cannot set headers (OTel Collector, Vector, Fluent Bit) needs a relay in front that adds it; until then its messages are dead-lettered as `missing_id`.
+- Every producer sets `Fusion-Record-Id`. `deploy/nats-smoke.sh` and `deploy/metrics-check.sh` do; the #13 loghub producer, not yet written, must. A shipper that cannot set headers (OTel Collector, Vector, Fluent Bit) needs a relay in front that adds it; until then its messages are dead-lettered as `missing_id`.
 - `missing_id` and its failure kind keep their meaning and a live producer: a message without the header.
 - The `Record` type still types the payload's `id` (a `u64`, or its decimal text) and `kind` (one of the three), so a payload with `"id": "3f2a-..."` or `"kind": "event"` does not decode and is dead-lettered as `undecodable`, whatever its headers say. The pipeline decides nothing from those values; loosening their types is a follow-up if a producer needs it.
 - A message whose kind is not `log` but whose payload does not decode is still dead-lettered as `undecodable`, since the source decodes before the engine resolves. The dead letter carries its kind, so a replay is rejected.

@@ -52,9 +52,9 @@ A producer names each message's record id in the `Fusion-Record-Id` header (a de
 (`missing_id`); one whose kind is not `log` is dropped (`invalid_record`).
 
 The record arrives exactly as published, and the message carries the pipeline's view of it
-as headers: `Fusion-Record-Id: 1`, `Fusion-Tenant: acme` (from the subject), `Fusion-Ingestion-Time` (the JetStream
-publish time, in nanoseconds) and `Fusion-Ingestion-Time-Kind: reported`. The pipeline never
-writes those into the record; a config that wants the tenant in the payload says so with
+as headers: `Fusion-Record-Id: 1`, `Fusion-Tenant: acme` (from the subject),
+`Fusion-Ingestion-Time` (the JetStream publish time, in nanoseconds) and
+`Fusion-Ingestion-Time-Kind: reported`. The pipeline never writes those into the record; a config that wants the tenant in the payload says so with
 `edit copy {from: meta.tenant, to: resource.tenant.id}`. A pipeline reading `processed.logs`
 takes the record id, tenant and ingestion time back from the headers (the subject's tenant, when the
 subject names one, wins over the header). Only a subject of the form
@@ -291,8 +291,8 @@ refuses, naming the node and the op's position: paths, a `set` literal of the wr
 a `hash` target that takes no string, `from` equal to `to`, any write to a `meta.*` path.
 Any record field may be edited, `id`, `kind` and `resource.tenant.id` included: the pipeline
 decides from the record's `Meta`, fixed at intake from the transport, so an edit changes what
-the sink writes and nothing else (ADR 0005, ADR 0007). `copy` may read a `meta.*` path, which is how a pipeline value
-enters a record: `copy {from: meta.tenant, to: resource.tenant.id}`.
+the sink writes and nothing else (ADR 0005, ADR 0007). `copy` may read a `meta.*` path, which
+is how a pipeline value enters a record: `copy {from: meta.tenant, to: resource.tenant.id}`.
 
 ```yaml
 nodes:
