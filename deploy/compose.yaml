@@ -33,6 +33,9 @@
 # `deploy/metrics-check.sh` drives traffic through the stack and checks every metric the spec
 # names is in Prometheus with its labels, and that a failure's log line and trace arrive.
 #
+# `PIPELINE_CONFIG` names the config in `deploy/` the pipeline runs (`pipeline.yaml`), e.g.
+# `PIPELINE_CONFIG=pipeline-poc.yaml` for the loghub harness (`deploy/loghub-check.sh`).
+#
 # Host ports that commonly clash with other stacks can be moved: `GRAFANA_PORT` (3000),
 # `DRAGONFLY_PORT` (6379), `LOKI_PORT` (3100) and `TEMPO_PORT` (3200), e.g.
 # `GRAFANA_PORT=3001 docker compose -f deploy/compose.yaml up`.
@@ -188,7 +191,7 @@ services:
       OTEL_BLRP_SCHEDULE_DELAY: "1000"
       OTEL_BSP_SCHEDULE_DELAY: "1000"
     volumes:
-      - ./pipeline.yaml:/etc/pipeline/pipeline.yaml:ro
+      - ./${PIPELINE_CONFIG:-pipeline.yaml}:/etc/pipeline/pipeline.yaml:ro
     # First Ctrl-C drains, a second exits at once; give the drain time before the kill.
     stop_signal: SIGINT
     stop_grace_period: 15s

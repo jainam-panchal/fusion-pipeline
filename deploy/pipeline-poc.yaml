@@ -1,0 +1,99 @@
+# The POC's routing demo and the pipeline the loghub harness checks (issue #13):
+#
+#   PIPELINE_CONFIG=pipeline-poc.yaml docker compose -f deploy/compose.yaml up -d
+#   deploy/loghub-check.sh
+#
+# The producer publishes the vendored loghub lines on `logs.<tenant>.loghub`, one tenant per
+# set, with the set's name in `resource.log.format`. DEBUG records are dropped (loghub lines
+# carry no severity, so none is). A body seen again within 2s of ingestion time is dropped as
+# a repeat: the producer's deliberate duplicates follow their original within 500ms, and it
+# never repeats a body sooner than 3.5s, so only those are dropped. A paused Dragonfly lets
+# records through rather than holding them back (`on_state_error: pass`), since the chaos
+# run (#14) must not use up the consumer's five deliveries on a five-second pause.
+#
+# The route sends each set to its own extract node, named groups being the structured CSV's
+# columns; Mac is the default. Linux also goes, as it arrived, to the audit subject: a
+# fan-out from the route. The four extract nodes fan in to one redact node, which masks IPv4
+# addresses in the body (never in an extracted column, which the harness compares with the
+# CSV), and one edit node, which copies the component into `attributes.service` and names
+# the pipeline. A line a pattern did not parse passes both unchanged (`on_unapplied: skip`),
+# so whether a record is delivered never depends on its regex.
+#
+# `url` here and on each sink is overridden by NATS_URL when set; the state store comes from
+# DRAGONFLY_URL.
+name: poc
+source:
+  type: nats
+  url: nats://127.0.0.1:4222
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: drop_debug
+    type: filter
+    condition: severity_text == "DEBUG"
+    action: drop
+
+  - id: dedupe_body
+    type: dedupe
+    key: [body]
+    window: 2s
+    on_state_error: pass
+
+  - id: by_format
+    type: route
+    routes:
+      linux: resource.log.format == "Linux"
+      openssh: resource.log.format == "OpenSSH"
+      apache: resource.log.format == "Apache"
+    default: mac
+
+  - id: parse_linux
+    type: extract
+    from: by_format.linux
+    field: body
+    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) +(?<Component>[^\s\[:][^\[:]*)(?:\[(?<PID>\d+)\])?: +(?<Content>\S.*)?$'
+
+  - id: parse_openssh
+    type: extract
+    from: by_format.openssh
+    field: body
+    pattern: '^(?<Date>[A-Z][a-z]{2}) +(?<Day>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Component>\S+) sshd\[(?<Pid>\d+)\]: (?<Content>.*)$'
+
+  - id: parse_apache
+    type: extract
+    from: by_format.apache
+    field: body
+    pattern: '^\[(?<Time>[^\]]+)\] \[(?<Level>\w+)\] (?<Content>.*)$'
+
+  - id: parse_mac
+    type: extract
+    from: by_format.mac
+    field: body
+    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<User>\S+) (?<Component>[^\[]+?)(?:\[(?<PID>\d+)\])?(?: \((?<Address>[^)]*)\))?: +(?<Content>\S.*)?$'
+
+  - id: mask_ips
+    type: redact
+    from: [parse_linux, parse_openssh, parse_apache, parse_mac]   # fan-in
+    fields: [body]
+    pattern: '\b\d{1,3}(?:\.\d{1,3}){3}\b'
+    replace: '[ip]'
+
+  - id: tag_service
+    type: edit
+    on_unapplied: skip
+    ops:
+      - copy: { from: attributes.Component, to: attributes.service }
+      - set:  { field: attributes.pipeline, value: poc }
+
+  - id: main_out
+    type: sink.nats
+    url: nats://127.0.0.1:4222
+    stream: PROCESSED
+    subject: processed.loghub.main
+
+  - id: linux_audit
+    type: sink.nats
+    from: by_format.linux                  # fan-out: the same route branch twice
+    url: nats://127.0.0.1:4222
+    stream: PROCESSED
+    subject: processed.loghub.audit

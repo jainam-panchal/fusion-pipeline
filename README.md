@@ -20,6 +20,7 @@ Cargo workspace under `crates/`:
 | `otel` | OTLP metrics exporter: one instrument per spec metric behind core's `Recorder` boundary, HTTP/protobuf to the collector, configured by `OTEL_EXPORTER_OTLP_*` |
 | `lua` | the `lua` stage: Lua 5.4 through `mlua` (vendored), one sandboxed VM per worker per node, instruction budget, memory cap, output check, `state`/`log`/`now_ns` API |
 | `pipeline` | the `pipelined` binary and the default stage registry |
+| `harness` | the loghub harness: `loghub-producer` replays the vendored loghub sets into NATS, `loghub-verifier` judges what the pipeline delivered |
 
 ```sh
 cargo test --workspace
@@ -423,7 +424,7 @@ nodes:
   - id: parse_linux
     type: extract
     field: body
-    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$'
+    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) +(?<Component>[^\s\[:][^\[:]*)(?:\[(?<PID>\d+)\])?: +(?<Content>\S.*)?$'
     limits: { input_bytes: 8192 }
     on_redos_risk: reject
   - id: mask_ips
@@ -444,6 +445,61 @@ attributes with the structured CSV:
 ```sh
 cargo test -p fusion-pipeline --test extract_loghub
 ```
+
+## Loghub harness
+
+The end-to-end check of the POC pipeline (`deploy/pipeline-poc.yaml`: route by log format,
+one extract node per format, fan-in to redact and edit, a Linux audit fan-out). It needs the
+compose stack, the `nats` CLI and cargo:
+
+```sh
+deploy/loghub-check.sh                                      # 100k records over ~60s
+PRODUCER_ARGS="--count 20000 --rate 1000" deploy/loghub-check.sh
+```
+
+The script brings the stack up with `PIPELINE_CONFIG=pipeline-poc.yaml`, purges `LOGS`,
+`PROCESSED` and `DLQ`, and runs the two binaries from `crates/harness`:
+
+- `loghub-producer` (`--rate`, `--count`, `--datasets Linux,OpenSSH,Apache,Mac`,
+  `--dup-percent`, `--seed`, `--dedupe-window`, `--expectations`) publishes each distinct
+  loghub line raw in `body` on `logs.<tenant>.loghub` (one tenant per set) with
+  `Fusion-Record-Id`, about 30% of them sent twice within 500ms under a new id, and writes
+  one expectation per acked message to `target/loghub/expectations.jsonl`: which subjects,
+  `drop: dedupe` for a duplicate, the line's row of the structured CSV and what the config's
+  `edit` node writes. It fails the run when a publish needed a retry or its timing fell
+  behind the plan.
+- `loghub-verifier` waits for the `pipeline` consumer to settle, reads every
+  `processed.>` and `dlq.>` subject, prints the report and exports it to the collector (the
+  internal dashboard's *Loghub harness* row). A line's copies count together: it is missing
+  when none reached a subject it should have, and a second copy is an extra copy, allowed as
+  long as `dedupe` dropped at least 80% of the planned duplicates. `edit`'s writes are checked
+  on the main subject.
+
+```
+published      100000
+received       87624
+missing        0
+unexpected     0
+dead_lettered  0
+edit_mismatch  0
+extra_copies   20
+dedupe         dropped 29902 of 29917 planned duplicates (at least 80%: held)
+extraction by set:
+  Apache   100.000% of 17521 groups, 0 mismatched
+  Linux    100.000% of 17521 groups, 0 mismatched
+  Mac      100.000% of 17520 groups, 0 mismatched
+  OpenSSH  100.000% of 17521 groups, 0 mismatched
+verdict: PASS
+```
+
+That is the 100k run of 2026-09-17. The first run found nine Linux lines with more than one
+space before the component or after the colon (`kernel:   HighMem zone: ...`); the Linux
+pattern now starts `Component` and `Content` at the first non-space, as the CSV does.
+
+It exits 0 on a pass (nothing missing, unexpected, dead-lettered or wrongly edited, and at
+least 80% of the planned duplicates dropped), 1 on a fail, 2 when the run could not be judged. Extraction accuracy is reported, never gated; the mismatching
+`LineId`s are listed. The stack keeps running the POC config afterwards;
+`docker compose -f deploy/compose.yaml up -d` puts `pipeline.yaml` back.
 
 ## Routing
 

@@ -1,0 +1,33 @@
+[package]
+name = "fusion-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "loghub-producer"
+path = "src/bin/loghub_producer.rs"
+
+[[bin]]
+name = "loghub-verifier"
+path = "src/bin/loghub_verifier.rs"
+
+[dependencies]
+fusion-core.workspace = true
+fusion-nats.workspace = true
+async-nats.workspace = true
+bytes.workspace = true
+csv.workspace = true
+futures.workspace = true
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

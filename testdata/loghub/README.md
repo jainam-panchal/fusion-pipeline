@@ -2,8 +2,8 @@
 
 Vendored from https://github.com/logpai/loghub-2.0 at commit
 `ac4aad2ea86f561e5a0acbc6587fa28b487259f9`, directory `2k_dataset/<Set>/`, unmodified.
-Three sets are here: `Linux`, `Apache` and `OpenSSH` (issue #5). `Mac` lands with the
-harness (issue #13). Each set is the raw log (2,000 lines), the `_structured_corrected.csv`
+Four sets are here: `Linux`, `Apache` and `OpenSSH` (issue #5), and `Mac` (issue #13).
+Each set is the raw log (2,000 lines), the `_structured_corrected.csv`
 ground truth (one row per `LineId`, the columns the `extract` node must lift) and
 the `_templates_corrected.csv` event templates.
 
@@ -18,6 +18,9 @@ the `_templates_corrected.csv` event templates.
 | `OpenSSH/OpenSSH_2k.log` | `16da02f37eb00cec9ec65c4d71175897be45b266aa7d6e01b26186678e2288b8` |
 | `OpenSSH/OpenSSH_2k.log_structured_corrected.csv` | `c2d0f5f538125fed320486fed4f7256ce84ecf0d1174f93cbc2cdb1e5a4c183d` |
 | `OpenSSH/OpenSSH_2k.log_templates_corrected.csv` | `3d87ef873dd9ad6f77216d468109a38228cf54881440b68fdbfc4753f16bada0` |
+| `Mac/Mac_2k.log` | `46944eb852979f1c6311742cd53e8a0abd19f7583e35c9f5eabe37470ca58fc1` |
+| `Mac/Mac_2k.log_structured_corrected.csv` | `79d304a41ec046056b2e715853ece182441111a835ce7c345323492d90587487` |
+| `Mac/Mac_2k.log_templates_corrected.csv` | `92a0086de4a8974c72609a6d496afd0675176b616663ebd01c020cfbb3281b20` |
 
 ## Licence
 
@@ -57,5 +60,8 @@ carry the text as it appears in the line.
 
 Column notes. Linux `Level` is the host name (`combo`), not a severity. OpenSSH
 `Component` is the host (`LabSZ`) and the `sshd` token belongs to no column; `Pid` is the
-bracketed number. Apache `Time` is the bracketed timestamp without its brackets. `Content`
+bracketed number. Mac `User` is the host; `Address` is the text inside ` (...)` after the
+PID (`[31211]` for `sandboxd[129] ([31211]):`), absent on most lines; `Content` starts after
+every space that follows the colon, and `Mac_2k.log` has no newline after its last line.
+Apache `Time` is the bracketed timestamp without its brackets. `Content`
 cells contain commas and are quoted; read the CSV with a real parser.

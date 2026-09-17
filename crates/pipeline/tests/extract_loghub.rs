@@ -1,6 +1,8 @@
 //! Extraction accuracy against loghub ground truth: for every 20th line of a vendored
-//! set, the attributes `extract` lifts equal that line's row in the
-//! `_structured_corrected.csv`, under the normalisation rules in `testdata/loghub/README.md`.
+//! set, the attributes the set's `extract` node in `deploy/pipeline-poc.yaml` lifts equal that
+//! line's row in the `_structured_corrected.csv`, under the normalisation rules in
+//! `testdata/loghub/README.md`. The sets, their columns and the rules are the loghub
+//! harness's (`fusion_harness::loghub`).
 
 mod common;
 
@@ -9,49 +11,28 @@ use std::path::PathBuf;
 
 use fusion_core::memory::AckOutcome;
 use fusion_core::record::Record;
+use fusion_harness::loghub::{self, Set};
 use serde_json::{Value, json};
 
-use common::{Harness, WAIT, start};
+use common::{Harness, WAIT, deploy_pattern, start};
 
-/// One vendored set: its name, the pattern for it and the CSV columns it must lift.
-struct Set {
-    name: &'static str,
-    pattern: &'static str,
-    columns: &'static [&'static str],
+fn set(name: &str) -> &'static Set {
+    loghub::set(name).unwrap_or_else(|| panic!("{name} is a vendored set"))
 }
 
-const LINUX: Set = Set {
-    name: "Linux",
-    pattern: r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$",
-    columns: &[
-        "Month",
-        "Date",
-        "Time",
-        "Level",
-        "Component",
-        "PID",
-        "Content",
-    ],
-};
-
-const APACHE: Set = Set {
-    name: "Apache",
-    pattern: r"^\[(?<Time>[^\]]+)\] \[(?<Level>\w+)\] (?<Content>.*)$",
-    columns: &["Time", "Level", "Content"],
-};
-
-const OPENSSH: Set = Set {
-    name: "OpenSSH",
-    pattern: r"^(?<Date>[A-Z][a-z]{2}) +(?<Day>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Component>\S+) sshd\[(?<Pid>\d+)\]: (?<Content>.*)$",
-    columns: &["Date", "Day", "Time", "Component", "Pid", "Content"],
-};
+/// The pattern of the set's extract node in the POC config.
+fn pattern(set: &Set) -> String {
+    deploy_pattern(
+        "pipeline-poc.yaml",
+        &format!("parse_{}", set.name.to_lowercase()),
+    )
+}
 
 /// Every 20th `LineId`, so 100 of the 2,000 lines, the same ones every run.
 const STRIDE: usize = 20;
 
 fn testdata(set: &str, suffix: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/loghub")
+    loghub::testdata()
         .join(set)
         .join(format!("{set}_2k.log{suffix}"))
 }
@@ -84,29 +65,13 @@ fn ground_truth(set: &Set) -> BTreeMap<usize, BTreeMap<String, String>> {
             .columns
             .iter()
             .filter_map(|column| {
-                let text = normalise(column, cell(column));
+                let text = loghub::normalise(column, cell(column));
                 (!text.is_empty()).then(|| ((*column).to_owned(), text))
             })
             .collect();
         rows.insert(line_id, expected);
     }
     rows
-}
-
-/// README rules 1 and 3: a pandas float `N.0` is the integer `N`; `Content` loses its
-/// trailing whitespace. Every other column compares exactly.
-fn normalise(column: &str, cell: &str) -> String {
-    let trimmed = if column == "Content" {
-        cell.trim_end()
-    } else {
-        cell
-    };
-    match trimmed.strip_suffix(".0") {
-        Some(digits) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
-            digits.to_owned()
-        }
-        _ => trimmed.to_owned(),
-    }
 }
 
 fn extracted(h: &Harness, line_id: usize) -> BTreeMap<String, String> {
@@ -126,6 +91,13 @@ fn extracted(h: &Harness, line_id: usize) -> BTreeMap<String, String> {
 }
 
 fn assert_set_extracts_its_ground_truth(set: &Set) {
+    let lines = raw_lines(set.name).len();
+    let sampled: Vec<usize> = (1..=lines).step_by(STRIDE).collect();
+    assert_eq!(sampled.len(), 100, "{}: 100 lines sampled", set.name);
+    assert_lines_extract_their_ground_truth(set, &sampled);
+}
+
+fn assert_lines_extract_their_ground_truth(set: &Set, sampled: &[usize]) {
     let yaml = format!(
         r#"
 nodes:
@@ -136,13 +108,11 @@ nodes:
   - id: out
     type: sink.memory
 "#,
-        set.pattern
+        pattern(set)
     );
     let h = start(&yaml, 4);
     let lines = raw_lines(set.name);
     let truth = ground_truth(set);
-    let sampled: Vec<usize> = (1..=lines.len()).step_by(STRIDE).collect();
-    assert_eq!(sampled.len(), 100, "{}: 100 lines sampled", set.name);
 
     let probes: Vec<_> = sampled
         .iter()
@@ -165,7 +135,7 @@ nodes:
     }
 
     let mut mismatches = Vec::new();
-    for &line_id in &sampled {
+    for &line_id in sampled {
         let mut got = extracted(&h, line_id);
         got.remove("loghub.line_id");
         let want = &truth[&line_id];
@@ -189,15 +159,31 @@ nodes:
 
 #[test]
 fn linux_lines_extract_to_the_structured_csv_columns() {
-    assert_set_extracts_its_ground_truth(&LINUX);
+    assert_set_extracts_its_ground_truth(set("Linux"));
+}
+
+/// Linux lines with more than one space before the component (`combo  -- root[2421]:`) or
+/// after the colon (`kernel:   HighMem zone: ...`): the CSV's `Component` and `Content` start
+/// at the first non-space. Found by the loghub harness (issue #13).
+#[test]
+fn linux_lines_with_extra_spaces_extract_without_them() {
+    assert_lines_extract_their_ground_truth(
+        set("Linux"),
+        &[899, 1913, 1914, 1915, 1916, 1917, 1923, 1924, 1926],
+    );
 }
 
 #[test]
 fn apache_lines_extract_to_the_structured_csv_columns() {
-    assert_set_extracts_its_ground_truth(&APACHE);
+    assert_set_extracts_its_ground_truth(set("Apache"));
 }
 
 #[test]
 fn openssh_lines_extract_to_the_structured_csv_columns() {
-    assert_set_extracts_its_ground_truth(&OPENSSH);
+    assert_set_extracts_its_ground_truth(set("OpenSSH"));
+}
+
+#[test]
+fn mac_lines_extract_to_the_structured_csv_columns() {
+    assert_set_extracts_its_ground_truth(set("Mac"));
 }

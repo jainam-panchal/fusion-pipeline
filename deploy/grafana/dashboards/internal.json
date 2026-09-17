@@ -1400,6 +1400,252 @@
       ]
     },
     {
+      "id": 1100,
+      "type": "row",
+      "title": "Loghub harness  \u2014  the last deploy/loghub-check.sh run",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 54
+      },
+      "panels": []
+    },
+    {
+      "id": 1101,
+      "type": "stat",
+      "title": "Did every record arrive?  (published, received, missing, unexpected, dead-lettered, wrongly edited, duplicates dropped, extra copies)",
+      "description": "The verifier's last report (loghub-verifier, issue #13). missing: a line's duplicate group reached none of its subjects. unexpected: a record nobody published, on a subject its set never routes to, or under the wrong tenant. dead-lettered: a published record in DLQ. edit mismatch: a main-subject record without what the edit node writes. A run passes when these four are 0 and dedupe dropped at least 80% of the planned duplicates (duplicates dropped of duplicates planned). extra copies: a second copy of a group on one subject, which at-least-once delivery allows. Gauges are exported once per run and go stale 5 minutes after it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "missing|unexpected|dead-lettered|edit mismatch"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "vertical"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_published[1h]))",
+          "legendFormat": "published",
+          "refId": "A",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_received[1h]))",
+          "legendFormat": "received",
+          "refId": "B",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_missing[1h]))",
+          "legendFormat": "missing",
+          "refId": "C",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_unexpected[1h]))",
+          "legendFormat": "unexpected",
+          "refId": "D",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_dead_lettered[1h]))",
+          "legendFormat": "dead-lettered",
+          "refId": "E",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_edit_mismatch[1h]))",
+          "legendFormat": "edit mismatch",
+          "refId": "F",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_duplicates_planned[1h]))",
+          "legendFormat": "duplicates planned",
+          "refId": "G",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_duplicates_dropped[1h]))",
+          "legendFormat": "duplicates dropped",
+          "refId": "H",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(last_over_time(loghub_extra_copies[1h]))",
+          "legendFormat": "extra copies",
+          "refId": "I",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 1102,
+      "type": "bargauge",
+      "title": "How well does each pattern extract?  (share of lines matching the structured CSV)",
+      "description": "Per log format, the share of duplicate groups whose extracted attributes equal the line's row in the loghub structured CSV, compared on the main sink. Reported, never gated: a mismatch is a finding about the pattern. The verifier prints the mismatching LineIds.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.9
+              },
+              {
+                "color": "green",
+                "value": 0.99
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (format) (last_over_time(loghub_extraction_accuracy[1h]))",
+          "legendFormat": "{{format}}",
+          "refId": "A",
+          "instant": true
+        }
+      ]
+    },
+    {
       "id": 21,
       "type": "row",
       "title": "Internals",
@@ -1408,7 +1654,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 61
       },
       "panels": [
         {
@@ -1424,7 +1670,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 55
+            "y": 62
           },
           "fieldConfig": {
             "defaults": {
@@ -1480,7 +1726,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 55
+            "y": 62
           },
           "fieldConfig": {
             "defaults": {
@@ -1536,7 +1782,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 55
+            "y": 62
           },
           "fieldConfig": {
             "defaults": {
@@ -1592,7 +1838,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 63
+            "y": 70
           },
           "fieldConfig": {
             "defaults": {
@@ -1657,7 +1903,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 63
+            "y": 70
           },
           "fieldConfig": {
             "defaults": {
@@ -1721,7 +1967,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 63
+            "y": 70
           },
           "fieldConfig": {
             "defaults": {
@@ -1794,7 +2040,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 71
+            "y": 78
           },
           "fieldConfig": {
             "defaults": {
@@ -1858,7 +2104,7 @@
             "h": 8,
             "w": 16,
             "x": 8,
-            "y": 71
+            "y": 78
           },
           "fieldConfig": {
             "defaults": {
@@ -1913,7 +2159,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 79
+            "y": 86
           },
           "fieldConfig": {
             "defaults": {
@@ -1969,7 +2215,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 79
+            "y": 86
           },
           "fieldConfig": {
             "defaults": {
@@ -2034,7 +2280,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 87
+            "y": 94
           },
           "fieldConfig": {
             "defaults": {

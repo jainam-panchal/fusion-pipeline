@@ -9,10 +9,13 @@ use fusion_core::metrics::{CounterMetric, HistogramMetric};
 use fusion_core::record::Record;
 use serde_json::{Value, json};
 
-use common::{Harness, WAIT, for_each_worker_count, start};
+use common::{Harness, WAIT, deploy_pattern, for_each_worker_count, start};
 
-/// The spec's Linux syslog pattern, lifting the structured CSV's columns.
-const LINUX_PATTERN: &str = r"^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$";
+/// The spec's Linux syslog pattern, lifting the structured CSV's columns, as the POC config
+/// ships it.
+fn linux_pattern() -> String {
+    deploy_pattern("pipeline-poc.yaml", "parse_linux")
+}
 
 fn extract_yaml(pattern: &str) -> String {
     format!(
@@ -44,7 +47,7 @@ fn attributes(h: &Harness, sink: &str, id: u64) -> serde_json::Map<String, Value
 #[test]
 fn named_groups_become_attributes_and_the_body_is_kept() {
     for_each_worker_count(|workers| {
-        let h = start(&extract_yaml(LINUX_PATTERN), workers);
+        let h = start(&extract_yaml(&linux_pattern()), workers);
         let line = "Jun 14 15:16:01 combo sshd(pam_unix)[19939]: authentication failure; logname= uid=0 euid=0 tty=NODEVssh ruser= rhost=218.188.2.4 ";
 
         let probe = h.push(record(1, line));
@@ -70,7 +73,7 @@ fn named_groups_become_attributes_and_the_body_is_kept() {
 #[test]
 fn a_non_matching_line_passes_unchanged_and_is_counted() {
     for_each_worker_count(|workers| {
-        let h = start(&extract_yaml(LINUX_PATTERN), workers);
+        let h = start(&extract_yaml(&linux_pattern()), workers);
 
         let probe = h.push(record(7, "not a syslog line"));
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
@@ -99,7 +102,7 @@ fn a_non_matching_line_passes_unchanged_and_is_counted() {
 
 #[test]
 fn regex_node_metrics_carry_the_engine_label_and_other_nodes_do_not() {
-    let h = start(&extract_yaml(LINUX_PATTERN), 1);
+    let h = start(&extract_yaml(&linux_pattern()), 1);
     assert_eq!(h.push(record(1, "x")).wait(WAIT), Some(AckOutcome::Ack));
     let linear = [
         ("tenant", "acme"),
@@ -182,7 +185,7 @@ fn on_redos_risk_warn_loads_the_pattern_and_serves_records() {
 #[test]
 fn a_record_over_input_bytes_is_dropped_with_reason_regex_limit() {
     for_each_worker_count(|workers| {
-        let yaml = extract_yaml_with(LINUX_PATTERN, "    limits: { input_bytes: 16 }");
+        let yaml = extract_yaml_with(&linux_pattern(), "    limits: { input_bytes: 16 }");
         let h = start(&yaml, workers);
 
         let big = h.push(record(1, &"x".repeat(17)));

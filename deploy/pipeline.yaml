@@ -46,7 +46,7 @@ nodes:
   - id: parse_syslog
     type: extract
     field: body
-    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) (?<Component>[^\[:]+)(?:\[(?<PID>\d+)\])?: (?<Content>.*)$'
+    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) +(?<Component>[^\s\[:][^\[:]*)(?:\[(?<PID>\d+)\])?: +(?<Content>\S.*)?$'
   - id: tag_service
     type: edit
     on_unapplied: skip
