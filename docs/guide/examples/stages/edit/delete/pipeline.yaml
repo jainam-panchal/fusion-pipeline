@@ -1,0 +1,9 @@
+nodes:
+  - id: normalise
+    type: edit
+    ops:
+      - delete: {fields: [attributes.a, severity_text, attributes.missing]}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

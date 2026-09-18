@@ -1,0 +1,6 @@
+- subject: logs.acme.checkout
+  headers: {Fusion-Record-Id: "1"}
+  payload: {attributes: {Content: hello}}
+- subject: logs.acme.checkout
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: unparsed}

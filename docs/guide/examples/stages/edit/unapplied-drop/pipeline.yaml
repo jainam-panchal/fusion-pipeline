@@ -1,0 +1,11 @@
+nodes:
+  - id: normalise
+    type: edit
+    on_unapplied: drop
+    ops:
+      - rename: {from: attributes.Content, to: attributes.message}
+      - set: {field: attributes.checked, value: true}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

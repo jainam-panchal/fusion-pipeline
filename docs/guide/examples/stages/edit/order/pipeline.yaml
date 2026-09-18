@@ -1,0 +1,10 @@
+nodes:
+  - id: normalise
+    type: edit
+    ops:
+      - rename: {from: attributes.a, to: attributes.b}
+      - set: {field: attributes.b, value: set}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

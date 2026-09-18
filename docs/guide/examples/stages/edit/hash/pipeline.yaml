@@ -1,0 +1,10 @@
+nodes:
+  - id: normalise
+    type: edit
+    ops:
+      - hash: {field: attributes.user.email}
+      - hash: {field: attributes.n}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

@@ -1,0 +1,3 @@
+- subject: logs.acme.checkout
+  headers: {Fusion-Record-Id: "1"}
+  payload: {attributes: {a: moved}}

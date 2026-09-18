@@ -1,0 +1,11 @@
+nodes:
+  - id: normalise
+    type: edit
+    ops:
+      - copy: {from: meta.tenant, to: resource.tenant.id}
+      - copy: {from: meta.ingestion_time, to: observed_time_unix_nano}
+      - copy: {from: meta.id, to: attributes.arrived_as}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

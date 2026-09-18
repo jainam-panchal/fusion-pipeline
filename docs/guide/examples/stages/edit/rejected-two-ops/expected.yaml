@@ -1,0 +1,1 @@
+rejected: 'node `normalise`: op 0: one op per entry, one of `set`, `rename`, `copy`, `hash` or `delete`'

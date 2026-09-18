@@ -1,0 +1,10 @@
+nodes:
+  - id: normalise
+    type: edit
+    ops:
+      - set: {field: kind, value: span}
+      - delete: {fields: [id]}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

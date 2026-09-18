@@ -1,0 +1,14 @@
+nodes:
+  - id: parse
+    type: extract
+    field: body
+    pattern: '^(?<level>[A-Z]+): (?<text>.+)$'
+  - id: only_parsed
+    type: edit
+    on_unapplied: drop
+    ops:
+      - rename: {from: attributes.text, to: attributes.message}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
