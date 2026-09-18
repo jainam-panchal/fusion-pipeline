@@ -7,8 +7,8 @@ Spec: `docs/specs/2026-09-08-observability-pipeline-poc.md`
 Feature catalogue the spec was derived from: `pipeline_atomic_features.csv`
 
 New here: follow [Quick start](#quick-start), then read [What the POC concluded](#what-the-poc-concluded)
-and [Out of scope and still open](#out-of-scope-and-still-open). The sections between them are
-the reference for each part.
+and [Out of scope and still open](#out-of-scope-and-still-open). To write configs, read the
+[user guide](https://jainam-panchal.github.io/fusion-pipeline/).
 
 ## Quick start
 
@@ -281,248 +281,32 @@ nodes:
     subject: processed.logs
 ```
 
-## State and dedupe
+## Writing configs
 
-Stateful nodes keep their state in Dragonfly, one keyspace shared by every worker and every
-replica; each worker holds its own connection, opened at startup with a ping when some node
-uses state, so an unreachable store fails fast. Every key is `{pipeline}:{tenant}:{node}:...`:
-`name:` at the top of the config (default `pipeline`) is the first segment, so replicas of
-one pipeline share state and two different pipelines on one Dragonfly must be given
-different names. The tenant segment means no node can dedupe one tenant against another;
-records with no tenant fall under `unknown`, like their metrics.
+The user guide at <https://jainam-panchal.github.io/fusion-pipeline/> is the reference for config authors. Its source is `docs/guide/`, an mdBook whose examples are tested (see below).
 
-```yaml
-name: ingest
-nodes:
-  - id: dedupe_body
-    type: dedupe
-    key: [body, resource.host]   # one or more field paths; a missing field is null
-    window: 10s                  # ms | s | m | h; at least 1ms
-    on_state_error: pass         # pass (default) | nak
-  - id: out
-    type: sink.memory
+| Topic | Guide page |
+|---|---|
+| How a config is laid out, `from`, fan-out and fan-in | [Writing a config](https://jainam-panchal.github.io/fusion-pipeline/writing-a-config.html) |
+| Field paths and `meta.*` | [Field paths](https://jainam-panchal.github.io/fusion-pipeline/field-paths.html) |
+| The condition grammar | [Conditions](https://jainam-panchal.github.io/fusion-pipeline/conditions.html) |
+| Regex engines, `limits`, `on_redos_risk` | [Regex limits](https://jainam-panchal.github.io/fusion-pipeline/regex-limits.html) |
+| State in Dragonfly, `on_state_error`, windows | [State and failure policy](https://jainam-panchal.github.io/fusion-pipeline/state-and-failure.html) |
+| `filter`, `route`, `dedupe` | [filter](https://jainam-panchal.github.io/fusion-pipeline/stages/filter.html), [route](https://jainam-panchal.github.io/fusion-pipeline/stages/route.html), [dedupe](https://jainam-panchal.github.io/fusion-pipeline/stages/dedupe.html) |
+| `edit` | [edit](https://jainam-panchal.github.io/fusion-pipeline/stages/edit/index.html) |
+| `sample` | [sample](https://jainam-panchal.github.io/fusion-pipeline/stages/sample/index.html) |
+| `extract` and `redact` | [extract and redact](https://jainam-panchal.github.io/fusion-pipeline/stages/regex/index.html) |
+| `lua` | [lua](https://jainam-panchal.github.io/fusion-pipeline/stages/lua/index.html) |
+| NATS keys, headers and dead letters | [NATS](https://jainam-panchal.github.io/fusion-pipeline/nats.html) |
+
+Build and check the guide locally with [mdBook](https://rust-lang.github.io/mdBook/) 0.5:
+
+```sh
+mdbook serve docs/guide                     # http://localhost:3000
+cargo test -p fusion-pipeline --test guide_examples --test guide_pages
 ```
 
-`dedupe` keeps one key per distinct content (the hash of the `key` values) holding the id
-and ingestion time of the record that claimed it, with `window` as its TTL. The first record
-passes; a different record with the same content inside the window drops with reason
-`dedupe` and is acked; after the window the next one passes and takes the key over, so the
-records behind it dedupe against the new window even while the old key's TTL is still
-running. The takeover is a compare-and-set against the holder the record read, so two
-workers past the window at once agree on one new holder and the other drops as its
-repeat. The window is measured in the record's ingestion time, which the engine fixes at
-intake from the transport (for NATS, the JetStream publish time, or an upstream pipeline's
-`Fusion-Ingestion-Time`), not from the producer's clock, so a record redelivered after a crash carries the same time
-it had before and is recognised as itself however long the redelivery took, even if a newer
-duplicate claimed the key meanwhile. A stage upstream rewriting the time fields changes what
-the sink writes, not the window (ADR 0005).
-
-When Dragonfly cannot answer (2 s per operation, then the connection is reopened on the
-next call) the stage hands the record back and the engine applies `on_state_error`: `pass`
-forwards it un-deduped, `nak` fails it so JetStream redelivers. Either way the operation is
-on `state_errors_total`. Live keys are unique contents per window, about 200 bytes each;
-the Dragonfly panel shows the memory, `state_ops_total` the call rate per node.
-
-## Sampling
-
-A `sample` node keeps a share of the records and drops the rest with reason `sample`; a
-drop is acked, never redelivered. `random` scrambles the record id (mixed with the node id)
-and keeps it when the result is at or below `percent`, so a redelivered record gets the same
-verdict and two `random` nodes in series keep independent subsets. `consistent` scrambles
-the `key` field values instead, with no node id mixed in, so every record of a host is kept
-or dropped together on every node and every pipeline, and a host kept at 20% is kept at 50%;
-records missing the key field share one `null` value and are kept or dropped together. `every_nth` keeps
-1 in `n` of the deliveries that reach the node, per tenant, exact across every worker and
-replica: one shared sample count in Dragonfly, one `incr` per record, counts 1, n+1, 2n+1,
-... kept, so a tenant with fewer than `n` records still gets one through. It is the only mode
-that touches the store and the only one that takes `on_state_error`.
-
-```yaml
-nodes:
-  - id: keep_tenth
-    type: sample
-    mode: random               # random | every_nth | consistent
-    percent: 10                # random, consistent: (0, 100]
-  - id: one_in_ten
-    type: sample
-    mode: every_nth
-    n: 10
-    on_state_error: pass       # pass (default) | nak
-  - id: half_the_hosts
-    type: sample
-    mode: consistent
-    percent: 50
-    key: [resource.host]
-```
-
-`every_nth` counts deliveries, not records: a message JetStream redelivers takes a new
-count. So a kept record whose sink failed is nakked, comes back, and usually loses its
-place; during a sink outage most of the records the node had chosen are dropped on their
-retry while the 1-in-`n` share of deliveries stays right. Remembering every record would
-cost a state key per record, which is why the guard is not there (issue #7 records the
-decision). Do not fan the same record into an `every_nth` node twice: each arrival counts.
-The count lives 24 h, refreshed on every record, so a tenant quieter than that restarts at 1
-and its first record back is kept.
-
-## Editing fields
-
-An `edit` node runs a short list of plain ops in order on one record: `set` a literal,
-`rename` or `copy` a value (both overwrite `to`), `hash` a value to lowercase hex SHA-256,
-`delete` fields. No templates, no conditions: a conditional edit is a `route` branch with
-its own `edit` node. An op whose source reads as null or whose target refuses the value
-(`copy body -> severity_number` with a string body) is unapplied: the record is unchanged by
-that op and the op counts on `edit_unapplied_total{op, field, cause}`, then `on_unapplied`
-says whether the record goes on (`skip`, the default) or drops with reason `edit_unapplied`.
-The node never naks: the outcome is fixed by the record's shape. What load can check, it
-refuses, naming the node and the op's position: paths, a `set` literal of the wrong type,
-a `hash` target that takes no string, `from` equal to `to`, any write to a `meta.*` path.
-Any record field may be edited, `id`, `kind` and `resource.tenant.id` included: the pipeline
-decides from the record's `Meta`, fixed at intake from the transport, so an edit changes what
-the sink writes and nothing else (ADR 0005, ADR 0007). `copy` may read a `meta.*` path, which
-is how a pipeline value enters a record: `copy {from: meta.tenant, to: resource.tenant.id}`.
-
-```yaml
-nodes:
-  - id: normalise
-    type: edit
-    on_unapplied: skip         # skip (default) | drop
-    ops:
-      - set:    { field: resource.env, value: prod }
-      - rename: { from: attributes.http.path, to: attributes.http.route }
-      - copy:   { from: body, to: attributes.raw }
-      - hash:   { field: attributes.user.email }
-      - delete: { fields: [attributes.debug] }
-```
-
-`hash` is a stable join key, not anonymisation: an unsalted digest of an email is
-dictionary-reversible.
-
-## Lua scripts
-
-A `lua` node runs a script defining `process(record)`. The record is a plain table with
-OTLP field names; return it to pass, `nil` to drop (reason `lua_drop`), or a list of
-records to split. It does what `edit` cannot: derive a value, split a body, keep a counter.
-
-```yaml
-nodes:
-  - id: split_lines
-    type: lua
-    script: scripts/split_lines.lua      # or `source: |` with the script inline
-    limits: { instructions: 1000000, memory_kib: 16384, output_kib: 1024 }
-    on_error: pass                       # pass (default) | drop | nak
-    on_state_error: nak                  # nak (default) | pass; only if the script uses `state`
-```
-
-```lua
-local seen = 0                           -- upvalues persist across records on one worker
-
-function process(record, meta)   -- meta: id, tenant, ingestion_time, delivery_count
-  seen = seen + 1
-  local status = record.attributes["http.status"]
-  if status ~= nil and status ~= json.null then
-    record.attributes["http.status_class"] = string.format("%dxx", status // 100)
-  end
-  if type(record.body) ~= "string" or not record.body:find("\n") then return record end
-  local out = {}
-  for line in record.body:gmatch("[^\n]+") do
-    local r = record:copy()              -- a deep copy of every field
-    r.body = line
-    out[#out + 1] = r
-  end
-  if #out == 0 then return record end    -- only newlines: nothing to split
-  return out
-end
-```
-
-A script may change or drop any field, `id`, `kind`, the tenant and the time fields
-included; every returned record continues under the incoming record's `Meta`, so labels,
-state keys and windows do not move. Every returned field goes through core's write rules,
-the same ones `edit` uses (`id`, `severity_number` and the time fields integers, `18 / 2`
-counting as one and an `id` given as decimal text too; `kind` one of `log`, `metric`,
-`span`, and `log` when left out), a key that is not a record field is refused, and the
-strings together stay under `output_kib`. `meta` is read-only: writing to it is a `runtime`
-error. Anything else is a Lua error of kind `output`. A record the script leaves alone, or
-copies, comes back unchanged: a JSON list stays a list even when empty, and a JSON `null` in
-a list or a map is `json.null`, which is truthy, so test it with `== json.null`.
-`json.list(t)` makes a table the script builds a list, so a field set to `json.list()`
-leaves as `[]`; returned as the whole result, an empty list is refused like an empty table.
-A list, the one `process` returns for a split included, may hold only its positions `1..n`:
-write `json.null`, not `nil`, for a null entry. A field set to `json.null` is left out, as
-with `nil`. A script that loops is stopped by the instruction budget (`instructions`, per
-record), one that allocates without bound by the memory cap (`memory_kib`, at least 64, on
-the worker's VM as a whole, upvalues included), a script that raises is `runtime`; each
-counts on `lua_errors_total{kind}` and then `on_error` decides: `pass` forwards the record
-as it came in, `drop` drops it with reason `lua_error`, `nak` fails it so JetStream
-redelivers. `nak` is for failures a retry can cure; a `runtime` or `output` error repeats on
-redelivery until the consumer's `max_deliver`, so under `nak` a bad script sends its
-records to the dead-letter queue. The next record is served either way:
-the VM survives a budget or runtime error, and a `memory` error rebuilds it, upvalues
-included, since a script whose upvalues grow would otherwise fail every record from then on.
-`pcall` and `xpcall` catch the script's own errors and nothing else: a budget or cap trip
-and a state error go through them.
-
-The sandbox has `string`, `table`, `math` and `utf8`, plus `state.get(key)`,
-`state.set_nx(key, value, ttl_ms)` (`true`, or `false` and the holder), `state.incr(key, by,
-ttl_ms)` and `state.del(key)` on the node's state handle (every key under
-`{pipeline}:{tenant}:{node}:`, every call on the `state_*` metrics), `log.info`, `log.warn`,
-`now_ns()`, a read-only `json` (`json.null`, `json.list(t)`) and `record:copy()`. `os`,
-`io`, `package`, `require`, `load`, `debug` and `print` are not there, and a script that
-names one of them anywhere is refused when the config loads, with the line; so is a script
-that does not parse or does not define `process`. A `state.*` call the store cannot answer
-is handled by `on_state_error`, not `on_error`; its default is `nak` where `dedupe` and
-`sample` default to `pass`, because a record forwarded past a script that did not run may be
-unredacted, whereas an un-deduped one is only a copy. One VM per worker per node, the script
-loaded once, so a counter in its upvalues persists across the records that worker sees; with
-`workers: 4` there are four counters, and a redelivered record may land on another. A
-`script:` path is read relative to the process working directory, not the config file.
-
-## Field paths
-
-Every stage names a record field with one dotted path: write what the JSON shows, outer
-field, dot, key. Under `attributes`, `resource` and `scope` the segments after the root,
-joined with dots, are the flat map key, so `attributes.http.status` reads the `http.status`
-key. A segment is letters, digits, `_` and `-`; quote it for anything else:
-`attributes."Event ID".code`. `body` and the scalar fields take no segments. Brackets are
-not accepted; every path error is a load-time error that names the node and says what to
-write instead. `meta.id`, `meta.tenant`, `meta.ingestion_time` and `meta.delivery_count` read
-the pipeline's view of the record rather than the record: a condition on the tenant reads
-`meta.tenant`, since `resource.tenant.id` is whatever the producer or a stage put there. A
-`meta.*` path can be read anywhere and written nowhere.
-
-```yaml
-condition: attributes.http.status >= 500 and meta.tenant == "acme"
-condition: resource.k8s.pod-name == "web-0" and attributes."something something" == 1
-```
-
-## Regex stages
-
-`extract` lifts a pattern's named groups out of one string field into `attributes`;
-`redact` replaces every match in the listed fields in place, with `replace` taken literally.
-Both, and any `filter` or `route` condition using `=~` or `!~`, compile through the regex
-facade: linear engine first, PCRE2 only when the syntax needs it, with per-node `limits`
-(`match`, `depth`, `heap_kib`, `work`, `input_bytes`) and `on_redos_risk: reject|warn` for
-the load-time lint and canary. A non-match passes the record unchanged and counts on
-`regex_nonmatch_total`; a tripped limit drops it with reason `regex_limit` and the next
-record is served. Every metric of a regex node carries `engine=linear|backtracking`.
-
-```yaml
-nodes:
-  - id: parse_linux
-    type: extract
-    field: body
-    pattern: '^(?<Month>[A-Z][a-z]{2}) +(?<Date>\d{1,2}) (?<Time>\d{2}:\d{2}:\d{2}) (?<Level>\S+) +(?<Component>[^\s\[:][^\[:]*)(?:\[(?<PID>\d+)\])?: +(?<Content>\S.*)?$'
-    limits: { input_bytes: 8192 }
-    on_redos_risk: reject
-  - id: mask_ips
-    type: redact
-    fields: [body, attributes.Content]
-    pattern: '\b\d{1,3}(?:\.\d{1,3}){3}\b'
-    replace: '[ip]'
-  - id: keep_auth
-    type: filter
-    condition: attributes.Component =~ "^sshd"
-    action: keep
-```
+Each example is a folder under `docs/guide/examples/` with `pipeline.yaml`, `input.yaml` and `expected.yaml`; `guide_examples` runs every one through the engine, and `guide_pages` fails when a stage type has no page, an include is missing, or an example is shown nowhere.
 
 The extraction accuracy tests replay every 20th line of the vendored loghub sets
 (`testdata/loghub/`, licence and normalisation rules in its README) and compare the
@@ -531,6 +315,7 @@ attributes with the structured CSV:
 ```sh
 cargo test -p fusion-pipeline --test extract_loghub
 ```
+
 
 ## Loghub harness
 
@@ -640,33 +425,6 @@ chaos did not land). Extraction accuracy is reported, never gated; the mismatchi
 are listed. The stack keeps running the POC config afterwards;
 `docker compose -f deploy/compose.yaml up -d` puts `pipeline.yaml` back.
 
-## Routing
-
-A `route` node has named outputs. Consumers read `<route>.<label>`; two nodes naming the
-same label fan out, and a node with `from: [a, b]` fans in. Every declared label, the default
-included, must have a consumer, or the config is rejected at load. The source message is
-acked once every branch has ended in a sink success or a drop, and nakked if any branch
-failed. Records are copy-on-write across branches.
-
-```yaml
-nodes:
-  - id: by_format
-    type: route
-    routes:                                 # ordered; first match wins
-      linux: resource.log.format == "Linux"
-      apache: resource.log.format == "Apache"
-    default: other                          # a label, or `drop`
-  - id: linux_out
-    type: sink.nats
-    from: by_format.linux
-  - id: linux_archive
-    type: sink.nats
-    from: by_format.linux                   # fan-out: same label twice
-  - id: rest
-    type: sink.nats
-    from: [by_format.apache, by_format.other]   # fan-in
-```
-
 ## What the POC concluded
 
 Each point answers one of the spec's decision-maker stories (58-61), or for delivery its
@@ -678,7 +436,7 @@ reliability stories (28-31), and names its evidence and its limits.
 - **PCRE2 JIT stays off** and every pattern tries the linear `regex` engine first, so PCRE2's
   limits behave the same on every run; a pattern that needs PCRE2 passes a structural lint
   and a canary at load. [ADR 0002](docs/adr/0002-regex-first-facade-pcre2-jit-off.md). One
-  class of slow PCRE2-only pattern is still bounded only by `input_bytes` (see below).
+  class of slow PCRE2-only pattern is still bounded only by `input_bytes` ([Limits and guarantees](https://jainam-panchal.github.io/fusion-pipeline/limits.html)).
 - **The stage model, as built.** Eight stages (`filter`, `route`, `dedupe`, `extract`,
   `redact`, `sample`, `edit`, `lua`), covering four of the five log features
   `pipeline_atomic_features.csv` puts in `Priority Tier` 1 (not log-to-metric), five of its
@@ -687,7 +445,7 @@ reliability stories (28-31), and names its evidence and its limits.
   and a few Tier 3 ones (`edit`'s hash and delete), are each one synchronous function from a
   record to an outcome, with state behind one handle and failure policy in the engine. `deploy/pipeline-poc.yaml` uses all of them in one DAG with fan-out and fan-in. That
   is the evidence for judging whether the model generalises; the catalogue features left out
-  are listed below and none was tried.
+  are listed on [Limits and guarantees](https://jainam-panchal.github.io/fusion-pipeline/limits.html) and none was tried.
 - **Delivery under failure, in one run.** The 2026-09-17 chaos run (100k published, the
   pipeline killed and restarted, Dragonfly paused for 5s) ended with nothing missing,
   unexpected or dead-lettered, 8 messages redelivered, 8 state errors on `dedupe_body` and no
@@ -717,44 +475,4 @@ What the POC does not conclude:
 
 ## Out of scope and still open
 
-Out of scope, from the spec (its *Out of scope* section has the full list):
-
-- metrics and traces: only `kind: log` is processed;
-- dedicated parsers (syslog, JSON, key=value, XML, Grok, timestamp), raw EVTX, dissect,
-  timestamp detection, GeoIP, lookups, log-to-metric, aggregation and windows, rate limiting,
-  OCSF, and the rest of the catalogue not built;
-- a VRL- or OTTL-style language; the condition grammar is deliberately small;
-- in `edit`: templates, defaults, conditional ops, casts, case changes, a salted `hash`,
-  `on_unapplied: tag`;
-- OTLP protobuf sources and sinks, and more than one record per NATS message;
-- per-key ordering and partitioned consumers;
-- a config reload trigger (the in-memory swap path exists, nothing calls it after startup);
-- more than one pipeline per process, and per-tenant configs;
-- circuit-breaking a failing Lua stage (the error-rate metric is emitted);
-- throughput or latency targets;
-- production hardening: TLS, auth, multi-node, HA state store.
-
-Known limits, decided and recorded:
-
-- An unanchored PCRE2-only pattern built from single-character repeats (`(?<=:)\w+\s+\w+`)
-  still costs one scan per start position, about 5s on a 64 KiB non-matching record, bounded
-  only by `input_bytes` (spec amendment of 2026-09-09).
-- `sample` in `every_nth` mode counts deliveries, not records, so a redelivered record
-  usually loses its place (issue #7).
-- A `lua` script's upvalues are per worker VM, and a `memory` error rebuilds the VM with
-  them, so a script that counts gives a redelivered record a different answer (spec
-  amendment of 2026-09-16, issue #8).
-- `edit`'s `hash` is an unsalted digest, a join key rather than anonymisation.
-
-Open issues as of 2026-09-17 (`gh issue list` for the current list):
-
-- #9 core: versioned compiled pipeline behind atomic swap
-- #30 nats: state-error naks carry a delay long enough to outlive a store outage
-- #31 otel: `op` label on the state store metrics
-- #36 nats: retry a failed publish inside the sink before naking
-- #40 lua: evict a swapped pipeline's VMs from the worker thread-local cache
-- #41 lua: script path resolved against the config file, not the process cwd
-- #42 engine, lua: rate-limit the stderr line per failed record and per `log.*` call
-- #44 lua: last-error sample and script digest beside `lua_errors_total`
-- #54 stages: a dedupe key outlives its window only by wall clock, so a processing delay
-  over the window lets duplicates through
+What the pipeline guarantees, what it does not, what is out of scope and the known limits are on the guide's [Limits and guarantees](https://jainam-panchal.github.io/fusion-pipeline/limits.html) page, taken from the spec's *Out of scope* section and its amendments. In short: only logs are processed, delivery is at least once, and production hardening (TLS, auth, several nodes, a highly available state store) is not built. `gh issue list` has the open work.
