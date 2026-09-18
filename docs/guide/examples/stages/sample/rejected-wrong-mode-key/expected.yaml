@@ -1,0 +1,1 @@
+rejected: 'node `keep_some`: `n` belongs to `mode: every_nth`, not `mode: random`'

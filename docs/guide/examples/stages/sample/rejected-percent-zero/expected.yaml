@@ -1,0 +1,1 @@
+rejected: 'node `keep_some`: `percent` must be above 0 and at most 100, not 0'

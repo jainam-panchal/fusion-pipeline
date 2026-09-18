@@ -1,0 +1,10 @@
+nodes:
+  - id: half_the_hosts
+    type: sample
+    mode: consistent
+    percent: 50
+    key: [resource.host]
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
