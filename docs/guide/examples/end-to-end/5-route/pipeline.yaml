@@ -1,0 +1,37 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: drop_debug
+    type: filter
+    condition: severity_text == "DEBUG"
+    action: drop
+  - id: parse
+    type: extract
+    field: body
+    pattern: '^(?<level>[A-Z]+): (?<message>.+)$'
+  - id: mask_ips
+    type: redact
+    fields: [body, attributes.message]
+    pattern: '\d+\.\d+\.\d+\.\d+'
+    replace: '[ip]'
+  - id: stamp_tenant
+    type: edit
+    ops:
+      - copy: {from: meta.tenant, to: resource.tenant.id}
+  - id: by_level
+    type: route
+    routes:
+      errors: severity_text == "ERROR"
+    default: rest
+  - id: errors_out
+    type: sink.nats
+    from: by_level.errors
+    stream: PROCESSED
+    subject: processed.errors
+  - id: out
+    type: sink.nats
+    from: by_level.rest
+    stream: PROCESSED
+    subject: processed.logs

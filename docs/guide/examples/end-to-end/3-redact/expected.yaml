@@ -1,0 +1,5 @@
+acks: [ack, ack, ack]
+sinks:
+  out:
+    - payload: {kind: log, severity_text: ERROR, body: "ERROR: login failed from [ip]", attributes: {level: ERROR, message: "login failed from [ip]"}}
+    - payload: {kind: log, severity_text: INFO, body: "INFO: login from [ip]", attributes: {level: INFO, message: "login from [ip]"}}
