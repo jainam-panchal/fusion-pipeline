@@ -1,0 +1,9 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {severity_text: ERROR}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {severity_text: WARN}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "3"}
+  payload: {severity_text: WARN, attributes: {retry: true}}

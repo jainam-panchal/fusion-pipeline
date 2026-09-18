@@ -1,0 +1,9 @@
+nodes:
+  - id: counts
+    type: filter
+    condition: body =~ "^\\d+ errors"
+    action: keep
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

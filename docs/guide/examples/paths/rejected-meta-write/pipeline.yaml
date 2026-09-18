@@ -1,0 +1,13 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: stamp
+    type: edit
+    ops:
+      - set: {field: meta.tenant, value: acme}
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

@@ -1,0 +1,13 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: ab_run
+    type: extract
+    field: body
+    pattern: '(?<x>(?:a|b)*)(?=c)'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

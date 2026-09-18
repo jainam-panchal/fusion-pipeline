@@ -1,0 +1,6 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {attributes: {Event ID: 4625}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {attributes: {Event ID: 4624}}

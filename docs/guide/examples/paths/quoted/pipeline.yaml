@@ -1,0 +1,9 @@
+nodes:
+  - id: failed_logons
+    type: filter
+    condition: attributes."Event ID" == 4625
+    action: keep
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

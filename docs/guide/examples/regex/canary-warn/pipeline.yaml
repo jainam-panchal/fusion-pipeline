@@ -1,0 +1,10 @@
+nodes:
+  - id: ab_run
+    type: extract
+    field: body
+    pattern: '(?<x>(?:a|b)*)(?=c)'
+    on_redos_risk: warn
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

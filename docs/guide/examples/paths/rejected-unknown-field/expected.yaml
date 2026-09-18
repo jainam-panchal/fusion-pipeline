@@ -1,0 +1,1 @@
+rejected: 'node `keep_errors`: condition `severity == "ERROR"`: `severity` is not a record field; instead use one of id, kind, body, severity_text, severity_number, time_unix_nano, observed_time_unix_nano, trace_id, span_id, attributes.<key>, resource.<key>, scope.<key>, meta.<field> (path at offset 0)'

@@ -1,0 +1,6 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: from acme, resource: {tenant.id: globex}}
+- subject: logs.globex.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: from globex, resource: {tenant.id: acme}}

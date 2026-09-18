@@ -1,0 +1,1 @@
+rejected: 'node `keep_disk`: condition `body == "disk full`: unterminated string starting at offset 8'

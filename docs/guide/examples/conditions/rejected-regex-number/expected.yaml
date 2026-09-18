@@ -1,0 +1,1 @@
+rejected: 'node `keep_disk`: condition `body =~ 42`: `=~` and `!~` take a quoted pattern (at offset 8)'

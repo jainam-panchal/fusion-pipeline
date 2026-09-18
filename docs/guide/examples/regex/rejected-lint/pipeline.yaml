@@ -1,0 +1,13 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: words
+    type: extract
+    field: body
+    pattern: '^(?<words>(\w+\s?)*)$'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
