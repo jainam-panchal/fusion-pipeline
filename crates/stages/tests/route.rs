@@ -13,7 +13,7 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource.log.format == "Linux"
+      linux: resource."log.format" == "Linux"
       acme: meta.tenant == "acme"
     default: drop
   - id: out
@@ -30,7 +30,7 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource.log.format ==
+      linux: resource."log.format" ==
     default: drop
   - id: out
     type: sink.memory

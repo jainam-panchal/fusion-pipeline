@@ -1,6 +1,0 @@
-- subject: logs.acme.checkout
-  headers: {Fusion-Record-Id: "1"}
-  payload: {id: abc, body: an id that is not a number}
-- subject: logs.acme.checkout
-  headers: {Fusion-Record-Id: "2"}
-  payload: {severity_number: high, body: a number field holding text}

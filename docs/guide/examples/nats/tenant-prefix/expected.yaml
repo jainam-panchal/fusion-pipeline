@@ -2,8 +2,8 @@ acks: [ack, ack, ack]
 sinks:
   out:
     - headers: {Fusion-Record-Id: "1", Fusion-Tenant: acme, Fusion-Ingestion-Time: "1758000000000000000", Fusion-Ingestion-Time-Kind: reported}
-      payload: {kind: log, body: prefix matches}
+      payload: {body: prefix matches}
     - headers: {Fusion-Record-Id: "2", Fusion-Tenant: unknown, Fusion-Ingestion-Time: "1758000000000000000", Fusion-Ingestion-Time-Kind: reported}
-      payload: {kind: log, body: prefix does not match}
+      payload: {body: prefix does not match}
     - headers: {Fusion-Record-Id: "3", Fusion-Tenant: globex, Fusion-Ingestion-Time: "1758000000000000000", Fusion-Ingestion-Time-Kind: reported}
-      payload: {kind: log, body: only two words}
+      payload: {body: only two words}

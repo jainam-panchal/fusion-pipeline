@@ -1,0 +1,16 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+  codec: text
+nodes:
+  - id: mask_ips
+    type: redact
+    fields: ['.']          # the record is the line, so `.` is what to mask
+    pattern: '\d+\.\d+\.\d+\.\d+'
+    replace: '[ip]'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
+    encoding: text         # write the line back as bytes, with no JSON around it

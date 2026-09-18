@@ -1,0 +1,22 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+  codec: text          # the record is the line itself, with no JSON around it
+nodes:
+  - id: keep_the_line
+    type: edit
+    ops:
+      # The record is one piece of text. Copy it into a field so the parsed
+      # groups have somewhere to go and the line survives.
+      - copy: {from: ., to: body}
+  - id: parse
+    type: extract
+    from: keep_the_line
+    field: body
+    pattern: '^(?<level>[A-Z]+): (?<message>.+)$'
+  - id: out
+    type: sink.nats
+    from: parse
+    stream: PROCESSED
+    subject: processed.logs

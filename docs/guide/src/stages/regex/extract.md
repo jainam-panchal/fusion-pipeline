@@ -10,13 +10,30 @@
 | Key | Default | What it does |
 |---|---|---|
 | `field` | required | The [field path](../../field-paths.md) to read. It can be any field, a `meta.*` path included. |
+| `into` | `attributes` | The path each group is written under, as `<into>.<name>`. It cannot be a `meta.*` path. |
 | `pattern` | required | The regular expression. Named groups, `(?<name>...)`, say what to keep. |
 | `limits` | see [Regex limits](../../regex-limits.md) | Limits for this pattern. |
 | `on_redos_risk` | `reject` | What to do with a risky pattern. |
 
 ## What it writes
 
-For each named group that matched, `extract` writes `attributes.<name>` as text. Numbers stay text too, so `pid` below is `"4711"`. The field it read is left as it was, unless it is the attribute a group writes to.
+For each named group that matched, `extract` writes `<into>.<name>` as text, and `into` is `attributes` unless you say otherwise. Numbers stay text too, so `pid` below is `"4711"`. The field it read is left as it was, unless it is the field a group writes to.
+
+`into: .` puts the groups at the top level of the record.
+
+A write makes its path exist, so an `extract` on a record that is not an object replaces it: with a raw line from a [`codec: text`](../../nats.md) source, copy the line into a field first.
+
+```yaml
+- id: keep_the_line
+  type: edit
+  ops:
+    - copy: {from: ., to: body}     # the record was the line; now it is {"body": "<line>"}
+- id: parse
+  type: extract
+  from: keep_the_line
+  field: body
+  pattern: '^(?<level>[A-Z]+): (?<message>.+)$'
+```
 
 ```yaml
 # messages in

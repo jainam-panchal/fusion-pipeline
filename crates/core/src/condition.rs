@@ -346,6 +346,12 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
                 i = end;
                 Tok::Str(s)
             }
+            // A path written from the record root: `.` for the whole record, and the way to
+            // start one at a key that is not a bare word, `."log.format"` or `.0.value`.
+            b'.' => {
+                i = lex_path_rest(expr, start, i)?;
+                Tok::Path(expr[start..i].to_owned())
+            }
             b'-' | b'0'..=b'9' => {
                 i += 1;
                 while i < bytes.len()

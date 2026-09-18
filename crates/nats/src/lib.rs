@@ -32,7 +32,7 @@ use fusion_core::signals::Signals;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
-pub use config::{SinkParams, SourceParams};
+pub use config::{Codec, Encoding, SinkParams, SourceParams};
 pub use sink::NatsSink;
 pub use source::NatsSource;
 
@@ -303,6 +303,7 @@ impl Nats {
             self.shutdown.subscribe(),
             self.signals.clone(),
             params.tenant_prefix.clone(),
+            params.codec,
             dead_letters,
         ))
     }
@@ -333,6 +334,7 @@ impl Nats {
             context,
             params.stream.clone(),
             params.subject.clone(),
+            params.encoding,
         ))
     }
 

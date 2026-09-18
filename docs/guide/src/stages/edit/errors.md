@@ -16,27 +16,11 @@ The pipeline refuses these configs at start. Ops are counted from 0, so `op 0` i
 
 ## A value the field does not take
 
-```yaml
-# config
-{{#include ../../../examples/stages/edit/rejected-set-type/pipeline.yaml}}
-```
+No field has a type, so no value is refused at start. `set` still refuses an object or a list
+as its `value`; write those with a [`lua`](../lua/README.md) script.
 
-```yaml
-# result
-{{#include ../../../examples/stages/edit/rejected-set-type/expected.yaml}}
-```
-
-## Hashing a field that does not take text
-
-```yaml
-# config
-{{#include ../../../examples/stages/edit/rejected-hash-id/pipeline.yaml}}
-```
-
-```yaml
-# result
-{{#include ../../../examples/stages/edit/rejected-hash-id/expected.yaml}}
-```
+Hashing something with no text, such as a list, is not a start-up error either: the op is
+unapplied on that record with cause `type`. See [write rules](write-rules.md#unapplied-on-a-record).
 
 ## `from` and `to` the same
 

@@ -8,7 +8,6 @@ sinks:
         Fusion-Ingestion-Time-Kind: reported
       payload:
         id: 99
-        kind: log
         body: payment failed
         resource:
           tenant.id: globex

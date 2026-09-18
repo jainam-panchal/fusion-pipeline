@@ -7,7 +7,6 @@ sinks:
         Fusion-Ingestion-Time: "1758000000000000000"
         Fusion-Ingestion-Time-Kind: reported
       payload:
-        kind: log
         severity_text: WARN
         body: payment retry
         attributes: {tenant: acme}

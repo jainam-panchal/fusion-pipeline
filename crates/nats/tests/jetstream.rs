@@ -23,7 +23,7 @@ use fusion_core::registry::Registry;
 use fusion_core::signals::Signals;
 use fusion_core::stage::{Context, Stage, StageError, StageOutput};
 use fusion_core::trace::{InMemoryTraceSink, TraceKey, TraceSampling};
-use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
+use fusion_nats::config::{Codec, Encoding, SinkParams, SourceParams, url_from_env};
 use fusion_nats::headers::{INGESTION_TIME, INGESTION_TIME_KIND, RECORD_ID, RECORD_KIND, TENANT};
 use fusion_nats::{Nats, NatsError};
 use futures::StreamExt;
@@ -348,6 +348,7 @@ impl Fixture {
             consumer: self.consumer.clone(),
             tenant_prefix: self.tenant_prefix.clone(),
             dlq_prefix: self.dlq_prefix.clone(),
+            codec: Codec::default(),
         }
     }
 
@@ -356,6 +357,7 @@ impl Fixture {
             url: Some(url()),
             stream: self.out_stream.clone(),
             subject: self.out_subject.clone(),
+            encoding: Encoding::default(),
         }
     }
 
@@ -484,6 +486,7 @@ fn sink_fails_fast_when_its_stream_is_missing() {
         url: Some(url()),
         stream: unique("MISSING"),
         subject: "processed.nowhere".to_owned(),
+        encoding: Encoding::default(),
     };
 
     let err = nats.sink(&params).expect_err("missing stream rejected");
@@ -499,6 +502,7 @@ fn sink_fails_fast_when_its_stream_does_not_capture_the_subject() {
     let nats = Nats::new(Metrics::noop()).expect("nats runtime");
     let params = SinkParams {
         subject: "processed.elsewhere".to_owned(),
+        encoding: Encoding::default(),
         ..fixture.sink_params()
     };
 
@@ -572,6 +576,7 @@ fn connect_fails_fast_when_the_server_is_unreachable() {
         url: Some("nats://127.0.0.1:1".to_owned()),
         stream: "PROCESSED".to_owned(),
         subject: "processed.logs".to_owned(),
+        encoding: Encoding::default(),
     };
 
     let err = nats.sink(&params).expect_err("unreachable server rejected");
@@ -674,7 +679,7 @@ impl Stage for RevealOnRedelivery {
                 serde_json::json!(meta.delivery_count),
             ),
         ] {
-            record.attributes.insert(key.to_owned(), value);
+            record.0["attributes"][key] = value;
         }
         StageOutput::Pass(record)
     }
@@ -723,10 +728,14 @@ fn source_fills_meta_with_the_subject_tenant_the_publish_time_and_the_delivery_c
         "the redelivered record reaches the memory sink"
     );
     let record = &sinks.records("out")[0];
-    let attr = |key: &str| record.attributes[&format!("meta.{key}")].clone();
+    let attr = |key: &str| record.value()["attributes"][format!("meta.{key}")].clone();
     assert_eq!(attr("tenant"), serde_json::json!("acme"));
     assert_eq!(attr("delivery_count"), serde_json::json!(2));
-    assert_eq!(record.observed_time_unix_nano, None, "nothing is stamped");
+    assert_eq!(
+        record.value().get("observed_time_unix_nano"),
+        None,
+        "nothing is stamped"
+    );
     let first = first.load(Ordering::SeqCst);
     let now = unix_nanos_now();
     assert!(
@@ -834,7 +843,7 @@ fn undecodable_payload_is_nakd_and_the_source_keeps_going() {
         wait_until(SETTLE_TIMEOUT, || !sinks.records("out").is_empty()),
         "the record after the garbage reaches the sink"
     );
-    assert_eq!(sinks.records("out")[0].id.map(|id| id.0), Some(44));
+    assert_eq!(sinks.records("out")[0].value()["id"], 44);
     assert!(
         wait_until(SETTLE_TIMEOUT, || fixture.consumer_info().num_redelivered
             > 0),
@@ -970,6 +979,7 @@ fn a_downstream_pipeline_takes_the_tenant_and_the_first_ingestion_time_from_the_
                     consumer: "downstream".to_owned(),
                     tenant_prefix: fusion_nats::config::DEFAULT_TENANT_PREFIX.to_owned(),
                     dlq_prefix: fixture.dlq_prefix.clone(),
+                    codec: Codec::default(),
                 })
                 .expect("downstream source"),
         ),
@@ -1085,7 +1095,7 @@ fn the_subject_beats_a_spoofed_tenant_header_and_a_bad_header_is_counted_not_nak
 }
 
 /// A message whose subject names no tenant and which has no `Fusion-Tenant` header is
-/// `unknown`, whatever `resource.tenant.id` its payload carries: the pipeline never reads its
+/// `unknown`, whatever `resource.\"tenant.id\"` its payload carries: the pipeline never reads its
 /// tenant from the record.
 #[test]
 #[ignore = "needs a JetStream server at NATS_URL"]
@@ -1143,6 +1153,7 @@ fn source_fails_fast_when_the_dlq_stream_is_missing_or_does_not_cover_the_prefix
 
     let nowhere = SourceParams {
         dlq_prefix: unique("nowhere").to_ascii_lowercase(),
+        codec: Codec::default(),
         ..fixture.source_params()
     };
     let err = nats.source(&nowhere).expect_err("no dead-letter stream");
@@ -1159,6 +1170,7 @@ fn source_fails_fast_when_the_dlq_stream_is_missing_or_does_not_cover_the_prefix
         .create_stream(&narrow, &[&format!("{narrow_prefix}.acme")]);
     let one_tenant = SourceParams {
         dlq_prefix: narrow_prefix,
+        codec: Codec::default(),
         ..fixture.source_params()
     };
     let err = nats.source(&one_tenant);

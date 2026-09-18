@@ -1,9 +1,0 @@
-- subject: logs.acme.app
-  headers: {Fusion-Record-Id: "1"}
-  payload: {body: flat key, attributes: {http.status: 503}}
-- subject: logs.acme.app
-  headers: {Fusion-Record-Id: "2"}
-  payload: {body: flat key, attributes: {http.status: 200}}
-- subject: logs.acme.app
-  headers: {Fusion-Record-Id: "3"}
-  payload: {body: nested object, attributes: {http: {status: 503}}}

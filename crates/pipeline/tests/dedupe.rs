@@ -647,7 +647,7 @@ fn a_time_field_rewritten_upstream_does_not_move_the_window_of_the_records_inges
             .sinks
             .records("out")
             .iter()
-            .map(|r| r.observed_time_unix_nano)
+            .map(|r| r.value()["observed_time_unix_nano"].as_u64())
             .collect();
         assert_eq!(
             written,
@@ -668,8 +668,8 @@ fn the_window_follows_the_transports_time_not_the_producers_clock() {
         // are past the 10 s window, the third is the second's repeat.
         for (id, entered_s) in [(101, 1_000), (102, 1_020), (103, 1_025)] {
             let mut stamped_by_producer = record(id, "disk full");
-            stamped_by_producer.observed_time_unix_nano = Some(secs(7));
-            stamped_by_producer.time_unix_nano = Some(secs(7));
+            stamped_by_producer.0["observed_time_unix_nano"] = secs(7).into();
+            stamped_by_producer.0["time_unix_nano"] = secs(7).into();
             let pushed = h.push_at(stamped_by_producer, secs(entered_s));
             assert_eq!(
                 pushed.wait(WAIT),

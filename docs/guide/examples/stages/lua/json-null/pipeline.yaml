@@ -3,9 +3,12 @@ nodes:
     type: lua
     source: |
       function process(record)
+        -- A record is any JSON, so nothing is there unless the producer sent it.
+        record.attributes = record.attributes or {}
         record.attributes["tags"] = json.list({"a", json.null, "b"})
         record.attributes["empty"] = json.list()
-        record.trace_id = json.null
+        record.trace_id = json.null   -- an explicit null; `nil` removes the key
+        record.removed = nil
         return record
       end
   - id: out

@@ -1,4 +1,4 @@
 acks: [ack, ack, ack]
 sinks:
   out:
-    - payload: {kind: log, severity_text: ERROR, body: disk full}
+    - payload: {severity_text: ERROR, body: disk full}

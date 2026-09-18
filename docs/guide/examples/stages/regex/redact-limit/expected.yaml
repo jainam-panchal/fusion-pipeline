@@ -1,4 +1,4 @@
 acks: [ack, ack]
 sinks:
   out:
-    - payload: {kind: log, body: "[ip]", attributes: {peer: "[ip]"}}
+    - payload: {body: "[ip]", attributes: {peer: "[ip]"}}

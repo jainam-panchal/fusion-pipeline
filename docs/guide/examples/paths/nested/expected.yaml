@@ -1,0 +1,4 @@
+acks: [ack]
+sinks:
+  out:
+    - payload: {test: 12, test2: {key1: 123, key2: 123}}

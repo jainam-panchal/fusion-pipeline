@@ -1,4 +1,4 @@
 acks: [ack]
 sinks:
   out:
-    - payload: {kind: log, body: "user=bob status=503 path=/pay", attributes: {user: bob, status: "503", path: /pay}}
+    - payload: {body: "user=bob status=503 path=/pay", attributes: {user: bob, status: "503", path: /pay}}

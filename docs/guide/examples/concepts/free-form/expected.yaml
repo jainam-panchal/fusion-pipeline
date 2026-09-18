@@ -1,0 +1,5 @@
+acks: [ack, ack]
+sinks:
+  out:
+    - payload: {level: error, msg: auth failure, rhost: 10.0.0.1, host: web-1}
+    - payload: {id: abc, severity_number: high, body: types that used to be refused}

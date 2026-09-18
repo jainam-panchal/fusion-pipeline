@@ -6,16 +6,16 @@ sinks:
         Fusion-Tenant: acme
         Fusion-Ingestion-Time: "1758000000000000000"
         Fusion-Ingestion-Time-Kind: reported
-      payload: {kind: log, body: the subject names acme}
+      payload: {body: the subject names acme}
     - headers:
         Fusion-Record-Id: "2"
         Fusion-Tenant: globex
         Fusion-Ingestion-Time: "1758000000000000000"
         Fusion-Ingestion-Time-Kind: reported
-      payload: {kind: log, body: the subject names no tenant}
+      payload: {body: the subject names no tenant}
     - headers:
         Fusion-Record-Id: "3"
         Fusion-Tenant: unknown
         Fusion-Ingestion-Time: "1758000000000000000"
         Fusion-Ingestion-Time-Kind: reported
-      payload: {kind: log, body: nothing names a tenant}
+      payload: {body: nothing names a tenant}

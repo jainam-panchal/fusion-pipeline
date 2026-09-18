@@ -2,8 +2,8 @@ acks: [ack]
 sinks:
   out:
     - headers: {Fusion-Record-Id: "1", Fusion-Tenant: acme, Fusion-Ingestion-Time: "1758000000000000000", Fusion-Ingestion-Time-Kind: reported}
-      payload: {kind: log, body: disk full}
+      payload: {body: disk full}
     - headers: {Fusion-Record-Id: "1", Fusion-Tenant: acme, Fusion-Ingestion-Time: "1758000000000000000", Fusion-Ingestion-Time-Kind: reported}
-      payload: {kind: log, body: retrying}
+      payload: {body: retrying}
     - headers: {Fusion-Record-Id: "1", Fusion-Tenant: acme, Fusion-Ingestion-Time: "1758000000000000000", Fusion-Ingestion-Time-Kind: reported}
-      payload: {kind: log, body: gave up}
+      payload: {body: gave up}

@@ -30,20 +30,6 @@ Close the group: `user=(?<user>\w+)`. A pattern neither engine can read is repor
 
 A repeat inside a repeat can take very long on some inputs. Rewrite it with one repeat, for example `^(?<words>[\w\s]*)$`, or set `on_redos_risk: warn` if you have checked the pattern. See [Regex limits](../../regex-limits.md#checks-at-start).
 
-## Masking a field that does not take text
-
-```yaml
-# config
-{{#include ../../../examples/stages/regex/rejected-redact-id/pipeline.yaml}}
-```
-
-```yaml
-# result
-{{#include ../../../examples/stages/regex/rejected-redact-id/expected.yaml}}
-```
-
-`redact` writes text, so every listed field must take text. To hide an id, copy it to an attribute first with [`edit`](../edit/README.md).
-
 ## A missing key
 
 ```yaml
@@ -58,19 +44,11 @@ A repeat inside a repeat can take very long on some inputs. Rewrite it with one 
 
 `replace` has no default. Give the text to write, which can be empty: `replace: ''`.
 
-## A key the stage does not have
+## A field that holds no text
 
-```yaml
-# config
-{{#include ../../../examples/stages/regex/rejected-into/pipeline.yaml}}
-```
-
-```yaml
-# result
-{{#include ../../../examples/stages/regex/rejected-into/expected.yaml}}
-```
-
-`extract` always writes to `attributes.<group name>`. To move a value elsewhere, follow it with an [`edit`](../edit/README.md).
+`redact` is not refused for any field at start: no field has a type. A field that does not
+hold text at run time is skipped, and a record no listed field matched counts once on
+`regex_nonmatch_total`.
 
 ## Other messages
 

@@ -29,7 +29,7 @@ impl Stage for Reveal {
             ),
             ("meta.delivery_count", json!(meta.delivery_count)),
         ] {
-            record.attributes.insert(key.to_owned(), value);
+            record.0["attributes"][key] = value;
         }
         StageOutput::Pass(record)
     }
@@ -132,7 +132,7 @@ fn source_drops(h: &common::Harness, reason: &str) -> u64 {
 }
 
 fn meta_of(record: &Record, key: &str) -> Value {
-    record.attributes[&format!("meta.{key}")].clone()
+    record.value()["attributes"][format!("meta.{key}")].clone()
 }
 
 #[test]
@@ -156,12 +156,12 @@ fn the_tenant_and_the_time_are_the_transports_and_the_records_are_never_read() {
     assert_eq!(meta_of(&out[0], "ingestion_time"), json!(9_000_000_000_u64));
     assert_eq!(meta_of(&out[0], "delivery_count"), json!(3));
     assert_eq!(
-        out[0].resource.get("tenant.id"),
+        out[0].value()["resource"].get("tenant.id"),
         Some(&json!("beta")),
         "the producer's tenant stays in the payload"
     );
     assert_eq!(
-        out[0].observed_time_unix_nano,
+        out[0].value()["observed_time_unix_nano"].as_u64(),
         Some(5_000_000_000),
         "and so does its time"
     );
@@ -187,10 +187,14 @@ fn the_record_id_and_the_kind_are_the_transports_and_the_payloads_are_never_read
     let sent = record(&json!({"id": 5, "kind": "metric", "body": "disk full"}));
     let (out, h) = reveal(REVEAL, sent, with_id(9));
     assert_eq!(meta_of(&out[0], "record_id"), json!(9));
-    assert_eq!(out[0].id, Some(RecordId(5)), "the payload keeps its id");
     assert_eq!(
-        out[0].kind,
-        Kind::Metric,
+        out[0].value()["id"].as_u64(),
+        Some(5),
+        "the payload keeps its id"
+    );
+    assert_eq!(
+        out[0].value()["kind"],
+        json!("metric"),
         "and its kind, walked all the same"
     );
     assert_eq!(h.sinks.outgoing("out")[0].meta.record_id, RecordId(9));
@@ -277,19 +281,29 @@ fn a_stage_rewriting_the_payload_id_moves_no_decision_and_nothing_else_in_the_pa
     let sent = record(&json!({"id": 7, "body": "disk full", "severity_text": "ERROR"}));
     let (out, h) = reveal(REWRITE_ID_THEN_SPLIT_THEN_REVEAL, sent.clone(), with_id(7));
     assert_eq!(out.len(), 2);
-    let ids: Vec<_> = out.iter().map(|r| r.id).collect();
+    let ids: Vec<_> = out.iter().map(|r| r.value()["id"].as_u64()).collect();
     assert_eq!(
         ids,
-        [Some(RecordId(99)), Some(RecordId(100))],
+        [Some(99), Some(100)],
         "the payload ids are what the stages wrote"
     );
     for r in &out {
         assert_eq!(meta_of(r, "record_id"), json!(7), "every later stage saw 7");
         let mut untouched = r.clone();
-        untouched.id = sent.id;
-        untouched
-            .attributes
-            .retain(|key, _| !key.starts_with("meta."));
+        untouched.0["id"] = sent.value()["id"].clone();
+        let attributes = untouched.0["attributes"]
+            .as_object_mut()
+            .expect("the reveal stage wrote attributes");
+        attributes.retain(|key, _| !key.starts_with("meta."));
+        if attributes.is_empty() {
+            // The sent record carries no `attributes` key at all; an empty map is not the
+            // same value, so the key goes with its last entry.
+            untouched
+                .0
+                .as_object_mut()
+                .expect("an object")
+                .remove("attributes");
+        }
         assert_eq!(untouched, sent, "nothing but the id changed");
     }
     for written in h.sinks.outgoing("out") {
@@ -315,8 +329,12 @@ fn a_record_without_a_tenant_or_a_time_leaves_without_them() {
     );
     assert_eq!(meta_of(&out[0], "tenant"), json!("acme"));
     assert_eq!(meta_of(&out[0], "ingestion_time"), json!(9_000_000_000_u64));
-    assert_eq!(out[0].observed_time_unix_nano, None, "nothing is stamped");
-    assert_eq!(out[0].resource.get("tenant.id"), None, "nothing is stamped");
+    assert_eq!(
+        out[0].value().get("observed_time_unix_nano"),
+        None,
+        "nothing is stamped"
+    );
+    assert_eq!(out[0].value().get("resource"), None, "nothing is stamped");
     h.finish();
 }
 
@@ -474,7 +492,10 @@ fn every_record_a_split_emits_continues_under_its_parents_meta() {
         assert_eq!(meta_of(r, "ingestion_time"), json!(5_000_000_000_u64));
         assert_eq!(meta_of(r, "delivery_count"), json!(2));
     }
-    assert_eq!(out[1].resource.get("tenant.id"), Some(&json!("minted")));
+    assert_eq!(
+        out[1].value()["resource"].get("tenant.id"),
+        Some(&json!("minted"))
+    );
     assert_eq!(
         h.counter(
             CounterMetric::RecordsOut,
@@ -540,7 +561,7 @@ nodes:
   - id: stamp
     type: edit
     ops:
-      - copy: { from: meta.tenant, to: resource.tenant.id }
+      - copy: { from: meta.tenant, to: resource."tenant.id" }
       - copy: { from: meta.ingestion_time, to: observed_time_unix_nano }
       - copy: { from: meta.delivery_count, to: attributes.delivery }
       - copy: { from: meta.id, to: attributes.arrived_as }
@@ -553,10 +574,22 @@ nodes:
         acme_arrival(7),
     );
     let out = h.sinks.records("out");
-    assert_eq!(out[0].resource.get("tenant.id"), Some(&json!("acme")));
-    assert_eq!(out[0].observed_time_unix_nano, Some(9_000_000_000));
-    assert_eq!(out[0].attributes.get("delivery"), Some(&json!(2)));
-    assert_eq!(out[0].attributes.get("arrived_as"), Some(&json!(7)));
+    assert_eq!(
+        out[0].value()["resource"].get("tenant.id"),
+        Some(&json!("acme"))
+    );
+    assert_eq!(
+        out[0].value()["observed_time_unix_nano"].as_u64(),
+        Some(9_000_000_000)
+    );
+    assert_eq!(
+        out[0].value()["attributes"].get("delivery"),
+        Some(&json!(2))
+    );
+    assert_eq!(
+        out[0].value()["attributes"].get("arrived_as"),
+        Some(&json!(7))
+    );
     h.finish();
 }
 
@@ -595,6 +628,8 @@ nodes:
     type: lua
     source: |
       function process(record, meta)
+        -- A record is any JSON, so nothing is there unless it was sent (issue #79).
+        record.attributes = record.attributes or {}
         local seen = {}
         for k, v in pairs(meta) do seen[#seen + 1] = k end
         table.sort(seen)
@@ -665,6 +700,7 @@ nodes:
     type: lua
     source: |
       function process(record, meta)
+        record.attributes = record.attributes or {}
         record.attributes["locked"] = getmetatable(meta)
         record.attributes["reset"] = not pcall(setmetatable, meta, nil)
         record.attributes["tenant"] = meta.tenant
@@ -683,10 +719,10 @@ nodes:
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
     }
     for r in h.sinks.records("out") {
-        assert_eq!(r.attributes.get("locked"), Some(&json!("meta")));
-        assert_eq!(r.attributes.get("reset"), Some(&json!(true)));
+        assert_eq!(r.value()["attributes"].get("locked"), Some(&json!("meta")));
+        assert_eq!(r.value()["attributes"].get("reset"), Some(&json!(true)));
         assert_eq!(
-            r.attributes.get("tenant"),
+            r.value()["attributes"].get("tenant"),
             Some(&json!("acme")),
             "a raw write on one record's meta does not reach the next"
         );

@@ -44,10 +44,7 @@ fn record_passing_filter_reaches_sink_and_is_acked() {
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
         let delivered = h.sinks.records("out");
         assert_eq!(delivered.len(), 1, "workers={workers}");
-        assert_eq!(
-            delivered[0].body.as_ref().and_then(|b| b.as_str()),
-            Some("disk full")
-        );
+        assert_eq!(delivered[0].value()["body"].as_str(), Some("disk full"));
         h.finish();
     });
 }
@@ -77,7 +74,7 @@ fn drop_action_inverts_the_filter() {
     assert_eq!(dropped.wait(WAIT), Some(AckOutcome::Ack));
     let delivered = h.sinks.records("out");
     assert_eq!(delivered.len(), 1);
-    assert_eq!(delivered[0].id.map(|id| id.0), Some(3));
+    assert_eq!(delivered[0].value()["id"].as_u64(), Some(3));
     h.finish();
 }
 
@@ -122,7 +119,7 @@ fn many_records_are_all_settled_across_workers() {
             .sinks
             .records("out")
             .iter()
-            .filter_map(|r| r.id.map(|id| id.0))
+            .filter_map(|r| r.value()["id"].as_u64())
             .collect();
         ids.sort_unstable();
         let expected: Vec<u64> = (0..200).step_by(2).collect();

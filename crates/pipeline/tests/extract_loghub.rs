@@ -75,12 +75,17 @@ fn ground_truth(set: &Set) -> BTreeMap<usize, BTreeMap<String, String>> {
 }
 
 fn extracted(h: &Harness, line_id: usize) -> BTreeMap<String, String> {
-    h.sinks
+    let record = h
+        .sinks
         .records("out")
         .into_iter()
-        .find(|r| r.id.map(|i| i.0 as usize) == Some(line_id))
-        .unwrap_or_else(|| panic!("line {line_id} reached the sink"))
-        .attributes
+        .find(|r| r.value()["id"].as_u64().map(|i| i as usize) == Some(line_id))
+        .unwrap_or_else(|| panic!("line {line_id} reached the sink"));
+    let attributes = record.value()["attributes"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    attributes
         .into_iter()
         .filter_map(|(k, v)| match v {
             Value::String(s) if k == "Content" => Some((k, s.trim_end().to_owned())),

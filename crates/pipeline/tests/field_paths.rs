@@ -35,7 +35,7 @@ nodes:
 #[test]
 fn filter_on_a_dotted_attribute_key_reads_the_flat_map() {
     for_each_worker_count(|workers| {
-        let h = start(&filter("attributes.http.status >= 500"), workers);
+        let h = start(&filter("attributes.\"http.status\" >= 500"), workers);
 
         let kept = h.push(record(
             1,
@@ -68,7 +68,7 @@ fn filter_on_a_dotted_attribute_key_reads_the_flat_map() {
             .sinks
             .records("out")
             .iter()
-            .filter_map(|r| r.id.map(|id| id.0))
+            .filter_map(|r| r.value()["id"].as_u64())
             .collect();
         assert_eq!(ids, [1], "only the flat key matches; workers={workers}");
         h.finish();
@@ -79,7 +79,7 @@ fn filter_on_a_dotted_attribute_key_reads_the_flat_map() {
 fn filter_on_resource_keys_including_hyphens_digits_and_quotes() {
     for_each_worker_count(|workers| {
         let yaml = filter(
-            r#"resource.service.name == "api" and resource.env == "prod" and resource.k8s.pod-name == "web-0" and attributes.5xx.count > 0 and attributes."Event ID" == 4625"#,
+            r#"resource."service.name" == "api" and resource.env == "prod" and resource."k8s.pod-name" == "web-0" and attributes."5xx.count" > 0 and attributes."Event ID" == 4625"#,
         );
         let h = start(&yaml, workers);
 
@@ -102,7 +102,7 @@ fn filter_on_resource_keys_including_hyphens_digits_and_quotes() {
         );
         let delivered = h.sinks.records("out");
         assert_eq!(delivered.len(), 1, "workers={workers}");
-        assert_eq!(delivered[0].id.map(|id| id.0), Some(1));
+        assert_eq!(delivered[0].value()["id"].as_u64(), Some(1));
         h.finish();
     });
 }
@@ -116,7 +116,7 @@ fn bracket_syntax_in_a_condition_is_a_config_error_naming_the_node() {
         .expect_err("brackets are rejected at load");
     assert!(
         matches!(err, ConfigError::InvalidParams { ref node, ref message }
-            if node == "keep_5xx" && message.contains("instead use `attributes.http.status`")),
+            if node == "keep_5xx" && message.contains("instead use `attributes.\"http.status\"`")),
         "{err}"
     );
 
@@ -134,15 +134,12 @@ nodes:
     let err = Pipeline::from_yaml(route, &registry).expect_err("brackets are rejected at load");
     assert!(
         matches!(err, ConfigError::InvalidParams { ref node, ref message }
-            if node == "by_format" && message.contains("instead use `resource.log.format`")),
+            if node == "by_format" && message.contains("instead use `resource.\"log.format\"`")),
         "{err}"
     );
 
-    let err =
-        Pipeline::from_yaml(&filter("body.msg == 1"), &registry).expect_err("body has no fields");
-    assert!(
-        matches!(err, ConfigError::InvalidParams { ref node, ref message }
-            if node == "keep_5xx" && message.contains("`body` is one value and has no fields")),
-        "{err}"
-    );
+    // Brackets are the only path shape left that a config is refused for. `body.msg` used to
+    // be one too, when `body` was one value; a record is any JSON now, so it loads and names
+    // the `msg` key of `body` (issue #79).
+    Pipeline::from_yaml(&filter("body.msg == 1"), &registry).expect("`body.msg` is a path");
 }

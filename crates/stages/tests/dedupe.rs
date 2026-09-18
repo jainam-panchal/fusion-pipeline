@@ -31,9 +31,14 @@ fn an_empty_key_list_is_rejected_naming_the_node() {
 
 #[test]
 fn a_key_path_that_does_not_parse_is_rejected_with_the_path_and_the_hint() {
-    let err = build("    key: [attributes]\n    window: 10s\n").expect_err("rejected");
+    // `attributes` on its own is an ordinary path now (issue #79), so what is still rejected
+    // is a path that is not well formed.
+    let err = build("    key: [attributes..msg]\n    window: 10s\n").expect_err("rejected");
 
-    assert!(err.contains("dd") && err.contains("attributes"), "{err}");
+    assert!(
+        err.contains("dd") && err.contains("attributes..msg") && err.contains("empty segment"),
+        "{err}"
+    );
 }
 
 #[test]

@@ -1,8 +1,8 @@
 acks: [ack, ack, ack]
 sinks:
   linux_out:
-    - payload: {kind: log, body: a, resource: {log.format: Linux}}
+    - payload: {body: a, resource: {log.format: Linux}}
   apache_out:
-    - payload: {kind: log, body: b, resource: {log.format: Apache}}
+    - payload: {body: b, resource: {log.format: Apache}}
   other_out:
-    - payload: {kind: log, body: c, resource: {log.format: Mac}}
+    - payload: {body: c, resource: {log.format: Mac}}

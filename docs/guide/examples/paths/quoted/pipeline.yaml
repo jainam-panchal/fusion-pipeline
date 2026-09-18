@@ -1,7 +1,9 @@
 nodes:
-  - id: failed_logons
+  - id: linux_logons
     type: filter
-    condition: attributes."Event ID" == 4625
+    # The quotes make `log.format` one name. Without them the path would mean
+    # the key `format` inside the key `log`, which is record 2, not record 1.
+    condition: resource."log.format" == "Linux" and attributes."Event ID" == 4625
     action: keep
   - id: out
     type: sink.nats

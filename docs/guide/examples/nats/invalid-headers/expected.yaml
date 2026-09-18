@@ -2,6 +2,6 @@ acks: [ack, ack, nak, ack]
 sinks:
   out:
     - headers: {Fusion-Record-Id: "1", Fusion-Tenant: acme, Fusion-Ingestion-Time: "1758000000000000000", Fusion-Ingestion-Time-Kind: reported}
-      payload: {kind: log, body: bad time}
+      payload: {body: bad time}
     - headers: {Fusion-Record-Id: "2", Fusion-Tenant: unknown, Fusion-Ingestion-Time: "1758000000000000000", Fusion-Ingestion-Time-Kind: reported}
-      payload: {kind: log, body: tenant given twice}
+      payload: {body: tenant given twice}

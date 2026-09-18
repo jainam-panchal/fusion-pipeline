@@ -23,9 +23,9 @@ nodes:
     type: edit
     ops:
       - set:    { field: resource.env, value: prod }
-      - rename: { from: attributes.http.path, to: attributes.http.route }
+      - rename: { from: attributes."http.path", to: attributes."http.route" }
       - copy:   { from: body, to: attributes.raw }
-      - hash:   { field: attributes.user.email }
+      - hash:   { field: attributes."user.email" }
       - delete: { fields: [attributes.debug] }
   - id: out
     type: sink.memory
@@ -65,7 +65,7 @@ fn run(yaml: &str, workers: usize, records: Vec<Record>) -> (Vec<Record>, common
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "record {i}");
     }
     let mut out = h.sinks.records("out");
-    out.sort_by_key(|r| r.id.map(|id| id.0));
+    out.sort_by_key(|r| r.value()["id"].as_u64());
     (out, h)
 }
 
@@ -110,13 +110,22 @@ fn filter_then_edit_then_sink_acks_every_record_and_the_sink_sees_the_edits() {
             "workers {workers}: every ERROR record reached the sink"
         );
         for r in &out {
-            assert_eq!(r.resource.get("env"), Some(&json!("prod")));
-            assert_eq!(r.attributes.get("http.route"), Some(&json!("/users/42")));
-            assert_eq!(r.attributes.get("http.path"), None);
-            assert_eq!(r.attributes.get("raw"), Some(&json!("GET /users/42")));
-            assert_eq!(r.body, Some(json!("GET /users/42")));
-            assert_eq!(r.attributes.get("user.email"), Some(&json!(ALICE_SHA256)));
-            assert_eq!(r.attributes.get("debug"), None);
+            assert_eq!(r.value()["resource"].get("env"), Some(&json!("prod")));
+            assert_eq!(
+                r.value()["attributes"].get("http.route"),
+                Some(&json!("/users/42"))
+            );
+            assert_eq!(r.value()["attributes"].get("http.path"), None);
+            assert_eq!(
+                r.value()["attributes"].get("raw"),
+                Some(&json!("GET /users/42"))
+            );
+            assert_eq!(r.value()["body"], json!("GET /users/42"));
+            assert_eq!(
+                r.value()["attributes"].get("user.email"),
+                Some(&json!(ALICE_SHA256))
+            );
+            assert_eq!(r.value()["attributes"].get("debug"), None);
         }
         assert_eq!(h.counter(CounterMetric::RecordsIn, &STAGE), 50);
         assert_eq!(h.counter(CounterMetric::RecordsOut, &STAGE), 50);
@@ -144,7 +153,7 @@ fn each_op_produces_the_expected_record() {
             json!({"severity_text": "WARN", "attributes": {"level": "WARN"}}),
         ),
         (
-            "      - hash: { field: attributes.user.email }\n",
+            "      - hash: { field: attributes.\"user.email\" }\n",
             json!({"attributes": {"user.email": "alice@example.com"}}),
             json!({"attributes": {"user.email": ALICE_SHA256}}),
         ),
@@ -174,8 +183,8 @@ fn ops_run_in_order_on_the_same_record() {
         1,
         vec![record(1, json!({"attributes": {"a": "moved"}}))],
     );
-    assert_eq!(out[0].attributes.get("b"), Some(&json!("set")));
-    assert_eq!(out[0].attributes.get("a"), None);
+    assert_eq!(out[0].value()["attributes"].get("b"), Some(&json!("set")));
+    assert_eq!(out[0].value()["attributes"].get("a"), None);
     h.finish();
 
     // set then rename of the old name: the value just set moves.
@@ -188,8 +197,8 @@ fn ops_run_in_order_on_the_same_record() {
         1,
         vec![record(1, json!({"attributes": {"a": "old"}}))],
     );
-    assert_eq!(out[0].attributes.get("b"), Some(&json!("set")));
-    assert_eq!(out[0].attributes.get("a"), None);
+    assert_eq!(out[0].value()["attributes"].get("b"), Some(&json!("set")));
+    assert_eq!(out[0].value()["attributes"].get("a"), None);
     h.finish();
 
     // set the new name, then rename an absent old name onto it: the set value stays and
@@ -199,7 +208,7 @@ fn ops_run_in_order_on_the_same_record() {
         "      - set: { field: attributes.b, value: set }\n      - rename: { from: attributes.a, to: attributes.b }\n",
     );
     let (out, h) = run(&yaml, 1, vec![record(1, json!({"attributes": {}}))]);
-    assert_eq!(out[0].attributes.get("b"), Some(&json!("set")));
+    assert_eq!(out[0].value()["attributes"].get("b"), Some(&json!("set")));
     assert_eq!(
         h.counter(
             CounterMetric::EditUnapplied,
@@ -225,11 +234,8 @@ fn rename_and_copy_overwrite_an_existing_to() {
         )],
     );
     assert_eq!(
-        out[0].attributes,
+        out[0].value()["attributes"],
         json!({"b": "from a", "c": "new"})
-            .as_object()
-            .cloned()
-            .expect("object")
     );
     h.finish();
 }
@@ -239,22 +245,19 @@ fn an_absent_source_leaves_the_record_and_counts_absent_for_that_op_and_field() 
     for_each_worker_count(|workers| {
         let yaml = config(
             "",
-            "      - rename: { from: 'attributes.\"http.path\"', to: attributes.http.route }\n      - copy: { from: attributes.nothing, to: attributes.copy }\n      - hash: { field: attributes.nil }\n      - set: { field: attributes.after, value: ran }\n",
+            "      - rename: { from: 'attributes.\"http.path\"', to: attributes.\"http.route\" }\n      - copy: { from: attributes.nothing, to: attributes.copy }\n      - hash: { field: attributes.nil }\n      - set: { field: attributes.after, value: ran }\n",
         );
         let before = json!({"body": "x", "attributes": {"nil": null}});
         let (out, h) = run(&yaml, workers, vec![record(1, before)]);
         assert_eq!(
-            out[0].attributes,
-            json!({"nil": null, "after": "ran"})
-                .as_object()
-                .cloned()
-                .expect("object"),
+            out[0].value()["attributes"],
+            json!({"nil": null, "after": "ran"}),
             "workers {workers}: nothing written, the op after the unapplied ones still ran"
         );
         assert_eq!(
             h.counter(
                 CounterMetric::EditUnapplied,
-                &unapplied("rename", "attributes.http.path", "absent")
+                &unapplied("rename", "attributes.\"http.path\"", "absent")
             ),
             1
         );
@@ -279,21 +282,32 @@ fn an_absent_source_leaves_the_record_and_counts_absent_for_that_op_and_field() 
 }
 
 #[test]
-fn a_target_that_refuses_the_value_leaves_the_record_and_counts_type() {
+fn hash_is_the_one_op_that_can_be_unapplied_for_type_and_a_copy_never_is() {
+    // No path has a type any more (issue #79), so a `copy` of a composite lands wherever it
+    // is sent. `hash` still needs something with text to hash, so a list is cause `type`.
     let yaml = config(
         "",
         "      - copy: { from: body, to: severity_number }\n      - hash: { field: attributes.list }\n",
     );
     let before = json!({"body": {"nested": true}, "attributes": {"list": [1, 2]}});
-    let (out, h) = run(&yaml, 1, vec![record(1, before.clone())]);
-    assert_eq!(out, vec![record(1, before)], "record unchanged");
+    let (out, h) = run(&yaml, 1, vec![record(1, before)]);
+    assert_eq!(
+        out[0].value()["severity_number"],
+        json!({"nested": true}),
+        "the composite was copied, not refused"
+    );
     assert_eq!(
         h.counter(
             CounterMetric::EditUnapplied,
             &unapplied("copy", "body", "type")
         ),
-        1,
-        "a composite cannot go into severity_number"
+        0,
+        "a copy can no longer be refused for a type"
+    );
+    assert_eq!(
+        out[0].value()["attributes"]["list"],
+        json!([1, 2]),
+        "the list is left as it was"
     );
     assert_eq!(
         h.counter(
@@ -310,8 +324,11 @@ fn a_target_that_refuses_the_value_leaves_the_record_and_counts_type() {
 fn a_composite_body_renames_under_a_map_key_since_core_takes_any_value_there() {
     let yaml = config("", "      - rename: { from: body, to: attributes.raw }\n");
     let (out, h) = run(&yaml, 1, vec![record(1, json!({"body": {"nested": true}}))]);
-    assert_eq!(out[0].body, None);
-    assert_eq!(out[0].attributes.get("raw"), Some(&json!({"nested": true})));
+    assert_eq!(out[0].value().get("body"), None);
+    assert_eq!(
+        out[0].value()["attributes"].get("raw"),
+        Some(&json!({"nested": true}))
+    );
     assert_eq!(
         h.counter(
             CounterMetric::EditUnapplied,
@@ -330,14 +347,20 @@ fn hash_takes_a_number_or_bool_as_its_canonical_text() {
     );
     let before = json!({"severity_text": "42", "attributes": {"n": 42, "f": 1.5, "b": true}});
     let (out, h) = run(&yaml, 1, vec![record(1, before)]);
-    assert_eq!(out[0].attributes.get("n"), Some(&json!(FORTY_TWO_SHA256)));
     assert_eq!(
-        out[0].attributes.get("f"),
+        out[0].value()["attributes"].get("n"),
+        Some(&json!(FORTY_TWO_SHA256))
+    );
+    assert_eq!(
+        out[0].value()["attributes"].get("f"),
         Some(&json!(ONE_POINT_FIVE_SHA256))
     );
-    assert_eq!(out[0].attributes.get("b"), Some(&json!(TRUE_SHA256)));
     assert_eq!(
-        out[0].severity_text.as_deref(),
+        out[0].value()["attributes"].get("b"),
+        Some(&json!(TRUE_SHA256))
+    );
+    assert_eq!(
+        out[0].value()["severity_text"].as_str(),
         Some(FORTY_TWO_SHA256),
         "the string `42` and the number 42 hash the same"
     );
@@ -360,8 +383,11 @@ fn on_unapplied_drop_drops_with_reason_edit_unapplied_and_acks() {
             ],
         );
         assert_eq!(out.len(), 1, "workers {workers}");
-        assert_eq!(out[0].id.map(|id| id.0), Some(1));
-        assert_eq!(out[0].attributes.get("after"), Some(&json!("ran")));
+        assert_eq!(out[0].value()["id"].as_u64(), Some(1));
+        assert_eq!(
+            out[0].value()["attributes"].get("after"),
+            Some(&json!("ran"))
+        );
         assert_eq!(
             h.counter(
                 CounterMetric::RecordsDropped,
@@ -422,7 +448,7 @@ nodes:
   - id: normalise
     type: edit
     ops:
-      - set: { field: resource.tenant.id, value: other }
+      - set: { field: resource."tenant.id", value: other }
   - id: dedupe_body
     type: dedupe
     from: normalise
@@ -441,7 +467,10 @@ fn a_tenant_rewritten_by_edit_is_payload_and_labels_and_state_keys_keep_the_meta
             workers,
             vec![record(1, json!({"body": "x"}))],
         );
-        assert_eq!(out[0].resource.get("tenant.id"), Some(&json!("other")));
+        assert_eq!(
+            out[0].value()["resource"].get("tenant.id"),
+            Some(&json!("other"))
+        );
         assert_eq!(
             h.counter(CounterMetric::RecordsOut, &STAGE),
             1,
@@ -496,8 +525,12 @@ nodes:
             1,
             "the second is the first's repeat: workers={workers}"
         );
-        assert_eq!(out[0].id, None, "the sink writes the payload");
-        assert_eq!(out[0].kind, fusion_core::record::Kind::Span);
+        assert_eq!(
+            out[0].value().get("id"),
+            None,
+            "the sink writes the payload"
+        );
+        assert_eq!(out[0].value()["kind"], json!("span"));
         let holder = h
             .state
             .get(&h.state.keys()[0])

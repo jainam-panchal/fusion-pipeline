@@ -47,3 +47,17 @@ JetStream stores a message's headers with it and redelivers them unchanged, so a
 - Every record of a `lua` split keeps the message's `Meta`, so the sink writes the same `Fusion-Record-Id` on each. A downstream pipeline sees the siblings as one record id: one record trace, and a `dedupe` holder that passes siblings sharing a key as the holder redelivered. A per-record id would need an id the pipeline makes up and a redelivery reproduces, which is a new decision.
 - The in-memory source says the id and kind through `push_arrival`, as it does the tenant. A bare `MemoryInput::push` has no record id and is nakked. The pipeline test harness plays a producer that sends the record's `id` in the header too, in one place, and the tests about where the id comes from set the two apart.
 - ADR 0005's "read for two things only" and "the record id is not a header" are amended. CLAUDE.md's `Meta` and kind invariants follow this ADR.
+
+## Amended 2026-09-18 (issue #79, ADR 0008)
+
+The third consequence above no longer holds. The record is any JSON value, so the `Record`
+type no longer types the payload's `id` or `kind`, and a log whose payload has
+`"id": "3f2a-..."` or `"kind": "event"` decodes and is walked like any other, acked rather
+than dead-lettered as `undecodable`. The "loosening their types is a follow-up" this ADR named
+is that follow-up, done.
+
+Everything else here stands. Both values still come from the message's headers and never from
+the payload; the header rules, the rejection of a message whose kind is not `log`, the
+`missing_id` nak, the dead letter's headers and the sink's `Fusion-Record-Id` are unchanged.
+`RecordId` and `Kind` remain in core as the types of the arrival and of `Meta` — what they
+stop being is fields of the record type.

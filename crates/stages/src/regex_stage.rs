@@ -17,7 +17,7 @@ use std::num::NonZeroU32;
 
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::metrics::EngineLabel;
-use fusion_core::path::FieldPath;
+use fusion_core::path::WritePath;
 use fusion_core::record::Record;
 use fusion_core::stage::{DropReason, StageError, StageOutput};
 use fusion_regex::{Engine, Limits, MatchError, Options, RedosPolicy, Regex};
@@ -144,18 +144,16 @@ pub(crate) fn log_node_engine(node: &NodeConfig, engine: Option<EngineLabel>) {
     }
 }
 
-/// Write each `(path, text)` into `record` as a string. The record is unchanged on the
-/// first refusal, which becomes a stage error naming the node and the path.
+/// Write each `(path, text)` into `record` as a string. A write through a [`WritePath`]
+/// makes the path exist, so none of these can fail and neither stage has a write error to
+/// report (issue #79).
 pub(crate) fn write_strings<'a>(
-    node: &str,
     record: &mut Record,
-    writes: impl IntoIterator<Item = (&'a FieldPath, String)>,
-) -> Result<(), StageError> {
+    writes: impl IntoIterator<Item = (&'a WritePath, String)>,
+) {
     for (path, text) in writes {
-        path.write(record, Value::String(text))
-            .map_err(|e| StageError::new(format!("node `{node}`: cannot write `{path}`: {e}")))?;
+        path.write(record, Value::String(text));
     }
-    Ok(())
 }
 
 /// A match error as the spec classifies it: every tripped limit is a drop with reason

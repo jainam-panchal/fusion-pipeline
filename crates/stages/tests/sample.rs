@@ -114,11 +114,15 @@ fn an_empty_key_list_is_rejected_naming_the_field() {
 
 #[test]
 fn a_key_path_that_does_not_parse_is_rejected_with_the_path() {
-    let err = build("    mode: consistent\n    percent: 50\n    key: [attributes]\n")
+    // `attributes` on its own is an ordinary path now (issue #79); what is still rejected is
+    // a path that is not well formed.
+    let err = build("    mode: consistent\n    percent: 50\n    key: [attributes..msg]\n")
         .expect_err("rejected");
 
     assert!(
-        err.contains("keep_some") && err.contains("attributes"),
+        err.contains("keep_some")
+            && err.contains("attributes..msg")
+            && err.contains("empty segment"),
         "{err}"
     );
 }

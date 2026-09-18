@@ -227,10 +227,7 @@ pub fn body_record(id: u64, body: &str) -> Record {
 pub fn host_record(id: u64, host: Option<&str>) -> Record {
     let mut record = body_record(id, "x");
     if let Some(host) = host {
-        record.resource.insert(
-            "host".to_owned(),
-            serde_json::Value::String(host.to_owned()),
-        );
+        record.0["resource"]["host"] = serde_json::Value::String(host.to_owned());
     }
     record
 }
@@ -270,7 +267,7 @@ impl Harness {
     /// `source.push_arrival` with the two set apart.
     pub fn push_as_producer(&self, record: Record, arrival: Arrival) -> AckProbe {
         let arrival = Arrival {
-            record_id: record.id,
+            record_id: record.value()["id"].as_u64().map(RecordId),
             ..arrival
         };
         self.source.push_arrival(record, arrival)
@@ -358,7 +355,7 @@ impl Harness {
             .sinks
             .records(sink)
             .iter()
-            .filter_map(|r| r.id.map(|id| id.0))
+            .filter_map(|r| r.value()["id"].as_u64())
             .collect();
         ids.sort_unstable();
         ids

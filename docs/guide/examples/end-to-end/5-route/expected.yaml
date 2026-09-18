@@ -1,6 +1,6 @@
 acks: [ack, ack, ack]
 sinks:
   errors_out:
-    - payload: {kind: log, severity_text: ERROR, body: "ERROR: login failed from [ip]", attributes: {level: ERROR, message: "login failed from [ip]"}, resource: {tenant.id: acme}}
+    - payload: {severity_text: ERROR, body: "ERROR: login failed from [ip]", attributes: {level: ERROR, message: "login failed from [ip]"}, resource: {tenant.id: acme}}
   out:
-    - payload: {kind: log, severity_text: INFO, body: "INFO: login from [ip]", attributes: {level: INFO, message: "login from [ip]"}, resource: {tenant.id: acme}}
+    - payload: {severity_text: INFO, body: "INFO: login from [ip]", attributes: {level: INFO, message: "login from [ip]"}, resource: {tenant.id: acme}}

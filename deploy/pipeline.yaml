@@ -18,7 +18,7 @@
 # component into `attributes.service`, which is unapplied on a body that was not a syslog
 # line, and sets the pipeline name. The redact node masks IPv4 addresses in the body and the
 # extracted content. The lua node gives `lua_errors_total` a producer: it derives
-# `attributes.http.status_class` from `attributes.http.status` and splits a multi-line body
+# `attributes."http.status_class"` from `attributes."http.status"` and splits a multi-line body
 # into one record per line. A body of only newlines passes whole. A present status makes it
 # raise unless it is null or a number (or a numeric string, which Lua converts) whose hundreds
 # fit a 64-bit integer; that is a `runtime` error, which `on_error: pass` forwards unchanged
@@ -69,6 +69,9 @@ nodes:
       end
 
       function process(record)
+        -- A record is any JSON, so nothing is there unless the producer sent it
+        -- or a stage wrote it (issue #79).
+        record.attributes = record.attributes or {}
         local class = class_of(record.attributes["http.status"])
         if class then record.attributes["http.status_class"] = class end
         if type(record.body) ~= "string" or not record.body:find("\n") then

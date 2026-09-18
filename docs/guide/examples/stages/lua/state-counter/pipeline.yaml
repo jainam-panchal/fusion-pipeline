@@ -3,6 +3,7 @@ nodes:
     type: lua
     source: |
       function process(record)
+        record.attributes = record.attributes or {}
         local seen = state.incr("body:" .. record.body, 1, 60000)
         record.attributes["seen"] = seen
         return record

@@ -1,4 +1,4 @@
 acks: [ack, nak]
 sinks:
   out:
-    - payload: {kind: log, body: ok, attributes: {http.status: 503, class: 5xx}}
+    - payload: {body: ok, attributes: {http.status: 503, class: 5xx}}

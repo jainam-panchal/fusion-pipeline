@@ -17,7 +17,7 @@ use mlua::{
     VmState,
 };
 
-use crate::convert::{self, ListMark, OutputError, type_name};
+use crate::convert::{self, ListMark, OutputError};
 
 /// The globals a script may not name, and the names the sandbox leaves undefined. `load`
 /// and its siblings come with the base library and are removed; `os`, `io`, `package`
@@ -257,10 +257,15 @@ impl Vm {
             meta: ctx.meta.clone(),
         });
         self.used.set(0);
-        let table = convert::to_table(&self.lua, record, &self.list).map_err(classify)?;
-        table
-            .set_metatable(Some(self.record_metatable.clone()))
-            .map_err(classify)?;
+        let value = convert::to_lua(&self.lua, record, &self.list).map_err(classify)?;
+        // A record that is an object or a list crosses as a table, and that table carries
+        // the record metatable: it is what `record:copy()` hangs off, and what tells a
+        // returned record from a returned split (issue #79).
+        if let LuaValue::Table(table) = &value {
+            table
+                .set_metatable(Some(self.record_metatable.clone()))
+                .map_err(classify)?;
+        }
         // A fresh table per run, so a `rawset` on one run's `meta` is gone by the next;
         // nothing a script does to it reaches the pipeline either way.
         let meta = self.lua.create_table().map_err(classify)?;
@@ -269,7 +274,7 @@ impl Vm {
         // The same for `json`, which lives in the globals: a `rawset` on it, or a script
         // assigning the global, is gone by the next run.
         install_json(&self.lua, &self.json_metatable).map_err(classify)?;
-        let returned: LuaValue = self.process.call((table, meta)).map_err(classify)?;
+        let returned: LuaValue = self.process.call((value, meta)).map_err(classify)?;
         if self.used.get() > self.script.instructions {
             // Cannot happen while `pcall` re-raises the budget; kept so a run that somehow
             // swallowed the trip is still refused.
@@ -279,13 +284,17 @@ impl Vm {
         match returned {
             LuaValue::Nil => Ok(Returned::Drop),
             LuaValue::Table(t) => {
-                if t.raw_len() == 0 && !self.list.is_list(&t) {
-                    if t.is_empty() {
+                // The record table, and a `record:copy()` of it, carry the record
+                // metatable, so `return record` is one record whatever shape the record
+                // has — a list record would otherwise read as a split of its items.
+                let is_record = t.metatable().is_some_and(|mt| mt == self.record_metatable);
+                if is_record || (t.raw_len() == 0 && !self.list.is_list(&t)) {
+                    if !is_record && t.is_empty() {
                         return Err(output(OutputError(
                             "an empty table is neither a record nor a list".to_owned(),
                         )));
                     }
-                    return convert::from_table(&t, output_bytes, &self.list)
+                    return convert::from_lua(&LuaValue::Table(t), output_bytes, &self.list)
                         .map(|record| Returned::Record(Box::new(record)))
                         .map_err(output);
                 }
@@ -305,15 +314,23 @@ impl Vm {
                         )));
                     };
                     records.push(
-                        convert::from_table(&item, output_bytes, &self.list).map_err(output)?,
+                        convert::from_lua(&LuaValue::Table(item), output_bytes, &self.list)
+                            .map_err(output)?,
                     );
                 }
                 Ok(Returned::Split(records))
             }
-            other => Err(output(OutputError(format!(
-                "`process` must return a record table, a list of them, or nil; got {}",
-                type_name(&other)
-            )))),
+            // `false` is almost always a script meaning to drop the record, and taking it
+            // as a one-bool record would swallow that silently. `nil` is how a script drops
+            // one, so a bool is refused and says so.
+            LuaValue::Boolean(_) => Err(output(OutputError(
+                "`process` returned a boolean; return nil to drop the record".to_owned(),
+            ))),
+            // Any other scalar is a record: a `codec: text` line comes in as a string and a
+            // script may return one.
+            other => convert::from_lua(&other, output_bytes, &self.list)
+                .map(|record| Returned::Record(Box::new(record)))
+                .map_err(output),
         }
     }
 }

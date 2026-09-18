@@ -1,7 +1,7 @@
 acks: [ack, ack]
 sinks:
   all:
-    - payload: {kind: log, severity_text: ERROR, body: disk full}
-    - payload: {kind: log, severity_text: INFO, body: user logged in}
+    - payload: {severity_text: ERROR, body: disk full}
+    - payload: {severity_text: INFO, body: user logged in}
   errors_out:
-    - payload: {kind: log, severity_text: ERROR, body: disk full}
+    - payload: {severity_text: ERROR, body: disk full}

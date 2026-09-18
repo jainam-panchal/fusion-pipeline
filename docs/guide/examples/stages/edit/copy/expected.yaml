@@ -1,4 +1,4 @@
 acks: [ack]
 sinks:
   out:
-    - payload: {kind: log, severity_text: WARN, attributes: {level: WARN}}
+    - payload: {severity_text: WARN, attributes: {level: WARN}}

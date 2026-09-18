@@ -109,6 +109,9 @@ nodes:
     on_error: pass
     source: |
       function process(record)
+        -- A record is any JSON, so nothing is there unless the producer sent it
+        -- or a stage wrote it (issue #79).
+        record.attributes = record.attributes or {}
         local content = record.attributes["Content"]
         if type(content) == "string" then
           record.attributes["content_bytes"] = #content

@@ -4,6 +4,7 @@ nodes:
     source: |
       function process(record)
         if type(record.body) == "string" and #record.body > 10 then
+          record.attributes = record.attributes or {}
           record.attributes["body.length"] = #record.body
           record.body = string.sub(record.body, 1, 10) .. "..."
         end

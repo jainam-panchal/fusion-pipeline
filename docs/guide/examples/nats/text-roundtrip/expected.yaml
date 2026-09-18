@@ -1,0 +1,4 @@
+acks: [ack]
+sinks:
+  out:
+    - raw: 'auth failure from rhost=[ip]'

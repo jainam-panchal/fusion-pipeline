@@ -26,7 +26,7 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource.log.format == "Linux"
+      linux: resource."log.format" == "Linux"
     default: drop
   - id: linux_out
     type: sink.memory
@@ -130,7 +130,7 @@ fn a_route_default_of_drop_is_counted_with_reason_route_default_drop() {
         let h = start(BY_FORMAT, workers);
 
         let mut mac = record(1, "ERROR");
-        mac.resource.insert("log.format".to_owned(), "Mac".into());
+        mac.0["resource"]["log.format"] = "Mac".into();
         assert_eq!(h.push(mac).wait(WAIT), Some(AckOutcome::Ack));
 
         assert_eq!(
@@ -179,7 +179,7 @@ fn a_record_without_an_id_is_dropped_at_the_source_with_reason_missing_id_and_na
         let h = start(KEEP_ERRORS, workers);
 
         let mut no_id = record(1, "ERROR");
-        no_id.id = None;
+        no_id.0.as_object_mut().expect("an object").remove("id");
         assert_eq!(h.push(no_id).wait(WAIT), Some(AckOutcome::Nak(None)));
 
         assert_eq!(
@@ -320,7 +320,7 @@ fn source_counts_every_record_in_and_only_those_entering_the_graph_out() {
         let h = start(KEEP_ERRORS, workers);
 
         let mut no_id = record(1, "ERROR");
-        no_id.id = None;
+        no_id.0.as_object_mut().expect("an object").remove("id");
         let probes = [
             h.push(record(3, "ERROR")),
             h.push(no_id),

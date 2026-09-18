@@ -1,7 +1,7 @@
-//! The record as a plain Lua table with OTLP field names, and the way back: Lua values
-//! converted to JSON, strings under the size cap, and every field written through core's
-//! write rules, so no field's type is spelled here (issue #43). Every field is payload
-//! (ADR 0005), so a script may change or drop any of them.
+//! The record as a plain Lua value, and the way back: Lua values converted to JSON with
+//! every string under the size cap. A record is any JSON (issue #79), so an object crosses
+//! as a table, a list as a marked table and a string, number or bool as itself. No field
+//! name and no field type is spelled here: a script may return whatever shape it likes.
 //!
 //! A value crosses both ways unchanged when the script leaves it alone. Lua has no empty
 //! list and no `nil` inside a table, so a JSON list becomes a table marked with the VM's
@@ -11,7 +11,6 @@
 //! `json.null` is left out, as `nil` is.
 
 use fusion_core::meta::{Meta, MetaField, MetaValue};
-use fusion_core::path::{FieldPath, TopLevel};
 use fusion_core::record::{Record, RecordId};
 use mlua::{Integer, Table, Value as LuaValue};
 use serde_json::{Map, Value};
@@ -60,40 +59,11 @@ impl ListMark {
     }
 }
 
-/// What the script gets: every present field under its OTLP name, maps as tables of JSON
-/// values, `body` as the JSON value it is, every list marked. `id` is an integer, or its
-/// decimal text when it does not fit Lua's signed 64 bits.
-pub(crate) fn to_table(lua: &mlua::Lua, record: &Record, list: &ListMark) -> mlua::Result<Table> {
-    let t = lua.create_table_with_capacity(0, 12)?;
-    if let Some(id) = record.id {
-        t.raw_set("id", id_value(lua, id)?)?;
-    }
-    t.raw_set("kind", record.kind.as_str())?;
-    if let Some(n) = record.time_unix_nano {
-        t.raw_set("time_unix_nano", unsigned(n))?;
-    }
-    if let Some(n) = record.observed_time_unix_nano {
-        t.raw_set("observed_time_unix_nano", unsigned(n))?;
-    }
-    if let Some(s) = &record.severity_text {
-        t.raw_set("severity_text", s.as_str())?;
-    }
-    if let Some(n) = record.severity_number {
-        t.raw_set("severity_number", Integer::from(n))?;
-    }
-    if let Some(body) = &record.body {
-        t.raw_set("body", json_to_lua(lua, body, list)?)?;
-    }
-    t.raw_set("attributes", map_to_table(lua, &record.attributes, list)?)?;
-    t.raw_set("resource", map_to_table(lua, &record.resource, list)?)?;
-    t.raw_set("scope", map_to_table(lua, &record.scope, list)?)?;
-    if let Some(s) = &record.trace_id {
-        t.raw_set("trace_id", s.as_str())?;
-    }
-    if let Some(s) = &record.span_id {
-        t.raw_set("span_id", s.as_str())?;
-    }
-    Ok(t)
+/// What the script gets: the record as a Lua value. An object is a table, a list is a
+/// marked table, and a scalar record is the Lua scalar. The caller marks a returned table as
+/// a record table.
+pub(crate) fn to_lua(lua: &mlua::Lua, record: &Record, list: &ListMark) -> mlua::Result<LuaValue> {
+    json_to_lua(lua, record.value(), list)
 }
 
 /// `meta[field]` as a script reads it: the record id in the form the record table gives an
@@ -305,94 +275,22 @@ impl Reader<'_> {
     }
 }
 
-/// The table the script returned as a record, its strings together under `output_bytes`.
-/// A key must be a record field, so a typo cannot silently drop data; a map field must be a
-/// table (or `nil`, the empty map); every value goes through core's write rules. Every field
-/// is optional (`kind` is `log` when left out).
-pub(crate) fn from_table(
-    table: &Table,
+/// The value the script returned as a record, its strings together under `output_bytes`.
+/// Any JSON is a record, so nothing here judges a key or a type; what is refused is what has
+/// no JSON form at all (a function, a coroutine, userdata, a non-finite number, a string
+/// that is not UTF-8), the output cap, and a table nested past [`MAX_DEPTH`].
+pub(crate) fn from_lua(
+    value: &LuaValue,
     output_bytes: usize,
     list: &ListMark,
 ) -> Result<Record, OutputError> {
-    let mut record = Record::default();
     let mut reader = Reader {
         used: 0,
         cap: output_bytes,
         depth: 0,
         list,
     };
-    for pair in table.pairs::<LuaValue, LuaValue>() {
-        let (key, value) =
-            pair.map_err(|e| OutputError(format!("cannot read the returned table: {e}")))?;
-        let LuaValue::String(key) = key else {
-            return refuse(format!("key {} is not a field name", type_name(&key)));
-        };
-        let key = key
-            .to_str()
-            .map_err(|_| OutputError("a key is not valid UTF-8".into()))?
-            .to_owned();
-        match FieldPath::top_level(&key) {
-            None => return refuse(format!("`{key}` is not a record field")),
-            Some(TopLevel::Map(map)) => {
-                let entries = match &value {
-                    LuaValue::Nil => continue,
-                    LuaValue::Table(t) => reader.entries(t, &key)?,
-                    other => {
-                        return refuse(format!(
-                            "`{key}` must be a table, not {}",
-                            type_name(other)
-                        ));
-                    }
-                };
-                for (name, value) in entries {
-                    write(&map.key(&name), &mut record, value)?;
-                }
-            }
-            Some(TopLevel::Field(path)) => {
-                // `json.null` on a field is left out, as `nil` is: a field is never `null`.
-                let value = reader.json(&value, &key)?;
-                if !value.is_null() {
-                    write(&path, &mut record, value)?;
-                }
-            }
-        }
-    }
-    Ok(record)
-}
-
-/// Write `value` through core's write rules. When the rules refuse it as given, the value
-/// is tried once more in the form a Lua author means: an integral float as the integer
-/// (`18 / 2` is a float in Lua 5.4), and for the record id, decimal text as the integer (the
-/// form [`to_table`] hands over an id above 2^63 in). The refusal reported is core's.
-fn write(path: &FieldPath, record: &mut Record, value: Value) -> Result<(), OutputError> {
-    let meant = integral(&value).or_else(|| if path.is_id() { decimal(&value) } else { None });
-    let Err(refused) = path.write(record, value) else {
-        return Ok(());
-    };
-    match meant.map(|meant| path.write(record, meant)) {
-        Some(Ok(())) => Ok(()),
-        _ => refuse(refused.to_string()),
-    }
-}
-
-/// The integer an integral float within `i64` stands for (a float that large is an integer
-/// already, and the cast is exact).
-fn integral(value: &Value) -> Option<Value> {
-    // 2^63, the first float outside `i64`.
-    const I64_END: f64 = 9_223_372_036_854_775_808.0;
-    if !value.is_f64() {
-        return None;
-    }
-    let f = value.as_f64()?;
-    (f.fract() == 0.0 && (-I64_END..I64_END).contains(&f)).then(|| Value::from(f as i64))
-}
-
-/// The `u64` that decimal digits spell, the form an id above 2^63 crosses in.
-fn decimal(value: &Value) -> Option<Value> {
-    let text = value
-        .as_str()
-        .filter(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))?;
-    text.parse::<u64>().ok().map(Value::from)
+    reader.json(value, "the returned record").map(Record::new)
 }
 
 /// A Lua value's type as an error message names it.

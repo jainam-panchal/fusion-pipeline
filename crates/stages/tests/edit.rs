@@ -15,9 +15,9 @@ fn build(params: &str) -> Result<Edit, String> {
 
 const EXAMPLE: &str = "    ops:
       - set:    { field: resource.env, value: prod }
-      - rename: { from: attributes.http.path, to: attributes.http.route }
+      - rename: { from: attributes.\"http.path\", to: attributes.\"http.route\" }
       - copy:   { from: body, to: attributes.raw }
-      - hash:   { field: attributes.user.email }
+      - hash:   { field: attributes.\"user.email\" }
       - delete: { fields: [attributes.debug] }
 ";
 
@@ -119,22 +119,21 @@ fn every_op_may_name_id_or_kind_since_they_are_payload() {
 }
 
 #[test]
-fn a_literal_or_hash_id_and_kind_do_not_take_is_rejected_by_type() {
-    rejects(
-        "    ops:\n      - set: { field: id, value: seven }\n",
-        "op 0",
-        &["id", "non-negative integer", "\"seven\""],
-    );
-    rejects(
-        "    ops:\n      - set: { field: kind, value: trace }\n",
-        "op 0",
-        &["kind", "`log`, `metric` or `span`"],
-    );
-    rejects(
-        "    ops:\n      - hash: { field: id }\n",
-        "op 0",
-        &["hash", "id"],
-    );
+fn no_literal_is_rejected_for_a_fields_type_because_no_field_has_one() {
+    // All three were load errors while the record was a fixed struct. A record is any JSON
+    // now (issue #79), so `id` holds the text `seven` and `kind` the text `trace`.
+    for op in [
+        "set: { field: id, value: seven }",
+        "set: { field: kind, value: trace }",
+        "hash: { field: id }",
+        "set: { field: severity_number, value: high }",
+        "set: { field: severity_text, value: 3 }",
+        "set: { field: trace_id, value: true }",
+        "set: { field: span_id, value: 1.5 }",
+        "set: { field: time_unix_nano, value: -1 }",
+    ] {
+        assert!(build(&format!("    ops:\n      - {op}\n")).is_ok(), "{op}");
+    }
 }
 
 #[test]
@@ -145,12 +144,12 @@ fn copy_from_id_is_allowed_since_it_only_reads() {
 #[test]
 fn every_op_naming_the_tenant_is_accepted_since_it_is_payload() {
     for op in [
-        "set: { field: resource.tenant.id, value: acme }",
-        "rename: { from: resource.tenant.id, to: resource.owner }",
-        "rename: { from: resource.owner, to: resource.tenant.id }",
-        "copy: { from: resource.owner, to: resource.tenant.id }",
-        "hash: { field: resource.tenant.id }",
-        "delete: { fields: [resource.tenant.id] }",
+        "set: { field: resource.\"tenant.id\", value: acme }",
+        "rename: { from: resource.\"tenant.id\", to: resource.owner }",
+        "rename: { from: resource.owner, to: resource.\"tenant.id\" }",
+        "copy: { from: resource.owner, to: resource.\"tenant.id\" }",
+        "hash: { field: resource.\"tenant.id\" }",
+        "delete: { fields: [resource.\"tenant.id\"] }",
     ] {
         let ops = format!("    ops:\n      - {op}\n");
         assert!(build(&ops).is_ok(), "{op}");
@@ -172,31 +171,17 @@ fn a_set_literal_that_is_a_map_or_list_is_rejected() {
 }
 
 #[test]
-fn a_set_literal_of_the_wrong_type_is_rejected_quoting_it() {
+fn a_set_literal_that_is_a_map_or_a_list_is_still_rejected() {
+    // The one shape rule `set` keeps: a composite literal belongs in a `lua` script.
     rejects(
-        "    ops:\n      - set: { field: severity_number, value: high }\n",
+        "    ops:\n      - set: { field: attributes.x, value: [1, 2] }\n",
         "op 0",
-        &["severity_number", "integer", "\"high\""],
+        &["value", "string, number, bool or null"],
     );
     rejects(
-        "    ops:\n      - set: { field: severity_text, value: 3 }\n",
+        "    ops:\n      - set: { field: attributes.x, value: {a: 1} }\n",
         "op 0",
-        &["severity_text", "string", "3"],
-    );
-    rejects(
-        "    ops:\n      - set: { field: trace_id, value: true }\n",
-        "op 0",
-        &["trace_id", "string", "true"],
-    );
-    rejects(
-        "    ops:\n      - set: { field: span_id, value: 1.5 }\n",
-        "op 0",
-        &["span_id", "string", "1.5"],
-    );
-    rejects(
-        "    ops:\n      - set: { field: time_unix_nano, value: -1 }\n",
-        "op 0",
-        &["time_unix_nano", "-1"],
+        &["value", "string, number, bool or null"],
     );
 }
 
@@ -216,20 +201,31 @@ fn a_set_literal_of_the_right_type_or_null_is_accepted() {
 }
 
 #[test]
-fn hash_of_a_field_that_cannot_hold_a_string_is_rejected() {
+fn hash_is_refused_at_load_only_for_meta_since_a_value_is_judged_per_record() {
+    // Whether a value can be hashed is known only when there is one, so `hash` is unapplied
+    // with cause `type` on a record rather than refused at load.
+    for field in [
+        "severity_number",
+        "severity_text",
+        "body",
+        "attributes.list",
+    ] {
+        assert!(
+            build(&format!("    ops:\n      - hash: {{ field: {field} }}\n")).is_ok(),
+            "{field}"
+        );
+    }
     rejects(
-        "    ops:\n      - hash: { field: severity_number }\n",
+        "    ops:\n      - hash: { field: meta.tenant }\n",
         "op 0",
-        &["hash", "severity_number", "integer", "hash writes a string"],
+        &["meta.tenant", "the pipeline's"],
     );
-    assert!(build("    ops:\n      - hash: { field: severity_text }\n").is_ok());
-    assert!(build("    ops:\n      - hash: { field: body }\n").is_ok());
 }
 
 #[test]
 fn from_equal_to_to_is_rejected_on_parsed_paths() {
     rejects(
-        "    ops:\n      - rename: { from: attributes.http.path, to: 'attributes.\"http.path\"' }\n",
+        "    ops:\n      - rename: { from: attributes.\"http.path\", to: 'attributes.\"http.path\"' }\n",
         "op 0",
         &["rename", "from", "to", "same field"],
     );
@@ -279,15 +275,15 @@ fn every_op_that_writes_or_removes_a_meta_path_is_rejected() {
         ("hash: { field: meta.tenant }", "`field`"),
         ("delete: { fields: [meta.tenant] }", "`fields`"),
         (
-            "rename: { from: meta.tenant, to: resource.tenant.id }",
+            "rename: { from: meta.tenant, to: resource.\"tenant.id\" }",
             "`from`",
         ),
         (
-            "rename: { from: resource.tenant.id, to: meta.tenant }",
+            "rename: { from: resource.\"tenant.id\", to: meta.tenant }",
             "`to`",
         ),
         (
-            "copy: { from: resource.tenant.id, to: meta.tenant }",
+            "copy: { from: resource.\"tenant.id\", to: meta.tenant }",
             "`to`",
         ),
     ] {
@@ -307,7 +303,7 @@ fn every_op_that_writes_or_removes_a_meta_path_is_rejected() {
 fn copy_from_a_meta_path_is_how_a_pipeline_value_enters_a_record() {
     build(
         "    ops:
-      - copy: { from: meta.tenant, to: resource.tenant.id }
+      - copy: { from: meta.tenant, to: resource.\"tenant.id\" }
       - copy: { from: meta.ingestion_time, to: observed_time_unix_nano }
       - copy: { from: meta.delivery_count, to: attributes.delivery }
       - copy: { from: meta.id, to: id }

@@ -1,1 +1,1 @@
-rejected: 'node `out`: unknown field `timeout`, expected one of `url`, `stream`, `subject`'
+rejected: 'node `out`: unknown field `timeout`, expected one of `url`, `stream`, `subject`, `encoding`'

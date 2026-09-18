@@ -1,9 +1,9 @@
 acks: [ack, ack, ack]
 sinks:
   archive:
-    - payload: {kind: log, body: a, resource: {log.format: Linux}}
+    - payload: {body: a, resource: {log.format: Linux}}
   search:
-    - payload: {kind: log, body: a, resource: {log.format: Linux}}
+    - payload: {body: a, resource: {log.format: Linux}}
   rest:
-    - payload: {kind: log, body: b, resource: {log.format: Apache}}
-    - payload: {kind: log, body: c, resource: {log.format: Mac}}
+    - payload: {body: b, resource: {log.format: Apache}}
+    - payload: {body: c, resource: {log.format: Mac}}

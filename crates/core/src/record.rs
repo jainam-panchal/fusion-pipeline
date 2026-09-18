@@ -1,18 +1,26 @@
-//! The flat, OTLP-semantic record every stage operates on.
+//! The record every stage operates on: whatever JSON the producer sent.
 //!
-//! One JSON object per message on the wire, using OTLP field names. `body` is opaque to
-//! sources; stages parse content out of it into `attributes`.
+//! A record is one [`serde_json::Value`]. There is no field list, no declared type and no
+//! default: an object, an array, a string and a number all decode, nothing is dropped on the
+//! way in and nothing is added on the way out. The sink writes the record as the last stage
+//! left it (issue #79, ADR 0008).
+//!
+//! The pipeline's own view of the record — its id, tenant, ingestion time and delivery count
+//! — is [`crate::meta::Meta`], which lives beside the record and never inside it (ADR 0005).
+//! [`RecordId`] and [`Kind`] below are that view's types, resolved at intake from the
+//! message's headers (ADR 0007); a payload field spelled `id` or `kind` is the producer's
+//! data, which the pipeline never reads.
 
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::closed_set::closed_set;
 
-/// A record id: the one a message's transport gives, on the record's `Meta` (a message
-/// without one is negatively acknowledged), and the payload's `id` field, which the pipeline
-/// never reads and a stage may change or drop (ADR 0007).
+/// A record id: the one a message's transport gives, on the record's `Meta`. A message
+/// without one is negatively acknowledged. The payload may hold a field spelled `id`; it is
+/// data like any other and is never read for this (ADR 0007).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct RecordId(pub u64);
@@ -40,9 +48,9 @@ impl<'de> Deserialize<'de> for RecordId {
 
 closed_set! {
     serde;
-    /// Signal kind. Only `log` is processed, decided by the engine at intake from the kind
-    /// the transport gives; the payload's `kind` field is data the pipeline never reads. Its
-    /// JSON form is its name, [`Kind::as_str`].
+    /// Signal kind, as the message's `Fusion-Record-Kind` header gives it. Only `log` is
+    /// processed, decided by the engine at intake from the arrival; a payload field spelled
+    /// `kind` is data the pipeline never reads. Its JSON form is its name, [`Kind::as_str`].
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     #[non_exhaustive]
     pub enum Kind {
@@ -55,63 +63,54 @@ closed_set! {
     }
 }
 
-/// A record with no `kind` is a `log`.
+/// A message with no `Fusion-Record-Kind` header is a `log`.
 impl Default for Kind {
     fn default() -> Self {
         Self::Log
     }
 }
 
-/// A flat OTLP-semantic record.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[non_exhaustive]
-pub struct Record {
-    /// The payload's id, never read by the pipeline; `None` for a record that arrived
-    /// without one or whose id a stage removed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<RecordId>,
-    /// The payload's signal kind, never read by the pipeline; `log` by default.
-    #[serde(default)]
-    pub kind: Kind,
-    /// Event time in nanoseconds since the Unix epoch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub time_unix_nano: Option<u64>,
-    /// Time the record was observed by the collector.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_time_unix_nano: Option<u64>,
-    /// Severity as text, e.g. `ERROR`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub severity_text: Option<String>,
-    /// OTLP severity number, 1..=24.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub severity_number: Option<i32>,
-    /// Opaque body. Usually a string; never interpreted by sources.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<Value>,
-    /// Record attributes.
-    #[serde(default, skip_serializing_if = "Map::is_empty")]
-    pub attributes: Map<String, Value>,
-    /// Resource attributes. Payload: a `tenant.id` key here is the producer's data, and the
-    /// pipeline never reads its own tenant from it.
-    #[serde(default, skip_serializing_if = "Map::is_empty")]
-    pub resource: Map<String, Value>,
-    /// Instrumentation scope attributes.
-    #[serde(default, skip_serializing_if = "Map::is_empty")]
-    pub scope: Map<String, Value>,
-    /// Trace id, hex.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_id: Option<String>,
-    /// Span id, hex.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub span_id: Option<String>,
+/// One record: any JSON value, kept as it was sent.
+///
+/// The pipeline never reads a field of its own out of it and never writes one into it. A
+/// stage reaches inside through a [`crate::path::FieldPath`], which is the only thing that
+/// knows the shape of a particular producer's data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Record(pub Value);
+
+/// A record nothing has been put in yet. Only tests and a source that skips decoding (the
+/// NATS source, for a message the arrival already rejected) build one.
+impl Default for Record {
+    fn default() -> Self {
+        Self(Value::Null)
+    }
 }
 
 impl Record {
-    /// Parse a record from its JSON wire form.
+    /// A record holding `value`.
+    #[must_use]
+    pub const fn new(value: Value) -> Self {
+        Self(value)
+    }
+
+    /// The record as a JSON value.
+    #[must_use]
+    pub const fn value(&self) -> &Value {
+        &self.0
+    }
+
+    /// The record's JSON value, consuming the record.
+    #[must_use]
+    pub fn into_value(self) -> Value {
+        self.0
+    }
+
+    /// Parse a record from its JSON wire form. Any JSON value is a record.
     ///
     /// # Errors
     ///
-    /// Returns the serde error when `json` is not a record-shaped object.
+    /// Returns the serde error when `json` is not JSON at all.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
@@ -120,8 +119,9 @@ impl Record {
     ///
     /// # Errors
     ///
-    /// Returns the serde error if a value cannot be serialized (it cannot for this shape).
+    /// Returns the serde error if a value cannot be serialized. A record decoded from JSON,
+    /// or built through core's write rules, always can.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
+        serde_json::to_string(&self.0)
     }
 }

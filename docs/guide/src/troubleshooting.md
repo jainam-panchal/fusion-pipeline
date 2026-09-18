@@ -79,15 +79,31 @@ The subject did not name a tenant and there was no valid `Fusion-Tenant` header.
 
 ## A field is missing or changed in the output
 
-- A top-level payload key that is not a record field is dropped. Move it under `attributes`.
-- `kind: log` is added when the payload had no `kind`.
+- Nothing is dropped for being unexpected, and nothing is added. If a key is missing, a stage removed it.
 - `extract` writes every value as text, so a number such as a PID comes out as `"4711"`.
 - Check the `edit` ops, which run in order.
+- A write makes its path exist and replaces what is in the way, so `set {field: body.parsed}` on a `body` that was text leaves an object and the text is gone. See [field paths](field-paths.md#reading-and-writing).
+- Object keys come back sorted. Every key and value survives; the order does not.
+
+## A stage keeps everything, or nothing, or drops everything
+
+Most often the path names nothing. A path that matches nothing is not an error: it reads as null on every record, so a whole stage gets one answer.
+
+| What you see | Likely cause |
+|---|---|
+| `filter action: keep` keeps nothing | The condition's path is misspelled, or a dotted name needs quotes. |
+| `filter action: drop` keeps everything | The same. |
+| Every record takes a `route` default | No label's condition can be true. |
+| `dedupe` drops everything after the first | Every record hashes the same, because the key names nothing. |
+| `sample mode: consistent` keeps all or none | The same. |
+| `edit` counts every record on `edit_unapplied_total` with cause `absent` | The op's `from` names nothing. |
+
+Check the path against a real message. A key whose name holds a dot needs quotes: `resource."log.format"`, not `resource.log.format`. See [field paths](field-paths.md#a-path-that-matches-nothing-is-not-an-error).
 
 ## A condition or pattern does not match
 
 - `503` and `"503"` are different. Check how the producer sends numbers.
-- `attributes.http.status` is the flat key `http.status`, not a nested object.
+- `attributes."http.status"` is the key `http.status`; `attributes.http.status` is the key `status` inside the key `http`. Quotes decide which.
 - `=~` searches anywhere in the text. Use `^` and `$` to match the whole text.
 - In a condition, write `"\\d"` for `\d`. In `pattern:`, use single YAML quotes and write `\d`.
 - A field that is not text never matches `=~`.
