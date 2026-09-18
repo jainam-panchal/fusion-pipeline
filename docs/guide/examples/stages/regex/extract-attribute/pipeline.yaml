@@ -1,0 +1,9 @@
+nodes:
+  - id: user
+    type: extract
+    field: attributes.msg
+    pattern: 'user=(?<user>\w+)'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

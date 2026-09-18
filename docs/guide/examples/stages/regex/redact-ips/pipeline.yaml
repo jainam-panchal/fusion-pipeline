@@ -1,0 +1,10 @@
+nodes:
+  - id: mask_ips
+    type: redact
+    fields: [body, attributes.peer, attributes.port]
+    pattern: '\b\d{1,3}(?:\.\d{1,3}){3}\b'
+    replace: '[ip]'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

@@ -1,0 +1,6 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: "from 10.0.0.1", attributes: {peer: "10.0.0.1"}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: "10.0.0.1", attributes: {peer: "10.0.0.1"}}

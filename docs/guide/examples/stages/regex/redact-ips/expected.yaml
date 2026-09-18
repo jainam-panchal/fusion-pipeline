@@ -1,0 +1,5 @@
+acks: [ack, ack]
+sinks:
+  out:
+    - payload: {kind: log, body: "failed login from [ip] via [ip]", attributes: {peer: "[ip]", port: 22, host: "10.9.9.9"}}
+    - payload: {kind: log, body: no address here}

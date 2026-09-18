@@ -1,0 +1,10 @@
+nodes:
+  - id: mask_mail
+    type: redact
+    fields: [body]
+    pattern: '(?<user>\w+)@example\.com'
+    replace: '$user@hidden'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

@@ -1,0 +1,5 @@
+acks: [ack, ack]
+sinks:
+  out:
+    - payload: {kind: log, body: "user=carol", attributes: {msg: 7}}
+    - payload: {kind: log, body: "user=dave"}

@@ -1,0 +1,9 @@
+nodes:
+  - id: repeated
+    type: extract
+    field: body
+    pattern: '\b(?<word>\w+) \1\b'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

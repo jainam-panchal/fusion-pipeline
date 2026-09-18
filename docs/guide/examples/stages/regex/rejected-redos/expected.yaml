@@ -1,0 +1,1 @@
+rejected: 'node `parse`: pattern `^(?<words>(\w+\s?)*)$`: ReDoS risk: nested unbounded quantifiers at offset 10'

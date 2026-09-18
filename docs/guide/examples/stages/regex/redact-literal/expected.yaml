@@ -1,0 +1,4 @@
+acks: [ack]
+sinks:
+  out:
+    - payload: {kind: log, body: "mail $user@hidden now"}

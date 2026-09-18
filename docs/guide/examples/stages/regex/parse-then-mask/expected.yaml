@@ -1,0 +1,4 @@
+acks: [ack]
+sinks:
+  out:
+    - payload: {kind: log, body: "WARN: login from [ip]", attributes: {level: WARN, message: "login from [ip]"}}

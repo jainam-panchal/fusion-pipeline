@@ -1,0 +1,6 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: login, attributes: {msg: "login ok user=alice"}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: login, attributes: {msg: "user=bob", user: old}}

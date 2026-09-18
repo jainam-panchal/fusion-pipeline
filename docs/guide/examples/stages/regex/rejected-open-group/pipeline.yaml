@@ -1,0 +1,13 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: parse
+    type: extract
+    field: body
+    pattern: 'user=(?<user>\w+'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
