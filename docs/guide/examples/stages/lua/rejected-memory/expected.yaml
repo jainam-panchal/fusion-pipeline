@@ -1,0 +1,1 @@
+rejected: 'node `enrich`: `limits.memory_kib` must be at least 64'

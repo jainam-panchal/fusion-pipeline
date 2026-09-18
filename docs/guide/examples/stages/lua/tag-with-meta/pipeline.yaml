@@ -1,0 +1,13 @@
+nodes:
+  - id: tag
+    type: lua
+    source: |
+      function process(record, meta)
+        record.severity_text = string.upper(record.severity_text)
+        record.attributes["tenant"] = meta.tenant
+        return record
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

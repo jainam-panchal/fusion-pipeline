@@ -1,0 +1,14 @@
+nodes:
+  - id: parse_pairs
+    type: lua
+    source: |
+      function process(record)
+        for k, v in string.gmatch(record.body, "(%w+)=(%S+)") do
+          record.attributes[k] = v
+        end
+        return record
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

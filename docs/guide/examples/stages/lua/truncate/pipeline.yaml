@@ -1,0 +1,15 @@
+nodes:
+  - id: short_body
+    type: lua
+    source: |
+      function process(record)
+        if type(record.body) == "string" and #record.body > 10 then
+          record.attributes["body.length"] = #record.body
+          record.body = string.sub(record.body, 1, 10) .. "..."
+        end
+        return record
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

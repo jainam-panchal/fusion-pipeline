@@ -1,0 +1,12 @@
+nodes:
+  - id: wrong_drop
+    type: lua
+    on_error: pass
+    source: |
+      function process(record)
+        return false
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

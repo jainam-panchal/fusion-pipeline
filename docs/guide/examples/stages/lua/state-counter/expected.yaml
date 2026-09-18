@@ -1,0 +1,5 @@
+acks: [ack, ack]
+sinks:
+  out:
+    - payload: {kind: log, body: disk full, attributes: {seen: 1}}
+    - payload: {kind: log, body: disk full, attributes: {seen: 2}}

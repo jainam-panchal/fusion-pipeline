@@ -1,0 +1,17 @@
+nodes:
+  - id: split
+    type: lua
+    source: |
+      function process(record)
+        local out = {}
+        for line in record.body:gmatch("[^\n]+") do
+          local r = record:copy()
+          r.body = line
+          out[#out + 1] = r
+        end
+        return out
+      end
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
