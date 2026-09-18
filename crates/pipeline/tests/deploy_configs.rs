@@ -72,9 +72,9 @@ fn record(id: u64, severity: &str, format: &str) -> Record {
 /// [`host_record`] with the severity and log format the routing example switches on.
 fn record_from_host(id: u64, severity: &str, format: &str, host: &str) -> Record {
     let mut record = host_record(id, Some(host));
-    record.0["body"] = serde_json::Value::String("line".to_owned());
-    record.0["severity_text"] = serde_json::Value::String(severity.to_owned());
-    record.0["resource"]["log.format"] = serde_json::Value::String(format.to_owned());
+    record.value_mut()["body"] = serde_json::Value::String("line".to_owned());
+    record.value_mut()["severity_text"] = serde_json::Value::String(severity.to_owned());
+    record.value_mut()["resource"]["log.format"] = serde_json::Value::String(format.to_owned());
     record
 }
 

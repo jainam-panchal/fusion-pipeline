@@ -10,6 +10,7 @@
 //! the source drives its receive loop with `block_on` from the source thread and the sink
 //! awaits its `PubAck`s with `block_on` from the worker that wrote.
 
+pub mod codec;
 pub mod config;
 pub mod headers;
 pub mod sink;
@@ -32,7 +33,8 @@ use fusion_core::signals::Signals;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
-pub use config::{Codec, Encoding, SinkParams, SourceParams};
+pub use codec::{Codec, Encoding};
+pub use config::{SinkParams, SourceParams};
 pub use sink::NatsSink;
 pub use source::NatsSource;
 

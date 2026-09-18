@@ -7,7 +7,7 @@ An observability pipeline that takes log records from NATS JetStream, runs them 
 ### Data
 
 **Record**:
-The single unit of data flowing through the pipeline: one flat OTLP-shaped log with `id`, `kind`, `body`, `attributes`, `resource`, `scope` and trace fields.
+The single unit of data flowing through the pipeline: whatever JSON the producer sent. An object, a list, a piece of text and a number are all records; there is no field list, no declared type and no default, and nothing is dropped at decode or added on the way out (ADR 0008). OTLP names such as `body`, `severity_text` and `attributes` are ordinary keys the pipeline treats no differently.
 _Avoid_: event, log line, entry
 
 **Message**:
@@ -45,7 +45,7 @@ The owner of a record, as the meta names it: the one its transport names (the NA
 _Avoid_: customer, org, namespace
 
 **Body**:
-The opaque payload of a record. Sources never interpret it; stages parse content out of it into attributes.
+By convention, the key holding a record's message text. It is an ordinary key: sources never interpret it, and a stage parses content out of it into wherever its `into` says. A record from a `codec: text` source has no keys at all, being the line itself.
 
 ### Topology
 
@@ -88,7 +88,7 @@ Two or more nodes consuming the same upstream output. The record is copy-on-writ
 One node with a list in `from`, consuming several upstream outputs.
 
 **Field path**:
-The one dotted path every stage uses to name a record field: `root ("." segment)*`. Under `attributes`, `resource` or `scope` the segments joined with dots are the flat map key (`attributes.http.status` is the `http.status` key). Segments with characters outside letters, digits, `_` and `-` are double-quoted.
+The one dotted path every stage uses to name part of a record: names joined with dots, walked over the record's JSON. A name may be a key of an object or a position in a list (`test2.key2`, `attributes.0.value.intValue`). A name with characters outside letters, digits, `_` and `-` is double-quoted, so `resource."log.format"` is the key `log.format` while `resource.log.format` is three levels. `.` is the whole record, and a leading dot names the record only (`."log.format"`, `.0`, `.meta`). A path that matches nothing reads as null; a write makes its path exist.
 _Avoid_: selector, accessor, bracket path
 
 **Meta path**:
@@ -188,7 +188,7 @@ A `lua` node's `on_error`: `pass` forwards the record as it entered the node (th
 _Avoid_: fallback, on_fail
 
 **Output check**:
-The validation of what `process` returned before it leaves the stage: every key a record field, strings under the output cap, not an empty table or list, every table read as a list (a marked one, one with keys `1..n`, or the list returned for a split) holding only its positions `1..n`, and every value, once converted from Lua (an integral float to an integer, an `id` given as decimal text to the integer), accepted by core's write rules onto a fresh record. No field is required and none must come back unchanged. A refusal is a Lua error of kind `output` with core's message.
+The validation of what `process` returned before it leaves the stage: every value has a JSON form (no function, coroutine, userdata, non-finite number or non-UTF-8 string), strings under the output cap, tables nested at most 127 below the record, not an empty table or list, not a boolean (return `nil` to drop), and every table read as a list (a marked one, one with keys `1..n`, or the list returned for a split) holding only its positions `1..n`. No key and no type is checked, since a record is any JSON. A returned table carrying the record metatable is one record whatever its shape. A refusal is a Lua error of kind `output`.
 _Avoid_: schema validation, sanitising
 
 **Sandbox**:

@@ -205,9 +205,14 @@ const fn is_segment_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
-/// The list position `segment` names, if it names one.
+/// The list position `segment` names, if it names one: digits with no leading zero, so one
+/// segment cannot mean two things by the record's shape. `007` would otherwise be position 7
+/// in a list and the key `007` in an object; it is only ever the key.
 fn position(segment: &str) -> Option<usize> {
     if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if segment.len() > 1 && segment.starts_with('0') {
         return None;
     }
     segment.parse().ok()
@@ -591,7 +596,7 @@ impl FieldPath {
                 MetaValue::U64(n) => FieldValue::Num(Num::Int(i128::from(n))),
             },
             Target::Record(segments) => {
-                read_at(&record.0, segments).map_or(FieldValue::Null, FieldValue::from_json)
+                read_at(record.value(), segments).map_or(FieldValue::Null, FieldValue::from_json)
             }
         }
     }
@@ -635,20 +640,20 @@ impl WritePath {
     /// `Meta`; a path that matches nothing reads as [`FieldValue::Null`].
     #[must_use]
     pub fn read<'a>(&self, record: &'a Record) -> FieldValue<'a> {
-        read_at(&record.0, &self.segments).map_or(FieldValue::Null, FieldValue::from_json)
+        read_at(record.value(), &self.segments).map_or(FieldValue::Null, FieldValue::from_json)
     }
 
     /// Write `value`, creating what the path needs: a missing key is added, and a scalar or
     /// a list with no such position in the way is replaced by an object. A write through the
     /// whole-record path, `.`, replaces the record.
     pub fn write(&self, record: &mut Record, value: Value) {
-        write_at(&mut record.0, &self.segments, value);
+        write_at(record.value_mut(), &self.segments, value);
     }
 
     /// Remove what the path names, returning it, or `None` when it was not there. Removing a
     /// list position closes the gap; removing `.` leaves a `null` record.
     pub fn remove(&self, record: &mut Record) -> Option<Value> {
-        remove_at(&mut record.0, &self.segments)
+        remove_at(record.value_mut(), &self.segments)
     }
 }
 

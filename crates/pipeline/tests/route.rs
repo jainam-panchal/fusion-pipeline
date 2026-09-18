@@ -38,7 +38,7 @@ struct Touch;
 
 impl Stage for Touch {
     fn process(&self, mut record: Record, _ctx: &Context<'_>) -> StageOutput {
-        record.0["attributes"]["touched"] = serde_json::Value::Bool(true);
+        record.value_mut()["attributes"]["touched"] = serde_json::Value::Bool(true);
         StageOutput::Pass(record)
     }
 }

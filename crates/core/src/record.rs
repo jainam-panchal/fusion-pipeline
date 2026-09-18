@@ -77,7 +77,7 @@ impl Default for Kind {
 /// knows the shape of a particular producer's data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Record(pub Value);
+pub struct Record(Value);
 
 /// A record nothing has been put in yet. Only tests and a source that skips decoding (the
 /// NATS source, for a message the arrival already rejected) build one.
@@ -100,6 +100,13 @@ impl Record {
         &self.0
     }
 
+    /// The record as a JSON value, to change in place. A stage reaches inside through a
+    /// [`crate::path::WritePath`]; this is for a caller holding the whole record, such as a
+    /// source decoding one or a test building one.
+    pub const fn value_mut(&mut self) -> &mut Value {
+        &mut self.0
+    }
+
     /// The record's JSON value, consuming the record.
     #[must_use]
     pub fn into_value(self) -> Value {
@@ -120,7 +127,7 @@ impl Record {
     /// # Errors
     ///
     /// Returns the serde error if a value cannot be serialized. A record decoded from JSON,
-    /// or built through core's write rules, always can.
+    /// or built by writing through a path, always can.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(&self.0)
     }

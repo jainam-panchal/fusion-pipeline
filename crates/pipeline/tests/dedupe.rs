@@ -668,8 +668,8 @@ fn the_window_follows_the_transports_time_not_the_producers_clock() {
         // are past the 10 s window, the third is the second's repeat.
         for (id, entered_s) in [(101, 1_000), (102, 1_020), (103, 1_025)] {
             let mut stamped_by_producer = record(id, "disk full");
-            stamped_by_producer.0["observed_time_unix_nano"] = secs(7).into();
-            stamped_by_producer.0["time_unix_nano"] = secs(7).into();
+            stamped_by_producer.value_mut()["observed_time_unix_nano"] = secs(7).into();
+            stamped_by_producer.value_mut()["time_unix_nano"] = secs(7).into();
             let pushed = h.push_at(stamped_by_producer, secs(entered_s));
             assert_eq!(
                 pushed.wait(WAIT),
@@ -682,4 +682,51 @@ fn the_window_follows_the_transports_time_not_the_producers_clock() {
         assert_eq!(stored_holder(&h), holder(102, 1_020), "workers={workers}");
         h.finish();
     });
+}
+
+/// A `dedupe` key naming free-form paths — a top-level key, a nested one and a key whose name
+/// holds a dot — keys on the values the config named, and two records agreeing on all three
+/// share one state key (issue #79). The state store is the only place this is visible.
+#[test]
+fn a_key_of_free_form_paths_hashes_the_values_the_config_named() {
+    const YAML: &str = r#"
+nodes:
+  - id: dd
+    type: dedupe
+    key: [level, test2.key2, resource."log.format"]
+    window: 10s
+  - id: out
+    type: sink.memory
+"#;
+    let h = start(YAML, 1);
+    // A distinct id per record, since `dedupe` passes a record whose id already holds the
+    // key, reading it as the holder redelivered.
+    let of = |id: u64, level: &str| {
+        Record::new(serde_json::json!({
+            "id": id,
+            "level": level,
+            "test2": {"key2": 123},
+            "resource": {"log.format": "Linux"},
+        }))
+    };
+
+    let first = h.push(of(1, "error"));
+    assert_eq!(first.wait(WAIT), Some(AckOutcome::Ack));
+    let after_first = h.state.keys();
+    assert_eq!(after_first.len(), 1, "one key for the three values");
+
+    // The same three values: the same key, and the record drops as a duplicate.
+    let repeat = h.push(of(2, "error"));
+    assert_eq!(repeat.wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(h.state.keys(), after_first, "no new key");
+
+    // One value different: a different key, and the record passes.
+    let other = h.push(of(3, "warn"));
+    assert_eq!(other.wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(h.state.keys().len(), 2, "a second key for the second value");
+
+    assert_eq!(h.sinks.records("out").len(), 2, "the repeat was dropped");
+    let dropped = [("tenant", "acme"), ("stage", "dd"), ("reason", "dedupe")];
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &dropped), 1);
+    h.finish();
 }

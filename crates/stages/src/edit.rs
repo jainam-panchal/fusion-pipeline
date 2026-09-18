@@ -288,24 +288,20 @@ fn parse_op(
         EditOp::Rename | EditOp::Copy => {
             let p: MoveParams = at.params(body)?;
             let to = at.target("to", &p.to)?;
-            let same = |from: &FieldPath| {
-                (*from == to.path()).then(|| at.error("`from` and `to` are the same field"))
-            };
+            let from = at.path("from", &p.from)?;
+            if from == to.path() {
+                return Err(at.error("`from` and `to` are the same field"));
+            }
             if kind == EditOp::Rename {
                 // `rename` removes its source, so the source is a target too.
-                let from = at.target("from", &p.from)?;
-                if let Some(error) = same(&from.path()) {
-                    return Err(error);
-                }
+                let from = from
+                    .writable()
+                    .map_err(|e| at.error(format!("`from`: {e}")))?;
                 Op::Rename {
                     from: Labelled::new(from),
                     to,
                 }
             } else {
-                let from = at.path("from", &p.from)?;
-                if let Some(error) = same(&from) {
-                    return Err(error);
-                }
                 Op::Copy {
                     from: Labelled::new(from),
                     to,

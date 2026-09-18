@@ -110,9 +110,9 @@ nodes:
     source: |
       function process(record)
         -- A record is any JSON, so nothing is there unless the producer sent it
-        -- or a stage wrote it (issue #79).
-        record.attributes = record.attributes or {}
-        local content = record.attributes["Content"]
+        -- or a stage wrote it (issue #79). Create the map only where a value is
+        -- about to go in it: the pipeline adds nothing it was not told to add.
+        local content = (record.attributes or {})["Content"]
         if type(content) == "string" then
           record.attributes["content_bytes"] = #content
         end

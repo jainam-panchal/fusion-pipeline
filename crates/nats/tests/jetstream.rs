@@ -23,7 +23,8 @@ use fusion_core::registry::Registry;
 use fusion_core::signals::Signals;
 use fusion_core::stage::{Context, Stage, StageError, StageOutput};
 use fusion_core::trace::{InMemoryTraceSink, TraceKey, TraceSampling};
-use fusion_nats::config::{Codec, Encoding, SinkParams, SourceParams, url_from_env};
+use fusion_nats::codec::{Codec, Encoding};
+use fusion_nats::config::{SinkParams, SourceParams, url_from_env};
 use fusion_nats::headers::{INGESTION_TIME, INGESTION_TIME_KIND, RECORD_ID, RECORD_KIND, TENANT};
 use fusion_nats::{Nats, NatsError};
 use futures::StreamExt;
@@ -679,7 +680,7 @@ impl Stage for RevealOnRedelivery {
                 serde_json::json!(meta.delivery_count),
             ),
         ] {
-            record.0["attributes"][key] = value;
+            record.value_mut()["attributes"][key] = value;
         }
         StageOutput::Pass(record)
     }

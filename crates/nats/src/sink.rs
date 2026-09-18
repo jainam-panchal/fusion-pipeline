@@ -21,7 +21,7 @@ use async_nats::jetstream;
 use fusion_core::io::{Outgoing, Sink, SinkError};
 use tokio::runtime::Runtime;
 
-use crate::config::Encoding;
+use crate::codec::Encoding;
 use crate::headers;
 
 /// A JetStream sink. Build one through [`crate::Nats::sink`].

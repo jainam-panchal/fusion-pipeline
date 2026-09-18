@@ -70,10 +70,13 @@ nodes:
 
       function process(record)
         -- A record is any JSON, so nothing is there unless the producer sent it
-        -- or a stage wrote it (issue #79).
-        record.attributes = record.attributes or {}
-        local class = class_of(record.attributes["http.status"])
-        if class then record.attributes["http.status_class"] = class end
+        -- or a stage wrote it (issue #79). Create the map only where a value is
+        -- about to go in it: the pipeline adds nothing it was not told to add.
+        local class = class_of((record.attributes or {})["http.status"])
+        if class then
+          record.attributes = record.attributes or {}
+          record.attributes["http.status_class"] = class
+        end
         if type(record.body) ~= "string" or not record.body:find("\n") then
           return record
         end

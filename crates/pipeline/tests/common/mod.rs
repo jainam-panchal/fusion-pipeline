@@ -227,7 +227,7 @@ pub fn body_record(id: u64, body: &str) -> Record {
 pub fn host_record(id: u64, host: Option<&str>) -> Record {
     let mut record = body_record(id, "x");
     if let Some(host) = host {
-        record.0["resource"]["host"] = serde_json::Value::String(host.to_owned());
+        record.value_mut()["resource"]["host"] = serde_json::Value::String(host.to_owned());
     }
     record
 }

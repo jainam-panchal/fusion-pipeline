@@ -95,7 +95,7 @@ fn a_record_whose_source_gives_no_time_leaves_no_end_to_end_sample() {
     // The record says when it was observed; only a transport's time counts, and there is
     // none, so the ingestion time is the worker clock's and end to end is not measured.
     let mut observed = record(1);
-    observed.0["observed_time_unix_nano"] = published_ago(1_000_000_000).into();
+    observed.value_mut()["observed_time_unix_nano"] = published_ago(1_000_000_000).into();
     assert_eq!(h.push(observed).wait(WAIT), Some(AckOutcome::Ack));
 
     assert!(

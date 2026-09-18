@@ -97,7 +97,7 @@ If `to` does not take the value, nothing changes, and `from` stays. `from` and `
 
 `meta.tenant` is text. `meta.id`, `meta.ingestion_time` and `meta.delivery_count` are numbers.
 
-The pipeline does not check at start that `to` takes the value `from` will have. A `copy` from `meta.tenant` to `severity_number` loads, and then is unapplied with cause `type` on every record.
+No path has a type, so a `copy` lands wherever it is sent: `copy {from: meta.tenant, to: severity_number}` writes the tenant's text there. A `copy` is unapplied only when its source reads as null, with cause `absent`.
 
 ## hash
 

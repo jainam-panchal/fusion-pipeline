@@ -16,6 +16,19 @@ A condition compares a [field path](field-paths.md) on the left with a value on 
 
 The left side is always a path and the right side always a value. Two fields cannot be compared with each other.
 
+A path whose first name is not a plain word needs a leading dot, because the reader would
+otherwise take it for a value: write `."log.format" == "Linux"` and `.0 == 5`, not
+`"log.format" == "Linux"`. `.` on its own is the whole record, which is what a raw line from a
+[`codec: text`](nats.md) source is:
+
+```yaml
+condition: . =~ "^ERROR"
+```
+
+A path that matches nothing reads as null, so `severty_text == null` is true for every record.
+That is not an error, and it is the usual reason a `filter` keeps nothing. See
+[field paths](field-paths.md#a-path-that-matches-nothing-is-not-an-error).
+
 ## Operators
 
 | Operator | True when |

@@ -3,8 +3,9 @@ nodes:
     type: lua
     source: |
       function process(record)
-        record.attributes = record.attributes or {}
         for k, v in string.gmatch(record.body, "(%w+)=(%S+)") do
+          -- Only where a value is about to go in: nothing is added otherwise.
+          record.attributes = record.attributes or {}
           record.attributes[k] = v
         end
         return record

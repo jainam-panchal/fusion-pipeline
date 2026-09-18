@@ -29,7 +29,7 @@ impl Stage for Reveal {
             ),
             ("meta.delivery_count", json!(meta.delivery_count)),
         ] {
-            record.0["attributes"][key] = value;
+            record.value_mut()["attributes"][key] = value;
         }
         StageOutput::Pass(record)
     }
@@ -290,8 +290,8 @@ fn a_stage_rewriting_the_payload_id_moves_no_decision_and_nothing_else_in_the_pa
     for r in &out {
         assert_eq!(meta_of(r, "record_id"), json!(7), "every later stage saw 7");
         let mut untouched = r.clone();
-        untouched.0["id"] = sent.value()["id"].clone();
-        let attributes = untouched.0["attributes"]
+        untouched.value_mut()["id"] = sent.value()["id"].clone();
+        let attributes = untouched.value_mut()["attributes"]
             .as_object_mut()
             .expect("the reveal stage wrote attributes");
         attributes.retain(|key, _| !key.starts_with("meta."));
@@ -299,7 +299,7 @@ fn a_stage_rewriting_the_payload_id_moves_no_decision_and_nothing_else_in_the_pa
             // The sent record carries no `attributes` key at all; an empty map is not the
             // same value, so the key goes with its last entry.
             untouched
-                .0
+                .value_mut()
                 .as_object_mut()
                 .expect("an object")
                 .remove("attributes");

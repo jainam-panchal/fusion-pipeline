@@ -396,3 +396,19 @@ fn reading_a_scalar_path_needs_no_record_shape() {
     assert_eq!(read("b", &r), FieldValue::Bool(false));
     assert_eq!(read("missing", &r), FieldValue::Null);
 }
+
+#[test]
+fn a_position_is_digits_with_no_leading_zero() {
+    let list = record(json!({"attributes": [0, 1, 2, 3, 4, 5, 6, 7]}));
+    let object = record(json!({"attributes": {"007": "x", "7": "y"}}));
+    let meta = meta();
+
+    let plain = FieldPath::parse("attributes.7").expect("parses");
+    assert_eq!(plain.read(&list, &meta), FieldValue::Num(Num::Int(7)));
+    assert_eq!(plain.read(&object, &meta), FieldValue::Str("y"));
+
+    // `007` is a key, never a position, so one path does not mean two things by shape.
+    let padded = FieldPath::parse("attributes.007").expect("parses");
+    assert_eq!(padded.read(&object, &meta), FieldValue::Str("x"));
+    assert_eq!(padded.read(&list, &meta), FieldValue::Null);
+}

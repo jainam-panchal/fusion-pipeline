@@ -31,10 +31,10 @@ use fusion_core::memory::{AckOutcome, MemorySinks, OutgoingRecord};
 use fusion_core::meta::Arrival;
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
-use fusion_nats::SourceParams;
+use fusion_nats::codec::{Codec, Encoding};
 use fusion_nats::config::DEFAULT_TENANT_PREFIX;
-use fusion_nats::config::{Codec, Encoding};
 use fusion_nats::headers::{Received, arrival, for_meta};
+use fusion_nats::{SinkParams, SourceParams};
 use fusion_pipeline::StartError;
 use serde::Deserialize;
 use serde_json::Value;
@@ -124,7 +124,9 @@ struct Example {
     tenant_prefix: String,
     /// How the source reads a payload, so the runner decodes as the config says.
     codec: Codec,
-    sink_ids: Vec<String>,
+    /// Every sink node with the encoding it declared, so the runner compares what that sink
+    /// would actually write.
+    sinks: BTreeMap<String, Encoding>,
     input: Vec<Message>,
     expected: Expected,
 }
@@ -183,13 +185,19 @@ fn load(dir: &Path) -> Result<Loaded, String> {
             input.len()
         ));
     }
-    let sink_ids: Vec<String> = config
+    let sinks: BTreeMap<String, Encoding> = config
         .nodes
         .iter()
         .filter(|node| node.is_sink())
-        .map(|node| node.id.clone())
+        .map(|node| {
+            let encoding = node
+                .parse_params::<SinkParams>()
+                .map(|params| params.encoding)
+                .unwrap_or_default();
+            (node.id.clone(), encoding)
+        })
         .collect();
-    if let Some(unknown) = expected.sinks.keys().find(|id| !sink_ids.contains(id)) {
+    if let Some(unknown) = expected.sinks.keys().find(|id| !sinks.contains_key(*id)) {
         return Err(format!(
             "expected.yaml names `{unknown}`, which is not a sink node"
         ));
@@ -201,7 +209,7 @@ fn load(dir: &Path) -> Result<Loaded, String> {
         yaml,
         tenant_prefix,
         codec,
-        sink_ids,
+        sinks,
         input,
         expected,
     }))
@@ -290,8 +298,8 @@ fn drive(example: &Example) -> Outcome {
         })
         .collect();
     let written = example
-        .sink_ids
-        .iter()
+        .sinks
+        .keys()
         .map(|id| (id.clone(), sinks.outgoing(id)))
         .collect();
     h.finish();
@@ -354,9 +362,10 @@ fn compare(example: &Example, outcome: &Outcome) -> Vec<String> {
                         ));
                     }
                 }
-                // `raw:` is what an `encoding: text` sink writes.
+                // `raw:` is the bytes this sink writes, under the encoding it declared.
                 (None, Some(expected)) => {
-                    let bytes = Encoding::Text.encode(&got.record).expect("record encodes");
+                    let encoding = example.sinks.get(id).copied().unwrap_or_default();
+                    let bytes = encoding.encode(&got.record).expect("record encodes");
                     let written = String::from_utf8_lossy(&bytes);
                     if written != *expected {
                         problems.push(format!(

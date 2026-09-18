@@ -71,7 +71,7 @@ use futures::StreamExt;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
-use crate::config::Codec;
+use crate::codec::Codec;
 use crate::headers::{self, DeadLetter, InvalidHeader, Received};
 use crate::subject;
 
