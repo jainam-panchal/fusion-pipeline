@@ -1,0 +1,9 @@
+nodes:
+  - id: no_repeats
+    type: dedupe
+    key: [attributes.host]
+    window: 10s
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

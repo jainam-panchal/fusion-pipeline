@@ -1,0 +1,11 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: by_level
+    type: route
+    routes:
+      drop: severity_text == "DEBUG"
+    default: keep
+  - {id: out, type: sink.nats, from: by_level.keep, stream: PROCESSED, subject: processed.logs}

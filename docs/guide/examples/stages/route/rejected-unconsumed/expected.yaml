@@ -1,0 +1,1 @@
+rejected: 'route `by_format` label `other` is never consumed; add a node with `from: by_format.other`, remove the rule, or if it is only the default use `default: drop`'

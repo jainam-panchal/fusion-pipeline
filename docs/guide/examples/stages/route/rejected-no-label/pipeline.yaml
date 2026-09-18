@@ -1,0 +1,14 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: by_level
+    type: route
+    routes:
+      errors: severity_text == "ERROR"
+    default: drop
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
