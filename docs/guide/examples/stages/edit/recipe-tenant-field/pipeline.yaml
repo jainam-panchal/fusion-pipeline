@@ -2,7 +2,7 @@ nodes:
   - id: stamp_tenant
     type: edit
     ops:
-      - copy: {from: meta.tenant, to: resource.tenant.id}
+      - copy: {from: meta.tenant, to: resource."tenant.id"}
       - set: {field: attributes.pipeline, value: checkout-logs}
   - id: out
     type: sink.nats

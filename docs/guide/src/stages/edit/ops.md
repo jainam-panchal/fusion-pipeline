@@ -145,7 +145,7 @@ The digest has no salt. It works as a join key: the same input always gives the 
 
 ## Fields you can change
 
-Every record field is yours: `id`, `kind` and `resource.tenant.id` too. Changing them changes what the sink writes, and nothing else. The pipeline keeps using the record's Meta for the tenant, the record id and its decisions.
+Every record field is yours: `id`, `kind` and `resource."tenant.id"` too. Changing them changes what the sink writes, and nothing else. The pipeline keeps using the record's Meta for the tenant, the record id and its decisions.
 
 ```yaml
 # messages in

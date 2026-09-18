@@ -3,7 +3,7 @@ nodes:
     type: route
     routes:
       errors: severity_text == "ERROR"
-      checkout: resource.service.name == "checkout"
+      checkout: resource."service.name" == "checkout"
     default: drop
   - {id: errors_out, type: sink.nats, from: by_level.errors, stream: PROCESSED, subject: processed.errors}
   - {id: checkout_out, type: sink.nats, from: by_level.checkout, stream: PROCESSED, subject: processed.checkout}

@@ -36,7 +36,7 @@ The digest is the same for every record with the same email, so records can stil
 {{#include ../../../examples/stages/edit/recipe-tenant-field/expected.yaml}}
 ```
 
-The producer sent its own `resource.tenant.id`. `copy` replaces it with the tenant the pipeline knows, so the record can be trusted downstream.
+The producer sent its own `resource."tenant.id"`. `copy` replaces it with the tenant the pipeline knows, so the record can be trusted downstream.
 
 ## Keep only records a parser handled
 

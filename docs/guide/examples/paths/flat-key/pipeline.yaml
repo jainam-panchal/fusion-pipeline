@@ -1,7 +1,7 @@
 nodes:
   - id: server_errors
     type: filter
-    condition: attributes.http.status >= 500
+    condition: attributes."http.status" >= 500
     action: keep
   - id: out
     type: sink.nats

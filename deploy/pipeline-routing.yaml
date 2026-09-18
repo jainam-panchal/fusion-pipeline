@@ -26,8 +26,8 @@ nodes:
   - id: by_format
     type: route                             # reads from drop_debug, the previous node
     routes:                                 # ordered; first match wins
-      linux: resource.log.format == "Linux"
-      apache: resource.log.format == "Apache"
+      linux: resource."log.format" == "Linux"
+      apache: resource."log.format" == "Apache"
     default: other
 
   - id: parse_linux

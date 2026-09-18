@@ -67,7 +67,7 @@ The pipeline also keeps its own facts about each record. These are called **Meta
 | ingestion time | the `Fusion-Ingestion-Time` header, else the time NATS stored the message |
 | delivery count | NATS: 1 the first time, 2 on the first redelivery, and so on |
 
-Meta never comes from the payload. The pipeline does not use a payload `id` or `resource.tenant.id` for anything. It also never puts Meta into the record. It sends Meta along as headers on every message it writes.
+Meta never comes from the payload. The pipeline does not use a payload `id` or `resource."tenant.id"` for anything. It also never puts Meta into the record. It sends Meta along as headers on every message it writes.
 
 Here the payload has `id: 99` and a tenant of its own. The pipeline uses id 7 from the header and tenant `acme` from the subject, and leaves the payload's values alone.
 

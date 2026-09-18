@@ -3,7 +3,7 @@
 `filter` and `route` decide with a condition:
 
 ```yaml
-condition: severity_text == "ERROR" and attributes.http.status >= 500
+condition: severity_text == "ERROR" and attributes."http.status" >= 500
 ```
 
 A condition compares a [field path](field-paths.md) on the left with a value on the right. Combine comparisons with `and`, `or`, `not` and parentheses.

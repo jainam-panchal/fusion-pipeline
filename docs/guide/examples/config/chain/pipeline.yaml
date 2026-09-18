@@ -5,7 +5,7 @@ nodes:
     action: drop
   - id: keep_checkout
     type: filter
-    condition: resource.service.name == "checkout"
+    condition: resource."service.name" == "checkout"
     action: keep
   - id: out
     type: sink.nats
