@@ -1,0 +1,9 @@
+- subject: ingest.acme.web
+  headers: {Fusion-Record-Id: "1"}
+  payload: {body: prefix matches}
+- subject: logs.acme.web
+  headers: {Fusion-Record-Id: "2"}
+  payload: {body: prefix does not match}
+- subject: ingest.acme
+  headers: {Fusion-Record-Id: "3", Fusion-Tenant: globex}
+  payload: {body: only two words}

@@ -1,0 +1,10 @@
+source:
+  type: nats
+  stream: INGEST
+  consumer: pipeline
+  tenant_prefix: ingest
+nodes:
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

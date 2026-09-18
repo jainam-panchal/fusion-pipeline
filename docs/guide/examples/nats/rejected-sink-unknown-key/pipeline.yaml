@@ -1,0 +1,10 @@
+source:
+  type: nats
+  stream: LOGS
+  consumer: pipeline
+nodes:
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs
+    timeout: 10s
