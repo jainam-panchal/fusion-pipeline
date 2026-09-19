@@ -95,7 +95,8 @@ Each of these is accepted, not overlooked.
   high}` writes a string. What still fails at load: config syntax, unknown node types and
   keys, regex patterns, route labels, window syntax, and any write to `meta.*`. No metric
   tells a path that matches nothing from a key that is genuinely absent; a counter for it is
-  its own ticket, and until then the guide carries the symptom table.
+  its own ticket (issue #80), and until then the guide carries the symptom table in
+  `field-paths.md` and `troubleshooting.md`.
 - **A dot in a key name needs quotes.** `resource.log.format` used to mean the key
   `log.format`; it now means three levels. Every config, the loghub producer's paths and the
   guide examples are migrated, and a missed one fails silently.

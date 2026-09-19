@@ -14,7 +14,7 @@
 //! an object or a list as a table, a `codec: text` line as a Lua string — and a read-only
 //! `meta` table (`id`, `tenant`, `ingestion_time`, `delivery_count`), and returns the record
 //! to pass, `nil` to drop (reason `lua_drop`), or a list of records to split; `record:copy()`
-//! makes a deep copy for a split. Nothing is there unless the producer sent it, so a script
+//! makes a deep copy for a split, and exists only when the record is an object or a list, since a scalar record is a Lua value the script can copy by assigning it. Nothing is there unless the producer sent it, so a script
 //! adding to a table that may be absent writes `record.attributes = record.attributes or {}`
 //! first. Every key is payload: a script may write, change or drop any of them, and the
 //! pipeline keeps deciding with the record's `Meta` (ADR 0005), which every split record

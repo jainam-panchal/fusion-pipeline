@@ -12,7 +12,7 @@
 
 use fusion_core::meta::{Meta, MetaField, MetaValue};
 use fusion_core::record::{Record, RecordId};
-use mlua::{Integer, Table, Value as LuaValue};
+use mlua::{Function, Integer, Table, Value as LuaValue};
 use serde_json::{Map, Value};
 
 /// A returned record the stage refuses. The message names the field.
@@ -171,6 +171,20 @@ struct Reader<'l> {
     depth: usize,
     /// The mark of a table that is a list.
     list: &'l ListMark,
+    /// The marks of the record table, whose shape is carried rather than guessed.
+    records: &'l RecordMark,
+}
+
+impl<'l> Reader<'l> {
+    fn new(cap: usize, list: &'l ListMark, records: &'l RecordMark) -> Self {
+        Self {
+            used: 0,
+            cap,
+            depth: 0,
+            list,
+            records,
+        }
+    }
 }
 
 impl Reader<'_> {
@@ -259,10 +273,16 @@ impl Reader<'_> {
                 )
             }
             LuaValue::Table(t) => {
-                if self.list.is_list(t) || t.raw_len() > 0 {
-                    Value::Array(self.items(t, field)?)
-                } else {
-                    Value::Object(self.entries(t, field)?)
+                // A record table carries its shape, so a record nested in a returned value
+                // (`return {a = record}`) keeps it too; any other table is read by what it
+                // holds.
+                let shape = self
+                    .records
+                    .shape(t)
+                    .unwrap_or_else(|| Shape::of_table(t, self.list));
+                match shape {
+                    Shape::List => Value::Array(self.items(t, field)?),
+                    Shape::Object => Value::Object(self.entries(t, field)?),
                 }
             }
             other => {
@@ -281,21 +301,16 @@ impl Reader<'_> {
 /// empty list, which is otherwise indistinguishable from an empty object.
 pub(crate) fn from_lua_record(
     table: &Table,
-    is_list: bool,
+    shape: Shape,
     output_bytes: usize,
     list: &ListMark,
+    records: &RecordMark,
 ) -> Result<Record, OutputError> {
-    let mut reader = Reader {
-        used: 0,
-        cap: output_bytes,
-        depth: 0,
-        list,
-    };
+    let mut reader = Reader::new(output_bytes, list, records);
     let field = "the returned record";
-    let value = if is_list {
-        Value::Array(reader.items(table, field)?)
-    } else {
-        Value::Object(reader.entries(table, field)?)
+    let value = match shape {
+        Shape::List => Value::Array(reader.items(table, field)?),
+        Shape::Object => Value::Object(reader.entries(table, field)?),
     };
     Ok(Record::new(value))
 }
@@ -308,13 +323,9 @@ pub(crate) fn from_lua(
     value: &LuaValue,
     output_bytes: usize,
     list: &ListMark,
+    records: &RecordMark,
 ) -> Result<Record, OutputError> {
-    let mut reader = Reader {
-        used: 0,
-        cap: output_bytes,
-        depth: 0,
-        list,
-    };
+    let mut reader = Reader::new(output_bytes, list, records);
     reader.json(value, "the returned record").map(Record::new)
 }
 
@@ -331,5 +342,132 @@ pub(crate) fn type_name(value: &LuaValue) -> &'static str {
         LuaValue::Thread(_) => "a coroutine",
         LuaValue::UserData(_) | LuaValue::LightUserData(_) => "userdata",
         _ => "an unknown value",
+    }
+}
+
+/// Which JSON shape a record table stands for. A table alone cannot say: an empty one is both
+/// an empty object and an empty list, so the shape rides on the metatable instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shape {
+    /// A JSON object.
+    Object,
+    /// A JSON list.
+    List,
+}
+
+impl Shape {
+    /// The shape a JSON `value` has, for one already known to be an object or a list.
+    pub(crate) fn of(value: &Value) -> Self {
+        if value.is_array() {
+            Self::List
+        } else {
+            Self::Object
+        }
+    }
+
+    /// The shape a table that is not a record table stands for: marked as a list, or holding
+    /// positions, makes a list; anything else an object.
+    fn of_table(table: &Table, list: &ListMark) -> Self {
+        if list.is_list(table) || table.raw_len() > 0 {
+            Self::List
+        } else {
+            Self::Object
+        }
+    }
+}
+
+/// `record:copy()`: a deep copy of the table, shared structure and cycles kept as they are,
+/// every list still marked as one, with the record metatable so the copy can be copied too.
+/// Written in Lua so it runs under the instruction budget and the memory cap like the
+/// script's own code. The chunk takes the metatable and a function that marks the copy of a
+/// list, and returns the method.
+const COPY: &str = r#"
+local mark, finish = ...
+local next, type = next, type
+local function deep(value, seen)
+  if type(value) ~= "table" then return value end
+  local done = seen[value]
+  if done then return done end
+  local out = {}
+  mark(value, out)
+  seen[value] = out
+  for k, v in next, value do
+    out[deep(k, seen)] = deep(v, seen)
+  end
+  return out
+end
+return function(record)
+  return finish(record, deep(record, {}))
+end
+"#;
+
+/// The two metatables a record table can carry: one for a record that is an object, one for
+/// a record that is a list. Both answer `"record"` to `getmetatable`, both refuse
+/// `setmetatable`, and both share the `copy` method, so a script cannot tell them apart or
+/// change `copy` for the records after it. Which one a table carries is how the stage reads a
+/// returned record back in the shape it handed over, so an empty list does not come back an
+/// empty object.
+#[derive(Clone)]
+pub(crate) struct RecordMark {
+    object: Table,
+    list: Table,
+}
+
+impl RecordMark {
+    pub(crate) fn new(lua: &mlua::Lua, lists: &ListMark) -> mlua::Result<Self> {
+        let object = lua.create_table()?;
+        let list_flavour = lua.create_table()?;
+        // A script cannot read the list mark, so the copy asks Rust which tables carry it.
+        let marker = lists.clone();
+        let mark = lua.create_function(move |_, (from, to): (Table, Table)| {
+            if marker.is_list(&from) {
+                marker.mark(&to)?;
+            }
+            Ok(())
+        })?;
+        // The copy of a record table is a record table of the same flavour.
+        let this = Self {
+            object: object.clone(),
+            list: list_flavour.clone(),
+        };
+        let for_copy = this.clone();
+        let finish = lua.create_function(move |_, (from, to): (Table, Table)| {
+            if let Some(shape) = for_copy.shape(&from) {
+                for_copy.mark(&to, shape)?;
+            }
+            Ok(to)
+        })?;
+        let copy: Function = lua
+            .load(COPY)
+            .set_name("=record:copy")
+            .call((mark, finish))?;
+        let methods = lua.create_table()?;
+        methods.raw_set("copy", copy)?;
+        for metatable in [&object, &list_flavour] {
+            metatable.raw_set("__index", methods.clone())?;
+            metatable.raw_set("__metatable", "record")?;
+        }
+        Ok(this)
+    }
+
+    /// Mark `table` as the record, in the flavour its JSON shape calls for.
+    pub(crate) fn mark(&self, table: &Table, shape: Shape) -> mlua::Result<()> {
+        let metatable = match shape {
+            Shape::List => &self.list,
+            Shape::Object => &self.object,
+        };
+        table.set_metatable(Some(metatable.clone()))
+    }
+
+    /// The shape `table` carries, or `None` when it is not a record table.
+    pub(crate) fn shape(&self, table: &Table) -> Option<Shape> {
+        let metatable = table.metatable()?;
+        if metatable == self.list {
+            Some(Shape::List)
+        } else if metatable == self.object {
+            Some(Shape::Object)
+        } else {
+            None
+        }
     }
 }

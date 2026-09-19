@@ -9,6 +9,7 @@
 - **Nothing is there unless it was sent.** A key the record does not have is `nil`, including `attributes`, `kind` and `id`. Before adding to a table that may be absent, write `record.attributes = record.attributes or {}`.
 - A key whose name holds a dot is just a key: `record.resource["log.format"]`.
 - `record.id` is the payload's own `id`, if it has one. The record id the pipeline uses is `meta.id`.
+- `record:copy()` is a method on the record table, so it exists only when the record is an object or a list. A record that is text, a number or a bool is a Lua value you can copy by assigning it.
 
 ## The meta table
 
@@ -16,7 +17,7 @@
 
 ## Return values
 
-Return the record to pass it on. The script can change any field, add fields under `attributes`, `resource` or `scope`, and remove fields by setting them to `nil`.
+Return the record to pass it on. The script can change any key, add keys anywhere it likes — there is no field list — and remove one by setting it to `nil`. A record the script leaves alone comes back exactly as it went in, whatever its shape.
 
 Return `nil` to drop the record. The message is still acked.
 
@@ -84,15 +85,11 @@ Before a returned record leaves the stage, the pipeline checks it:
 
 No key and no type is checked, because a record is any JSON. A key such as `colour` is fine.
 
-The record comes in as the JSON it is: an object is a table, a list is a table, and a record that is one piece of text, as a [`codec: text`](../../nats.md) source gives it, is a Lua string. **Nothing is there unless the producer sent it**, so write
+A returned boolean is the one shape rule: `return false` almost always means an author wanted
+to drop the record, so it is refused and says to return `nil` instead. A record that *is* a
+boolean is exempt, so an identity script on one still works.
 
-```lua
-record.attributes = record.attributes or {}
-```
-
-before adding to a table that may not exist.
-
-Setting a field to `nil` removes it. Setting it to `json.null` keeps it as an explicit `null`.
+Setting a key to `nil` removes it. Setting it to `json.null` keeps it as an explicit `null`.
 
 A whole number larger than 2^63 does not survive a script: Lua holds it as a floating-point
 number, so it comes back as one. `meta.id` is the exception, handed over as text when it is

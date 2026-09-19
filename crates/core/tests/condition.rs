@@ -361,3 +361,16 @@ fn the_keywords_still_lex_as_keywords() {
     // A negative literal still lexes as one, since a `-` there follows an operator.
     assert!(eval("severity_number > -1"));
 }
+
+#[test]
+fn a_stray_character_at_the_root_is_a_path_error_with_a_hint_as_it_is_later() {
+    // One rule for what keeps a bare name going, first name or later: `user:agent` used to be
+    // `UnexpectedChar` at the root and a path error with a hint after a dot.
+    for expr in [r#"user:agent == 1"#, r#"a.user:agent == 1"#] {
+        let err = Condition::parse(expr).expect_err("`:` needs quotes");
+        assert!(
+            matches!(&err, ConditionError::Field { source: PathError::InvalidSegment { ch, .. }, .. } if *ch == ':'),
+            "{expr}: {err}"
+        );
+    }
+}

@@ -31,10 +31,10 @@ use fusion_core::memory::{AckOutcome, MemorySinks, OutgoingRecord};
 use fusion_core::meta::Arrival;
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
+use fusion_nats::SourceParams;
 use fusion_nats::codec::{Codec, Encoding};
 use fusion_nats::config::DEFAULT_TENANT_PREFIX;
 use fusion_nats::headers::{Received, arrival, for_meta};
-use fusion_nats::{SinkParams, SourceParams};
 use fusion_pipeline::StartError;
 use serde::Deserialize;
 use serde_json::Value;
@@ -211,13 +211,13 @@ fn load(dir: &Path) -> Result<Loaded, String> {
         .iter()
         .filter(|node| node.is_sink())
         .map(|node| {
-            let encoding = match node.kind.as_str() {
-                "sink.nats" => {
-                    node.parse_params::<SinkParams>()
-                        .map_err(|err| format!("sink `{}`: {err}", node.id))?
-                        .encoding
-                }
-                _ => Encoding::default(),
+            // Read `encoding` off the node itself rather than through one sink type's
+            // params, so a sink kind added later is not silently compared as `json` — the
+            // bug this hunk exists to prevent.
+            let encoding = match node.params.get("encoding") {
+                None => Encoding::default(),
+                Some(value) => serde_yaml_ng::from_value(value.clone())
+                    .map_err(|err| format!("sink `{}`: `encoding`: {err}", node.id))?,
             };
             Ok((node.id.clone(), encoding))
         })

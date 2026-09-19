@@ -40,7 +40,9 @@ The rename moves the value of `a` to `b`, then `set` replaces it.
 
 ## rename
 
-`rename: {from, to}` writes the value of `from` to `to`, replacing what `to` held, then removes `from`.
+`rename: {from, to}` takes the value out of `from` and writes it to `to`, replacing what `to` held.
+
+The removal happens first, which matters in two cases. `to` may live under `from` — `rename {from: a, to: a.b}` nests the old `a` under the new one — and removing afterwards would take the value with it. And removing a list position closes the gap, so `rename {from: arr.0, to: arr.1}` on `["x", "y", "z"]` gives `["y", "x"]`.
 
 ```yaml
 # messages in

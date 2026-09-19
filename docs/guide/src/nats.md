@@ -261,7 +261,7 @@ A dead letter carries:
 
 - the producer's own headers, minus any starting with `Nats-` or `Fusion-` (in any case)
 - `Fusion-Tenant` with the tenant the pipeline gave the message (`unknown` if none), `Fusion-Ingestion-Time` and `Fusion-Ingestion-Time-Kind` with its ingestion time, `Fusion-Record-Id` when the message had a valid one, and `Fusion-Record-Kind` when it had a valid one
-- `Fusion-Dlq-Reason`: the node that failed and its error, at most 1024 bytes. The node is `source` for a message with no record id or a payload that is not a record.
+- `Fusion-Dlq-Reason`: the node that failed and its error, at most 1024 bytes. The node is `source` for a message with no record id, or one whose payload could not be read at all: not JSON under `codec: json`, or not UTF-8 under `codec: text`.
 - `Fusion-Dlq-Subject`: the subject the message arrived on
 - `Nats-Msg-Id`: `<stream>:<sequence>`, so the dead-letter stream drops a second copy of the same message within its duplicate window
 

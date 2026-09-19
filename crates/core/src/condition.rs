@@ -374,12 +374,13 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
             }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
                 i += 1;
-                // `-` keeps a bare name going, since it is a path segment character and this
-                // grammar has no subtraction: `user-agent == "curl"` names one key. A `-`
-                // that starts a number is reached only after an operator, never here.
-                while i < bytes.len()
-                    && matches!(bytes[i], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-')
-                {
+                // The first name follows the same rule as every later one,
+                // [`continues_bare_segment`], rather than a second charset of its own. Two
+                // definitions is what made `a.b-c` work while `user-agent` did not, and what
+                // still made `user:agent` an unexpected character at the root and a path
+                // error with a hint after a dot. This grammar has no subtraction, and a `-`
+                // that starts a number is only ever reached after an operator or `(`.
+                while i < bytes.len() && continues_bare_segment(bytes[i]) {
                     i += 1;
                 }
                 if i < bytes.len() && matches!(bytes[i], b'.' | b'[') {

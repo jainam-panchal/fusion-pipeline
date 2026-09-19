@@ -1431,3 +1431,98 @@ nodes:
     assert_eq!(out, vec![json!([]), json!([])]);
     h.finish();
 }
+
+/// A record that is a boolean must be able to come back. The guard that refuses a returned
+/// boolean exists for a script meaning to drop the record, and applies only when the record
+/// did not arrive as one — otherwise an identity script on a boolean record counted an
+/// `output` error, discarded whatever the script did, and nakked under `on_error: nak`.
+#[test]
+fn a_boolean_record_survives_a_script_but_a_stray_boolean_is_still_refused() {
+    let identity = |on_error: &str| {
+        format!(
+            "nodes:\n  - id: same\n    type: lua\n{on_error}    source: |\n      function process(record)\n        return record\n      end\n  - id: out\n    type: sink.memory\n    from: same\n"
+        )
+    };
+    let errors = [("tenant", TENANT), ("stage", "same"), ("kind", "output")];
+
+    for on_error in ["", "    on_error: nak\n"] {
+        let h = start(&identity(on_error), 1);
+        let probe = h.source.push_arrival(
+            Record::new(json!(true)),
+            Arrival {
+                record_id: Some(RecordId(1)),
+                ..arrival_as(TENANT)
+            },
+        );
+        assert_eq!(
+            probe.wait(WAIT),
+            Some(AckOutcome::Ack),
+            "on_error {on_error:?}"
+        );
+        assert_eq!(h.sinks.records("out")[0].value(), &json!(true));
+        assert_eq!(h.counter(CounterMetric::LuaErrors, &errors), 0);
+        h.finish();
+    }
+
+    // A script may transform it, too.
+    let yaml = "nodes:\n  - id: same\n    type: lua\n    source: |\n      function process(record)\n        return not record\n      end\n  - id: out\n    type: sink.memory\n    from: same\n";
+    let h = start(yaml, 1);
+    let probe = h.source.push_arrival(
+        Record::new(json!(true)),
+        Arrival {
+            record_id: Some(RecordId(1)),
+            ..arrival_as(TENANT)
+        },
+    );
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(h.sinks.records("out")[0].value(), &json!(false));
+    h.finish();
+
+    // But `return false` from a script working on anything else is still the footgun it was.
+    let h = start(yaml, 1);
+    let probe = h.source.push_arrival(
+        Record::new(json!({"a": 1})),
+        Arrival {
+            record_id: Some(RecordId(1)),
+            ..arrival_as(TENANT)
+        },
+    );
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    assert_eq!(h.counter(CounterMetric::LuaErrors, &errors), 1, "refused");
+    h.finish();
+}
+
+/// A record table nested inside a returned value keeps its shape too, so the fix for
+/// `return record` is not special to the top level.
+#[test]
+fn a_record_table_nested_in_a_returned_value_keeps_its_shape() {
+    const NEST: &str = r#"
+nodes:
+  - id: wrap
+    type: lua
+    source: |
+      function process(record)
+        return {a = record, b = record:copy()}
+      end
+  - id: out
+    type: sink.memory
+    from: wrap
+"#;
+    for shape in [json!([]), json!([1]), json!({})] {
+        let h = start(NEST, 1);
+        let probe = h.source.push_arrival(
+            Record::new(shape.clone()),
+            Arrival {
+                record_id: Some(RecordId(1)),
+                ..arrival_as(TENANT)
+            },
+        );
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "{shape}");
+        assert_eq!(
+            h.sinks.records("out")[0].value(),
+            &json!({"a": shape, "b": shape}),
+            "{shape}"
+        );
+        h.finish();
+    }
+}
