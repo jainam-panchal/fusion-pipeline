@@ -2,7 +2,7 @@
 //! bytes, so they are asserted here rather than through `Source`/`Sink` (issue #79).
 
 use fusion_core::record::Record;
-use fusion_nats::codec::{Codec, Encoding};
+use fusion_nats::codec::{Codec, DecodeError, Encoding};
 use serde_json::json;
 
 #[test]
@@ -28,7 +28,10 @@ fn json_refuses_a_payload_that_is_not_json() {
     let err = Codec::Json
         .decode(b"Jun 14 15:16:01 combo sshd: failure")
         .expect_err("not JSON");
-    assert!(!err.is_empty(), "the message is what the failure carries");
+    assert!(
+        matches!(err, DecodeError::NotJson(_)),
+        "the two ways to be undecodable are told apart: {err}"
+    );
 }
 
 #[test]
@@ -41,7 +44,7 @@ fn text_makes_the_line_itself_the_record() {
 #[test]
 fn text_refuses_bytes_that_are_not_utf8() {
     let err = Codec::Text.decode(&[0xff, 0xfe]).expect_err("not UTF-8");
-    assert!(!err.is_empty());
+    assert!(matches!(err, DecodeError::NotUtf8(_)), "{err}");
 }
 
 #[test]

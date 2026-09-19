@@ -8,6 +8,18 @@ use fusion_core::record::Record;
 use serde::Deserialize;
 use serde_json::Value;
 
+/// Why a payload is not a record: the two ways a message can be `undecodable` (ADR 0008).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DecodeError {
+    /// Under [`Codec::Json`], the payload is not JSON.
+    #[error("payload is not JSON: {0}")]
+    NotJson(#[source] serde_json::Error),
+    /// Under [`Codec::Text`], the bytes are not UTF-8.
+    #[error("payload is not UTF-8: {0}")]
+    NotUtf8(#[source] std::str::Utf8Error),
+}
+
 /// How the source reads a message's payload into a record.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -26,16 +38,16 @@ impl Codec {
     ///
     /// # Errors
     ///
-    /// The message the source reports as `undecodable`: a payload that is not JSON under
-    /// [`Codec::Json`], or bytes that are not UTF-8 under [`Codec::Text`].
-    pub fn decode(self, payload: &[u8]) -> Result<Record, String> {
+    /// A [`DecodeError`], which the source reports as `undecodable`: a payload that is not
+    /// JSON under [`Codec::Json`], or bytes that are not UTF-8 under [`Codec::Text`].
+    pub fn decode(self, payload: &[u8]) -> Result<Record, DecodeError> {
         match self {
             Self::Json => serde_json::from_slice::<Value>(payload)
                 .map(Record::new)
-                .map_err(|e| e.to_string()),
+                .map_err(DecodeError::NotJson),
             Self::Text => std::str::from_utf8(payload)
                 .map(|text| Record::new(Value::String(text.to_owned())))
-                .map_err(|e| e.to_string()),
+                .map_err(DecodeError::NotUtf8),
         }
     }
 }

@@ -412,3 +412,19 @@ fn a_position_is_digits_with_no_leading_zero() {
     assert_eq!(padded.read(&object, &meta), FieldValue::Str("x"));
     assert_eq!(padded.read(&list, &meta), FieldValue::Null);
 }
+
+#[test]
+fn an_error_quotes_the_path_the_author_wrote() {
+    // The leading dot is stripped before the segments are read, so the error used to quote
+    // the remainder and name a path nobody wrote.
+    let err = FieldPath::parse("..").expect_err("empty segment");
+    assert!(
+        matches!(&err, PathError::EmptySegment { path } if path == ".."),
+        "{err}"
+    );
+    let err = FieldPath::parse(r#"."unclosed"#).expect_err("unclosed quote");
+    assert!(
+        matches!(&err, PathError::UnterminatedQuote { path } if path == r#"."unclosed"#),
+        "{err}"
+    );
+}

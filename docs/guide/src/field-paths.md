@@ -87,7 +87,14 @@ A whole number names a position in a list, counting from zero. An OTLP-shaped pa
 {{#include ../examples/paths/list-position/expected.yaml}}
 ```
 
-Picking a list item by a key it holds, as in `attributes[key=="db.port"]`, is not supported.
+A name counts as a position only when it is digits with **no leading zero**. `attributes.007`
+is always the key `007`, never position 7, so one path cannot mean two things depending on
+whether the record holds a list or an object there. A position on anything but a list, or past
+its end, matches nothing.
+
+Picking a list item by a key it holds, as in `attributes[key=="db.port"]`, is not supported. To
+change the attribute named `db.port` rather than the one at position 1, use a
+[`lua`](stages/lua/README.md) script, which can look the list up by name.
 
 ## The whole record, and paths that start with a dot
 
@@ -103,7 +110,17 @@ A path may also start with a dot. It then names the record and nothing else, whi
 
 Without the leading dot, `meta` is the pipeline's, not the payload's. Everywhere else the dot changes nothing: `.level` and `level` are the same path.
 
-In a condition, a path that does not start with a letter or `_` must use the leading dot, so write `."log.format" == "Linux"` and `.0 == 5`.
+In a condition, a path must use the leading-dot form when its first name would otherwise be
+read as something else:
+
+| Write | Not |
+|---|---|
+| `."log.format" == "Linux"` | `"log.format" == ...`, which reads as a text value |
+| `.0 == 5` | `0 == 5`, which reads as a number |
+| `.not == true` | `not == true`, since `not` is an operator |
+
+A hyphen needs no dot: `user-agent == "curl"` and `attributes.retry-count == 3` both name keys,
+because this grammar has no subtraction.
 
 Brackets, as in `attributes["http.status"]`, are not allowed.
 
@@ -131,6 +148,9 @@ Meta paths can be read anywhere a path is read. They can never be written or rem
 ## Reading and writing
 
 **A path that matches nothing reads as null.** It is not an error. `level == null` is true for a record with no `level`, and so is `a.b.c.d == null`.
+
+**A number is a number.** `1` and `1.0` compare equal in a condition. They are different values
+to a `dedupe` or `sample consistent` key, which hashes what the producer actually sent.
 
 **A write makes its path exist.** A missing name is created:
 

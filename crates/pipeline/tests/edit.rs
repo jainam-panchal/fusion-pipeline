@@ -544,3 +544,36 @@ nodes:
         h.finish();
     });
 }
+
+/// A `rename` whose target lives under its source must not lose the value: the write used to
+/// land inside `from`, and the removal then took it away, acking a record with the data gone.
+#[test]
+fn rename_into_a_descendant_of_its_source_keeps_the_value() {
+    let yaml = config("", "      - rename: { from: a, to: a.b }\n");
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"a": {"x": 1}}))]);
+    assert_eq!(
+        out[0].value()["a"],
+        json!({"b": {"x": 1}}),
+        "the old `a` moved under the new one"
+    );
+    assert_eq!(h.counter(CounterMetric::RecordsDropped, &STAGE), 0);
+    h.finish();
+}
+
+/// The mirror: a source under its target.
+#[test]
+fn rename_from_a_descendant_of_its_target_keeps_the_value() {
+    let yaml = config("", "      - rename: { from: a.b, to: a }\n");
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"a": {"b": {"x": 1}}}))]);
+    assert_eq!(out[0].value()["a"], json!({"x": 1}), "lifted one level");
+    h.finish();
+}
+
+/// Two levels down, the same rule.
+#[test]
+fn rename_into_a_deeper_descendant_keeps_the_value() {
+    let yaml = config("", "      - rename: { from: a.b, to: a.b.c }\n");
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"a": {"b": 7}}))]);
+    assert_eq!(out[0].value()["a"], json!({"b": {"c": 7}}));
+    h.finish();
+}

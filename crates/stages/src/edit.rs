@@ -101,8 +101,9 @@ pub struct Edit {
     on_unapplied: OnUnapplied,
 }
 
-/// One op as parsed. The path an op can be unapplied on is a [`Labelled`]; `delete` has
-/// none, since it is never unapplied.
+/// One op as parsed. The path an op can be unapplied on is a [`Labelled`]; `set` and
+/// `delete` have none, since neither can be unapplied: a write always lands, and removing
+/// what is not there is nothing to do.
 #[derive(Debug)]
 enum Op {
     Set {
@@ -354,8 +355,12 @@ impl Op {
             Self::Rename { from, to } => {
                 let value = owned(from.path.read(record))
                     .ok_or_else(|| from.unapplied(EditCause::Absent))?;
-                to.write(record, value);
+                // Remove before writing. `to` may live under `from` (`{from: a, to: a.b}`),
+                // and removing afterwards would take the value just written away with it.
+                // Nothing has changed yet on the one `Err` above, so the record is still
+                // unchanged when this op cannot apply.
                 let _removed = from.path.remove(record);
+                to.write(record, value);
                 Ok(())
             }
             Self::Copy { from, to } => {

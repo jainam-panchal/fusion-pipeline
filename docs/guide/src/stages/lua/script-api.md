@@ -1,12 +1,14 @@
 # lua script API
 
-## The record table
+## The record
 
-Each field of the record is a key in the table, under its own name: `id`, `kind`, `time_unix_nano`, `observed_time_unix_nano`, `severity_text`, `severity_number`, `body`, `attributes`, `resource`, `scope`, `trace_id` and `span_id`. See [Concepts](../../concepts.md) for their types.
+`process` gets the record as the JSON it is. There is no field list: whatever keys the producer sent are the keys you get.
 
-- A field the record does not have is `nil`. `kind` is always there.
-- `attributes`, `resource` and `scope` are always tables, maybe empty. Their keys are the full flat keys: `record.attributes["http.status"]`.
-- `id` is the payload's `id`. The record id the pipeline uses is `meta.id`.
+- A JSON object is a table, and a list is a table too.
+- A record that is one piece of text, as a [`codec: text`](../../nats.md) source gives it, is a Lua string. A number or a bool crosses as itself.
+- **Nothing is there unless it was sent.** A key the record does not have is `nil`, including `attributes`, `kind` and `id`. Before adding to a table that may be absent, write `record.attributes = record.attributes or {}`.
+- A key whose name holds a dot is just a key: `record.resource["log.format"]`.
+- `record.id` is the payload's own `id`, if it has one. The record id the pipeline uses is `meta.id`.
 
 ## The meta table
 
@@ -77,7 +79,7 @@ Before a returned record leaves the stage, the pipeline checks it:
 
 - Every value must have a JSON form. A function, a coroutine, userdata, a number that is not finite, or text that is not UTF-8 is an error.
 - The text values in one record, added up, must fit in `limits.output_kib`.
-- Tables may nest at most 127 levels below the record.
+- Tables may nest at most 127 levels below the record table (128 counting it).
 - A returned boolean is an error: return `nil` to drop the record.
 
 No key and no type is checked, because a record is any JSON. A key such as `colour` is fine.

@@ -1,0 +1,10 @@
+nodes:
+  - id: parse
+    type: extract
+    field: body
+    into: parsed          # the groups go under `parsed`, not `attributes`
+    pattern: '^(?<level>[A-Z]+): (?<message>.+)$'
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

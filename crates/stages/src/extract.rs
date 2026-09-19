@@ -40,13 +40,11 @@ struct Params {
     regex: RegexParams,
 }
 
-/// Where a node's groups go when it names no `into`.
+/// Where a node's groups go when it names no `into`: where they went when `attributes` was a
+/// special place to put them.
 fn default_into() -> String {
-    DEFAULT_INTO.to_owned()
+    "attributes".to_owned()
 }
-
-/// The `into` of a node that names none.
-pub const DEFAULT_INTO: &str = "attributes";
 
 /// The `extract` stage.
 #[derive(Debug)]

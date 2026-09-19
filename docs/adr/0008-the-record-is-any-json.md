@@ -114,6 +114,9 @@ Each of these is accepted, not overlooked.
   leaves `attributes: {"0": {"x": ...}}`.
 - **An `extract` on a record that is not an object replaces it**, because groups have nowhere
   else to go. The `codec: text` recipe is `edit copy {from: ., to: body}` first.
-- **A `lua` record that is an empty list comes back as an empty object.** A returned table
-  carrying the record metatable is one record rather than a split, which is what keeps
-  `return record` identity for a list record, but an empty table carries no shape.
+- **A `lua` record table carries its shape.** A returned table carrying the record metatable
+  is one record rather than a split, which is what keeps `return record` identity for a list
+  record. There are two such metatables, one per shape, so an empty list comes back an empty
+  list; both answer `"record"` to `getmetatable` and share `copy`.
+- **A digit segment names a list position only without a leading zero.** `attributes.007` is
+  the key `007` whatever the record holds, so one path cannot mean two things by shape.

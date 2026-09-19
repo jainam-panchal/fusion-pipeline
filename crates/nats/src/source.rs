@@ -435,7 +435,7 @@ impl NatsSource {
                         delivery.message.subject
                     );
                     self.signals.metrics().source_nak(&tenant);
-                    let failure = Failure::at_source(FailureKind::Undecodable, err);
+                    let failure = Failure::at_source(FailureKind::Undecodable, err.to_string());
                     // Settled here, on the runtime: `NatsAck` blocks on the runtime and
                     // cannot be used from inside it.
                     self.dead_letters

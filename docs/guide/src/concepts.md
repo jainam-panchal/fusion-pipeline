@@ -53,7 +53,10 @@ Two things the pipeline still refuses to read, both from the [source](nats.md):
 
 Either one is nakked, and after the last delivery it becomes a dead letter.
 
-Object keys come back sorted. Every key and value survives; the order they were written in does not.
+Object keys come back sorted. Every key and value survives; the order they were written in does
+not. Two other things a JSON decoder settles before the pipeline sees the record: a duplicate
+key keeps its last value, and a number keeps its value but not its spelling (`1.0` is `1.0`,
+`1e3` is `1000.0`).
 
 To name part of a record, see [field paths](field-paths.md).
 

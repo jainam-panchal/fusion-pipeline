@@ -65,11 +65,8 @@ impl Redact {
                     .map_err(|e| node.invalid_params(format!("field `{field}`: {e}")))?;
                 // A redaction writes the masked text back where it read it, so the field
                 // must be the record's and not the pipeline's.
-                path.writable().map_err(|e| {
-                    node.invalid_params(format!(
-                        "field `{field}` cannot be redacted: {e}; a redaction writes a string"
-                    ))
-                })
+                path.writable()
+                    .map_err(|e| node.invalid_params(format!("field `{field}`: {e}")))
             })
             .collect::<Result<Vec<_>, ConfigError>>()?;
         let regex = params.regex.compile(node, "pattern", &params.pattern)?;

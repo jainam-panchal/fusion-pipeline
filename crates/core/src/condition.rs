@@ -11,10 +11,11 @@
 //! literal   := string | number | "true" | "false" | "null"
 //! ```
 //!
-//! A path is resolved by [`FieldPath`]: the root is a top-level record field and, under
-//! `attributes`, `resource` or `scope`, the segments joined with dots are the flat map key;
-//! a `meta.*` path reads the record's `Meta`, so a condition can decide on the pipeline's
-//! tenant rather than the payload's.
+//! A path is resolved by [`FieldPath`]: names joined with dots, walked over the record's
+//! JSON (issue #79). A name that is not a bare word needs the leading-dot form, since the
+//! lexer would otherwise read it as a literal: `."log.format"`, `.0`, and `.` for the whole
+//! record. A `meta.*` path reads the record's `Meta`, so a condition can decide on the
+//! pipeline's tenant rather than the payload's.
 //! `=~` and `!~` take a string literal, the pattern. Core has no regex engine: a stage
 //! compiles the patterns [`Condition::regex_patterns`] lists through the facade and
 //! evaluates with [`Condition::matches_with`], handing in the match function; a `!~` is the
@@ -373,8 +374,11 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
             }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
                 i += 1;
+                // `-` keeps a bare name going, since it is a path segment character and this
+                // grammar has no subtraction: `user-agent == "curl"` names one key. A `-`
+                // that starts a number is reached only after an operator, never here.
                 while i < bytes.len()
-                    && matches!(bytes[i], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+                    && matches!(bytes[i], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-')
                 {
                     i += 1;
                 }

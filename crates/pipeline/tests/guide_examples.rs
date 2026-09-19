@@ -62,13 +62,32 @@ struct Message {
 impl Message {
     /// The bytes this message carries.
     fn bytes(&self) -> Result<String, String> {
-        match (&self.payload, &self.raw) {
-            (Some(payload), None) => {
+        match one_of(&self.payload, &self.raw, "a message")? {
+            AsWritten::Json(payload) => {
                 Ok(serde_json::to_string(payload).expect("payload serializes"))
             }
-            (None, Some(raw)) => Ok(raw.clone()),
-            _ => Err("a message needs exactly one of `payload` and `raw`".to_owned()),
+            AsWritten::Raw(raw) => Ok(raw.clone()),
         }
+    }
+}
+
+/// A payload as an example writes it: `payload:` for JSON, `raw:` for the bytes on the wire.
+enum AsWritten<'a> {
+    Json(&'a Value),
+    Raw(&'a String),
+}
+
+/// Exactly one of `payload` and `raw`, the rule an example's input and its expected output
+/// both follow.
+fn one_of<'a>(
+    payload: &'a Option<Value>,
+    raw: &'a Option<String>,
+    what: &str,
+) -> Result<AsWritten<'a>, String> {
+    match (payload, raw) {
+        (Some(payload), None) => Ok(AsWritten::Json(payload)),
+        (None, Some(raw)) => Ok(AsWritten::Raw(raw)),
+        _ => Err(format!("{what} needs exactly one of `payload` and `raw`")),
     }
 }
 
@@ -185,18 +204,24 @@ fn load(dir: &Path) -> Result<Loaded, String> {
             input.len()
         ));
     }
+    // A sink node's params must parse, or a mistyped `encoding:` would silently compare as
+    // `json`. Only `sink.nats` takes `SinkParams`; a `sink.memory` example has none.
     let sinks: BTreeMap<String, Encoding> = config
         .nodes
         .iter()
         .filter(|node| node.is_sink())
         .map(|node| {
-            let encoding = node
-                .parse_params::<SinkParams>()
-                .map(|params| params.encoding)
-                .unwrap_or_default();
-            (node.id.clone(), encoding)
+            let encoding = match node.kind.as_str() {
+                "sink.nats" => {
+                    node.parse_params::<SinkParams>()
+                        .map_err(|err| format!("sink `{}`: {err}", node.id))?
+                        .encoding
+                }
+                _ => Encoding::default(),
+            };
+            Ok((node.id.clone(), encoding))
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     if let Some(unknown) = expected.sinks.keys().find(|id| !sinks.contains_key(*id)) {
         return Err(format!(
             "expected.yaml names `{unknown}`, which is not a sink node"
@@ -349,9 +374,9 @@ fn compare(example: &Example, outcome: &Outcome) -> Vec<String> {
             continue;
         }
         for (index, (want, got)) in want.iter().zip(outgoing).enumerate() {
-            match (&want.payload, &want.raw) {
+            match one_of(&want.payload, &want.raw, "an expected record") {
                 // `payload:` is what an `encoding: json` sink writes.
-                (Some(expected), None) => {
+                Ok(AsWritten::Json(expected)) => {
                     let payload: Value =
                         serde_json::from_str(&got.record.to_json().expect("serializes"))
                             .expect("record JSON parses");
@@ -363,7 +388,7 @@ fn compare(example: &Example, outcome: &Outcome) -> Vec<String> {
                     }
                 }
                 // `raw:` is the bytes this sink writes, under the encoding it declared.
-                (None, Some(expected)) => {
+                Ok(AsWritten::Raw(expected)) => {
                     let encoding = example.sinks.get(id).copied().unwrap_or_default();
                     let bytes = encoding.encode(&got.record).expect("record encodes");
                     let written = String::from_utf8_lossy(&bytes);
@@ -374,10 +399,7 @@ fn compare(example: &Example, outcome: &Outcome) -> Vec<String> {
                         ));
                     }
                 }
-                _ => problems.push(format!(
-                    "sink `{id}` record {}: expected.yaml needs exactly one of `payload` and `raw`",
-                    index + 1,
-                )),
+                Err(rule) => problems.push(format!("sink `{id}` record {}: {rule}", index + 1)),
             }
             if let Some(want_headers) = &want.headers {
                 let got_headers = written_headers(got);

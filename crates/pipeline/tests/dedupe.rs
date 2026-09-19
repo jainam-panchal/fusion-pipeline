@@ -730,3 +730,54 @@ nodes:
     assert_eq!(h.counter(CounterMetric::RecordsDropped, &dropped), 1);
     h.finish();
 }
+
+/// `sample` in `consistent` mode keys the same way, so free-form paths decide a verdict the
+/// same on every node and every replica, and two records agreeing on the key share it.
+#[test]
+fn a_consistent_sample_key_of_free_form_paths_gives_one_verdict_per_value() {
+    const YAML: &str = r#"
+nodes:
+  - id: keep_some
+    type: sample
+    mode: consistent
+    percent: 50
+    key: [level, test2.key2, resource."log.format"]
+  - id: out
+    type: sink.memory
+    from: keep_some
+"#;
+    let of = |id: u64, level: &str| {
+        Record::new(serde_json::json!({
+            "id": id,
+            "level": level,
+            "test2": {"key2": 123},
+            "resource": {"log.format": "Linux"},
+        }))
+    };
+    let h = start(YAML, 1);
+    // Four records over two key values. `consistent` hashes the values, not the record, so
+    // each value gets one verdict and both copies of it go the same way.
+    for (id, level) in [(1, "error"), (2, "error"), (3, "warn"), (4, "warn")] {
+        let probe = h.push(of(id, level));
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    }
+    let kept: Vec<&str> = h
+        .sinks
+        .records("out")
+        .iter()
+        .map(|r| {
+            r.value()["level"]
+                .as_str()
+                .expect("level is a string")
+                .to_owned()
+        })
+        .map(|level| if level == "error" { "error" } else { "warn" })
+        .collect();
+    for value in ["error", "warn"] {
+        let seen = kept.iter().filter(|l| **l == value).count();
+        assert!(seen == 0 || seen == 2, "`{value}` went both ways: {kept:?}");
+    }
+    // No state store is touched: `consistent` hashes, it does not count.
+    assert!(h.state.keys().is_empty(), "{:?}", h.state.keys());
+    h.finish();
+}

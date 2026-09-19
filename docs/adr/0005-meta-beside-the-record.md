@@ -102,3 +102,24 @@ What an operator configures a stage to read from the record stays on the record:
 - A record's payload id, kind, tenant or time may disagree with its `Meta`. That is the point: the payload is the customer's, the headers are the pipeline's.
 - One metric joins the closed set: `source_invalid_headers_total{tenant}`.
 - CLAUDE.md's "Only `kind: log` is processed" names intake as where it is decided, and its "Decisions read `Meta`" and "Windows" invariants follow this ADR.
+
+## Amended 2026-09-18 (issue #79, ADR 0008)
+
+The record is any JSON value, so four of the consequences above name types that no longer
+exist. "Every record field is payload" holds more strongly than when it was written; what
+changes is that no field has a type to be written *within*:
+
+- `id` and `kind` are writable and removable like any other key, with no type to satisfy: `id`
+  takes a UUID, `kind` takes anything. A payload with no `kind` leaves with none, where the
+  sink used to write `log`.
+- `hash` on `id` is no longer refused at load. Whether a value can be hashed is known only
+  when there is one, so `hash` is unapplied on the record with cause `type` instead.
+- `redact` refuses a field at load only when it names `meta.*`. There is no type to check, and
+  a field that does not hold text on a given record is skipped at run time, as before.
+- `lua`'s output check types nothing. It refuses a value with no JSON form, a returned
+  boolean, an empty table, a table nested too deep, and strings past the output cap.
+
+Everything this ADR decided stands: `Meta` lives beside the record, is resolved once at intake
+from the arrival alone, is read-only through `meta.*`, and every decision reads it rather than
+the payload. Making the record free-form is what that separation was for — with no decision
+depending on a record field, no field needed a type.

@@ -37,7 +37,7 @@ The [spec](https://github.com/jainam-panchal/fusion-pipeline/blob/main/docs/spec
 | `Fusion-Dlq-Reason` length | 1024 bytes |
 | longest regex pattern | 8192 bytes |
 | regex parentheses depth | 250 |
-| `lua` table nesting in a returned record | 128 |
+| `lua` table nesting in a returned record | 127 below the record table, 128 counting it |
 
 Configurable limits and their defaults are on [Regex limits](regex-limits.md) and [lua budgets](stages/lua/budgets-and-errors.md).
 

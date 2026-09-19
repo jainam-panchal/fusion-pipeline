@@ -4,12 +4,12 @@
 
 mod common;
 
-use common::{WAIT, deploy_config, for_each_worker_count, start};
+use common::{TENANT, WAIT, arrival_as, deploy_config, for_each_worker_count, start};
 use fusion_core::config::Config;
 use fusion_core::memory::AckOutcome;
 use fusion_core::meta::{Arrival, IngestionTime, unix_nanos_now};
 use fusion_core::metrics::CounterMetric;
-use fusion_core::record::Record;
+use fusion_core::record::{Record, RecordId};
 use serde_json::{Value, json};
 
 const STAGE: [(&str, &str); 2] = [("tenant", "acme"), ("stage", "script")];
@@ -1355,4 +1355,79 @@ fn a_returned_list_with_no_records_is_an_output_error() {
         );
         h.finish();
     }
+}
+
+/// A script that returns the record it was given returns it unchanged, whatever JSON shape
+/// the record has. The empty list is the case that used to come back as an empty object: the
+/// record table's metatable carries the shape, so the way back does not have to guess.
+#[test]
+fn an_identity_script_returns_every_shape_unchanged() {
+    const IDENTITY: &str = r#"
+nodes:
+  - id: same
+    type: lua
+    source: |
+      function process(record)
+        return record
+      end
+  - id: out
+    type: sink.memory
+    from: same
+"#;
+    for shape in [
+        json!([]),
+        json!([1, 2]),
+        json!({}),
+        json!({"a": 1}),
+        json!({"a": [], "b": {}}),
+        json!("a raw line"),
+        json!(7),
+    ] {
+        let h = start(IDENTITY, 1);
+        let probe = h.source.push_arrival(
+            Record::new(shape.clone()),
+            Arrival {
+                record_id: Some(RecordId(1)),
+                ..arrival_as(TENANT)
+            },
+        );
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "{shape}");
+        assert_eq!(h.sinks.records("out")[0].value(), &shape, "{shape}");
+        h.finish();
+    }
+}
+
+/// `record:copy()` keeps the shape too, so a split of a list record is a list of list
+/// records rather than of empty objects.
+#[test]
+fn a_copy_of_a_list_record_is_still_a_list() {
+    const SPLIT: &str = r#"
+nodes:
+  - id: twice
+    type: lua
+    source: |
+      function process(record)
+        return {record:copy(), record:copy()}
+      end
+  - id: out
+    type: sink.memory
+    from: twice
+"#;
+    let h = start(SPLIT, 1);
+    let probe = h.source.push_arrival(
+        Record::new(json!([])),
+        Arrival {
+            record_id: Some(RecordId(1)),
+            ..arrival_as(TENANT)
+        },
+    );
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
+    let out: Vec<_> = h
+        .sinks
+        .records("out")
+        .iter()
+        .map(|r| r.value().clone())
+        .collect();
+    assert_eq!(out, vec![json!([]), json!([])]);
+    h.finish();
 }

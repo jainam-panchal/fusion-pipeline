@@ -327,3 +327,37 @@ fn a_meta_path_decides_on_the_pipelines_value_not_the_payloads() {
     assert!(eval("meta.delivery_count == 1 and meta.ingestion_time < 6"));
     assert!(eval("meta.id == 7 and not meta.delivery_count > 1"));
 }
+
+#[test]
+fn a_hyphen_keeps_a_bare_root_going_as_it_does_a_later_segment() {
+    // `field-paths.md` says `-` needs no quotes. It did not hold for the first name, which
+    // the lexer ended at the hyphen and then read `-` as a number.
+    let record = Record::from_json(r#"{"user-agent": "curl", "a": {"b-c": 1}}"#).expect("parses");
+    let meta = meta();
+    let eval = |expr: &str| {
+        Condition::parse(expr)
+            .unwrap_or_else(|e| panic!("{expr}: {e}"))
+            .matches(&record, &meta)
+    };
+    assert!(eval(r#"user-agent == "curl""#));
+    assert!(eval("a.b-c == 1"), "a later segment already worked");
+    assert!(eval(r#".user-agent == "curl""#), "the dotted form too");
+}
+
+#[test]
+fn the_keywords_still_lex_as_keywords() {
+    let record = record();
+    let meta = meta();
+    let eval = |expr: &str| {
+        Condition::parse(expr)
+            .unwrap_or_else(|e| panic!("{expr}: {e}"))
+            .matches(&record, &meta)
+    };
+    assert!(eval(
+        r#"severity_text == "ERROR" and severity_number == 17"#
+    ));
+    assert!(eval(r#"severity_text == "NOPE" or severity_number == 17"#));
+    assert!(eval(r#"not severity_text == "NOPE""#));
+    // A negative literal still lexes as one, since a `-` there follows an operator.
+    assert!(eval("severity_number > -1"));
+}

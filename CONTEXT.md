@@ -96,8 +96,16 @@ A field path under the `meta` root: `meta.id`, `meta.tenant`, `meta.ingestion_ti
 _Avoid_: header path, system field
 
 **Write rules**:
-Core's one check of what a field path accepts: a JSON value of the field's type, anything under a map key, nothing under `meta`. Every write runs it first; a stage that needs a type at load asks it instead of writing, and `lua` writes a returned record through it.
-_Avoid_: schema, validation, probe
+How a write through a field path behaves: a write makes its path exist. A missing name is created, an existing list position is used, and a value in the way — a scalar, or a list with no such position — is replaced by an object. No path has a type, so no value is refused for being the wrong one, and a write through a record path cannot fail. `meta` is the one refusal, answered once at load by `FieldPath::writable`, which returns a **Write path** (ADR 0008).
+_Avoid_: schema, validation, probe, accepts check
+
+**Codec**:
+How the source reads a message's payload into a record: `json` decodes it as JSON, whatever shape; `text` makes the payload's bytes the record, one string, so a producer sends raw lines with no wrapper. The two ways to be **undecodable**.
+_Avoid_: parser, format, deserializer
+
+**Encoding**:
+How the sink writes a record onto the wire: `json` writes the record's JSON as the last stage left it; `text` writes a record that is a string as its bytes, and any other record as its JSON, so a stage that turned a line into an object still delivers.
+_Avoid_: serializer, output format
 
 **Condition**:
 A `field op literal` expression with `and`, `or`, `not` and parentheses, evaluated against a record. Used by `filter` and `route`.

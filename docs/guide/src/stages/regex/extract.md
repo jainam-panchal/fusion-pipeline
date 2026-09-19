@@ -19,6 +19,21 @@
 
 For each named group that matched, `extract` writes `<into>.<name>` as text, and `into` is `attributes` unless you say otherwise. Numbers stay text too, so `pid` below is `"4711"`. The field it read is left as it was, unless it is the field a group writes to.
 
+```yaml
+# messages in
+{{#include ../../../examples/stages/regex/extract-into/input.yaml}}
+```
+
+```yaml
+# config
+{{#include ../../../examples/stages/regex/extract-into/pipeline.yaml}}
+```
+
+```yaml
+# result
+{{#include ../../../examples/stages/regex/extract-into/expected.yaml}}
+```
+
 `into: .` puts the groups at the top level of the record.
 
 A write makes its path exist, so an `extract` on a record that is not an object replaces it: with a raw line from a [`codec: text`](../../nats.md) source, copy the line into a field first.

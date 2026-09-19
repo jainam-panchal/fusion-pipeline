@@ -559,7 +559,16 @@ impl FieldPath {
         if rooted && text.is_empty() {
             return Ok(Self::whole());
         }
-        let segments = split_segments(text)?;
+        // The error names the path the author wrote, not the text left after the dot.
+        let segments = split_segments(text).map_err(|e| match e {
+            PathError::EmptySegment { .. } => PathError::EmptySegment {
+                path: path.to_owned(),
+            },
+            PathError::UnterminatedQuote { .. } => PathError::UnterminatedQuote {
+                path: path.to_owned(),
+            },
+            other => other,
+        })?;
         if !rooted && segments.first().is_some_and(|first| first == META_ROOT) {
             let unknown = || PathError::UnknownMetaField {
                 path: path.to_owned(),

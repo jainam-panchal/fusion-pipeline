@@ -187,8 +187,8 @@ impl Reader<'_> {
     }
 
     /// A table's string-keyed entries as a JSON object. A value that is itself a table is
-    /// taken as the JSON it is: the flat-map rule is the source's contract, so a value that
-    /// arrived composite must leave an untouched script the way it came in.
+    /// taken as the JSON it is, however deep, so a record that arrived nested leaves an
+    /// untouched script the way it came in.
     fn entries(&mut self, table: &Table, field: &str) -> Result<Map<String, Value>, OutputError> {
         self.enter(field)?;
         let mut map = Map::new();
@@ -273,6 +273,31 @@ impl Reader<'_> {
             }
         })
     }
+}
+
+/// The table the script returned as a record whose shape the stage already knows, because it
+/// is the record table it handed over (or a `record:copy()` of it). Reading it by that shape
+/// rather than by its contents is what keeps `return record` identity for a record that is an
+/// empty list, which is otherwise indistinguishable from an empty object.
+pub(crate) fn from_lua_record(
+    table: &Table,
+    is_list: bool,
+    output_bytes: usize,
+    list: &ListMark,
+) -> Result<Record, OutputError> {
+    let mut reader = Reader {
+        used: 0,
+        cap: output_bytes,
+        depth: 0,
+        list,
+    };
+    let field = "the returned record";
+    let value = if is_list {
+        Value::Array(reader.items(table, field)?)
+    } else {
+        Value::Object(reader.entries(table, field)?)
+    };
+    Ok(Record::new(value))
 }
 
 /// The value the script returned as a record, its strings together under `output_bytes`.
