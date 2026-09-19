@@ -28,7 +28,8 @@
 //! marked as a list, so `[]` stays a list, and `json.list(t)` marks a table the script
 //! builds; a table read as a list may hold only its positions `1..n`, so a `null` entry is
 //! written as `json.null`, never `nil`. A JSON `null` in a list or a map is `json.null`,
-//! which is truthy like any value; a field set to `json.null` is left out, as with `nil`.
+//! which is truthy like any value; a key set to `json.null` keeps an explicit `null`, and
+//! `nil` is what removes one.
 //!
 //! A script that loops is stopped by the instruction budget (`instructions`), one that
 //! allocates without bound by the memory cap (`memory_kib`), each per record; a runtime

@@ -258,14 +258,12 @@ impl Vm {
         });
         self.used.set(0);
         let value = convert::to_lua(&self.lua, record, &self.list).map_err(classify)?;
-        // A record that is an object or a list crosses as a table, and that table carries
-        // the record metatable: it is what `record:copy()` hangs off, and what tells a
-        // returned record from a returned split (issue #79).
         if let LuaValue::Table(table) = &value {
-            // The table carries the record metatable: it is what `record:copy()` hangs off,
-            // what tells a returned record from a returned split, and — in which of the two
-            // flavours it carries — what the record's own shape was, so an empty list does
-            // not come back an empty object (issue #79).
+            // A record that is an object or a list crosses as a table carrying the record
+            // mark: it is what `record:copy()` hangs off, what tells a returned record from
+            // a returned split, and — in which of the two flavours it carries — what the
+            // record's own shape was, so an empty list does not come back an empty object
+            // (issue #79).
             self.record_mark
                 .mark(table, Shape::of(record.value()))
                 .map_err(classify)?;
@@ -288,10 +286,6 @@ impl Vm {
         match returned {
             LuaValue::Nil => Ok(Returned::Drop),
             LuaValue::Table(t) => {
-                // The record table, and a `record:copy()` of it, carry the record
-                // metatable, so `return record` is one record whatever shape the record
-                // has — a list record would otherwise read as a split of its items — and it
-                // is read back in the shape it went out in.
                 // The record table, and a `record:copy()` of it, carry the record mark, so
                 // `return record` is one record whatever shape it has. `from_lua` reads the
                 // mark itself, so the shape needs no second spelling here; the mark is asked
@@ -327,8 +321,6 @@ impl Vm {
                             "every entry of a returned list must be a record table".to_owned(),
                         )));
                     };
-                    // An entry that is a record table (a `record:copy()`) is read in the
-                    // shape it carries, like a returned record.
                     // A `record:copy()` entry carries the record mark; `from_lua` reads it.
                     records.push(
                         convert::from_lua(

@@ -7,8 +7,7 @@
 //! list and no `nil` inside a table, so a JSON list becomes a table marked with the VM's
 //! list metatable, and a JSON `null` inside a list or a map becomes `json.null`; the way
 //! back reads a marked table as a list, whatever its length, and `json.null` as `null`. A
-//! record field is never `null` (the decoder leaves it out), and a field set to
-//! `json.null` is left out, as `nil` is.
+//! key set to `json.null` keeps an explicit `null`; `nil` is what removes one.
 
 use fusion_core::meta::{Meta, MetaField, MetaValue};
 use fusion_core::record::{Record, RecordId};

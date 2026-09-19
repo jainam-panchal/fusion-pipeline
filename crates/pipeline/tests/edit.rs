@@ -584,9 +584,11 @@ fn rename_into_a_deeper_descendant_keeps_the_value() {
 fn rename_from_an_explicit_null_is_unapplied_and_leaves_the_key() {
     let yaml = config("", "      - rename: { from: a, to: b }\n");
     let (out, h) = run(&yaml, 1, vec![record(1, json!({"a": null}))]);
+    // `value()["a"]` yields `Value::Null` for an absent key too, so it would hold either
+    // way; `get` is what tells "present and null" from "gone".
     assert_eq!(
-        out[0].value()["a"],
-        json!(null),
+        out[0].value().get("a"),
+        Some(&json!(null)),
         "the null key is still there"
     );
     assert_eq!(out[0].value().get("b"), None, "nothing was written");

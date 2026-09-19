@@ -1591,12 +1591,33 @@ fn a_fresh_table_of_positions_is_a_split_and_a_list_record_travels_as_the_record
         (settled, out)
     };
 
-    // A fresh marked list of non-records is a split of things that are not records.
-    let (settled, _) = push(
-        &node("        return json.list({1, 2, 3})"),
-        json!("a raw line"),
+    // A fresh marked list of non-records is a split of things that are not records. The
+    // error text is what says it was read as a split rather than refused some other way.
+    let h = start(&node("        return json.list({1, 2, 3})"), 1);
+    let probe = h.source.push_arrival(
+        Record::new(json!("a raw line")),
+        Arrival {
+            record_id: Some(RecordId(1)),
+            ..arrival_as(TENANT)
+        },
     );
-    assert_eq!(settled, Some(AckOutcome::Nak(None)), "read as a split");
+    assert_eq!(probe.wait(WAIT), Some(AckOutcome::Nak(None)));
+    assert_eq!(
+        h.counter(
+            CounterMetric::LuaErrors,
+            &[("tenant", TENANT), ("stage", "s"), ("kind", "output")]
+        ),
+        1,
+        "an output error, not a runtime one"
+    );
+    let refusal = h
+        .events()
+        .into_iter()
+        .map(|event| event.message)
+        .find(|text| text.contains("returned list"))
+        .expect("the refusal says the list was read as a split");
+    assert!(refusal.contains("must be a record table"), "{refusal}");
+    h.finish();
 
     // The record itself comes back as the list it is.
     let (settled, out) = push(&node("        return record"), json!([1, 2, 3]));
