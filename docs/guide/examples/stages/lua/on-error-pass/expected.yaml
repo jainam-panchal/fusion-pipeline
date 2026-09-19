@@ -1,5 +1,5 @@
 acks: [ack, ack]
 sinks:
   out:
-    - payload: {kind: log, body: ok, attributes: {http.status: 503, class: 5xx}}
-    - payload: {kind: log, body: bad, attributes: {http.status: oops}}
+    - payload: {body: ok, attributes: {http.status: 503, class: 5xx}}
+    - payload: {body: bad, attributes: {http.status: oops}}

@@ -2,7 +2,8 @@ nodes:
   - id: normalise
     type: edit
     ops:
-      - copy: {from: body, to: severity_number}
+      # `hash` writes the digest of a value's text. A list has no text, so this
+      # op is unapplied with cause `type` and the list is left alone.
       - hash: {field: attributes.list}
   - id: out
     type: sink.nats

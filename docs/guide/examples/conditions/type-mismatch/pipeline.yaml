@@ -1,7 +1,7 @@
 nodes:
   - id: not_503
     type: filter
-    condition: attributes.http.status != "503"
+    condition: attributes."http.status" != "503"
     action: keep
   - id: out
     type: sink.nats

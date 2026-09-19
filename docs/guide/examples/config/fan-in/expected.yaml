@@ -1,7 +1,7 @@
 acks: [ack, ack, ack]
 sinks:
   out:
-    - payload: {kind: log, severity_text: ERROR, attributes: {duration_ms: 20}}
-    - payload: {kind: log, severity_text: INFO, attributes: {duration_ms: 3000}}
-    - payload: {kind: log, severity_text: ERROR, attributes: {duration_ms: 3000}}
-    - payload: {kind: log, severity_text: ERROR, attributes: {duration_ms: 3000}}
+    - payload: {severity_text: ERROR, attributes: {duration_ms: 20}}
+    - payload: {severity_text: INFO, attributes: {duration_ms: 3000}}
+    - payload: {severity_text: ERROR, attributes: {duration_ms: 3000}}
+    - payload: {severity_text: ERROR, attributes: {duration_ms: 3000}}

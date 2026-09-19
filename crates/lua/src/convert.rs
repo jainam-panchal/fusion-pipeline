@@ -1,19 +1,17 @@
-//! The record as a plain Lua table with OTLP field names, and the way back: Lua values
-//! converted to JSON, strings under the size cap, and every field written through core's
-//! write rules, so no field's type is spelled here (issue #43). Every field is payload
-//! (ADR 0005), so a script may change or drop any of them.
+//! The record as a plain Lua value, and the way back: Lua values converted to JSON with
+//! every string under the size cap. A record is any JSON (issue #79), so an object crosses
+//! as a table, a list as a marked table and a string, number or bool as itself. No field
+//! name and no field type is spelled here: a script may return whatever shape it likes.
 //!
 //! A value crosses both ways unchanged when the script leaves it alone. Lua has no empty
 //! list and no `nil` inside a table, so a JSON list becomes a table marked with the VM's
 //! list metatable, and a JSON `null` inside a list or a map becomes `json.null`; the way
 //! back reads a marked table as a list, whatever its length, and `json.null` as `null`. A
-//! record field is never `null` (the decoder leaves it out), and a field set to
-//! `json.null` is left out, as `nil` is.
+//! key set to `json.null` keeps an explicit `null`; `nil` is what removes one.
 
 use fusion_core::meta::{Meta, MetaField, MetaValue};
-use fusion_core::path::{FieldPath, TopLevel};
 use fusion_core::record::{Record, RecordId};
-use mlua::{Integer, Table, Value as LuaValue};
+use mlua::{Function, Integer, Table, Value as LuaValue};
 use serde_json::{Map, Value};
 
 /// A returned record the stage refuses. The message names the field.
@@ -60,40 +58,11 @@ impl ListMark {
     }
 }
 
-/// What the script gets: every present field under its OTLP name, maps as tables of JSON
-/// values, `body` as the JSON value it is, every list marked. `id` is an integer, or its
-/// decimal text when it does not fit Lua's signed 64 bits.
-pub(crate) fn to_table(lua: &mlua::Lua, record: &Record, list: &ListMark) -> mlua::Result<Table> {
-    let t = lua.create_table_with_capacity(0, 12)?;
-    if let Some(id) = record.id {
-        t.raw_set("id", id_value(lua, id)?)?;
-    }
-    t.raw_set("kind", record.kind.as_str())?;
-    if let Some(n) = record.time_unix_nano {
-        t.raw_set("time_unix_nano", unsigned(n))?;
-    }
-    if let Some(n) = record.observed_time_unix_nano {
-        t.raw_set("observed_time_unix_nano", unsigned(n))?;
-    }
-    if let Some(s) = &record.severity_text {
-        t.raw_set("severity_text", s.as_str())?;
-    }
-    if let Some(n) = record.severity_number {
-        t.raw_set("severity_number", Integer::from(n))?;
-    }
-    if let Some(body) = &record.body {
-        t.raw_set("body", json_to_lua(lua, body, list)?)?;
-    }
-    t.raw_set("attributes", map_to_table(lua, &record.attributes, list)?)?;
-    t.raw_set("resource", map_to_table(lua, &record.resource, list)?)?;
-    t.raw_set("scope", map_to_table(lua, &record.scope, list)?)?;
-    if let Some(s) = &record.trace_id {
-        t.raw_set("trace_id", s.as_str())?;
-    }
-    if let Some(s) = &record.span_id {
-        t.raw_set("span_id", s.as_str())?;
-    }
-    Ok(t)
+/// What the script gets: the record as a Lua value. An object is a table, a list is a
+/// marked table, and a scalar record is the Lua scalar. The caller marks a returned table as
+/// a record table.
+pub(crate) fn to_lua(lua: &mlua::Lua, record: &Record, list: &ListMark) -> mlua::Result<LuaValue> {
+    json_to_lua(lua, record.value(), list)
 }
 
 /// `meta[field]` as a script reads it: the record id in the form the record table gives an
@@ -201,6 +170,20 @@ struct Reader<'l> {
     depth: usize,
     /// The mark of a table that is a list.
     list: &'l ListMark,
+    /// The record marks, so a record table's shape is read rather than guessed.
+    records: &'l RecordMark,
+}
+
+impl<'l> Reader<'l> {
+    fn new(cap: usize, list: &'l ListMark, records: &'l RecordMark) -> Self {
+        Self {
+            used: 0,
+            cap,
+            depth: 0,
+            list,
+            records,
+        }
+    }
 }
 
 impl Reader<'_> {
@@ -217,8 +200,8 @@ impl Reader<'_> {
     }
 
     /// A table's string-keyed entries as a JSON object. A value that is itself a table is
-    /// taken as the JSON it is: the flat-map rule is the source's contract, so a value that
-    /// arrived composite must leave an untouched script the way it came in.
+    /// taken as the JSON it is, however deep, so a record that arrived nested leaves an
+    /// untouched script the way it came in.
     fn entries(&mut self, table: &Table, field: &str) -> Result<Map<String, Value>, OutputError> {
         self.enter(field)?;
         let mut map = Map::new();
@@ -289,10 +272,16 @@ impl Reader<'_> {
                 )
             }
             LuaValue::Table(t) => {
-                if self.list.is_list(t) || t.raw_len() > 0 {
-                    Value::Array(self.items(t, field)?)
-                } else {
-                    Value::Object(self.entries(t, field)?)
+                // A record table carries its shape, so a record nested in a returned value
+                // (`return {a = record}`) keeps it too; any other table is read by what it
+                // holds.
+                let shape = self
+                    .records
+                    .shape(t)
+                    .unwrap_or_else(|| Shape::of_table(t, self.list));
+                match shape {
+                    Shape::List => Value::Array(self.items(t, field)?),
+                    Shape::Object => Value::Object(self.entries(t, field)?),
                 }
             }
             other => {
@@ -305,94 +294,18 @@ impl Reader<'_> {
     }
 }
 
-/// The table the script returned as a record, its strings together under `output_bytes`.
-/// A key must be a record field, so a typo cannot silently drop data; a map field must be a
-/// table (or `nil`, the empty map); every value goes through core's write rules. Every field
-/// is optional (`kind` is `log` when left out).
-pub(crate) fn from_table(
-    table: &Table,
+/// The value the script returned as a record, its strings together under `output_bytes`.
+/// Any JSON is a record, so nothing here judges a key or a type; what is refused is what has
+/// no JSON form at all (a function, a coroutine, userdata, a non-finite number, a string
+/// that is not UTF-8), the output cap, and a table nested past [`MAX_DEPTH`].
+pub(crate) fn from_lua(
+    value: &LuaValue,
     output_bytes: usize,
     list: &ListMark,
+    records: &RecordMark,
 ) -> Result<Record, OutputError> {
-    let mut record = Record::default();
-    let mut reader = Reader {
-        used: 0,
-        cap: output_bytes,
-        depth: 0,
-        list,
-    };
-    for pair in table.pairs::<LuaValue, LuaValue>() {
-        let (key, value) =
-            pair.map_err(|e| OutputError(format!("cannot read the returned table: {e}")))?;
-        let LuaValue::String(key) = key else {
-            return refuse(format!("key {} is not a field name", type_name(&key)));
-        };
-        let key = key
-            .to_str()
-            .map_err(|_| OutputError("a key is not valid UTF-8".into()))?
-            .to_owned();
-        match FieldPath::top_level(&key) {
-            None => return refuse(format!("`{key}` is not a record field")),
-            Some(TopLevel::Map(map)) => {
-                let entries = match &value {
-                    LuaValue::Nil => continue,
-                    LuaValue::Table(t) => reader.entries(t, &key)?,
-                    other => {
-                        return refuse(format!(
-                            "`{key}` must be a table, not {}",
-                            type_name(other)
-                        ));
-                    }
-                };
-                for (name, value) in entries {
-                    write(&map.key(&name), &mut record, value)?;
-                }
-            }
-            Some(TopLevel::Field(path)) => {
-                // `json.null` on a field is left out, as `nil` is: a field is never `null`.
-                let value = reader.json(&value, &key)?;
-                if !value.is_null() {
-                    write(&path, &mut record, value)?;
-                }
-            }
-        }
-    }
-    Ok(record)
-}
-
-/// Write `value` through core's write rules. When the rules refuse it as given, the value
-/// is tried once more in the form a Lua author means: an integral float as the integer
-/// (`18 / 2` is a float in Lua 5.4), and for the record id, decimal text as the integer (the
-/// form [`to_table`] hands over an id above 2^63 in). The refusal reported is core's.
-fn write(path: &FieldPath, record: &mut Record, value: Value) -> Result<(), OutputError> {
-    let meant = integral(&value).or_else(|| if path.is_id() { decimal(&value) } else { None });
-    let Err(refused) = path.write(record, value) else {
-        return Ok(());
-    };
-    match meant.map(|meant| path.write(record, meant)) {
-        Some(Ok(())) => Ok(()),
-        _ => refuse(refused.to_string()),
-    }
-}
-
-/// The integer an integral float within `i64` stands for (a float that large is an integer
-/// already, and the cast is exact).
-fn integral(value: &Value) -> Option<Value> {
-    // 2^63, the first float outside `i64`.
-    const I64_END: f64 = 9_223_372_036_854_775_808.0;
-    if !value.is_f64() {
-        return None;
-    }
-    let f = value.as_f64()?;
-    (f.fract() == 0.0 && (-I64_END..I64_END).contains(&f)).then(|| Value::from(f as i64))
-}
-
-/// The `u64` that decimal digits spell, the form an id above 2^63 crosses in.
-fn decimal(value: &Value) -> Option<Value> {
-    let text = value
-        .as_str()
-        .filter(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))?;
-    text.parse::<u64>().ok().map(Value::from)
+    let mut reader = Reader::new(output_bytes, list, records);
+    reader.json(value, "the returned record").map(Record::new)
 }
 
 /// A Lua value's type as an error message names it.
@@ -408,5 +321,132 @@ pub(crate) fn type_name(value: &LuaValue) -> &'static str {
         LuaValue::Thread(_) => "a coroutine",
         LuaValue::UserData(_) | LuaValue::LightUserData(_) => "userdata",
         _ => "an unknown value",
+    }
+}
+
+/// Which JSON shape a record table stands for. A table alone cannot say: an empty one is both
+/// an empty object and an empty list, so the shape rides on the metatable instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shape {
+    /// A JSON object.
+    Object,
+    /// A JSON list.
+    List,
+}
+
+impl Shape {
+    /// The shape a JSON `value` has, for one already known to be an object or a list.
+    pub(crate) fn of(value: &Value) -> Self {
+        if value.is_array() {
+            Self::List
+        } else {
+            Self::Object
+        }
+    }
+
+    /// The shape a table that is not a record table stands for: marked as a list, or holding
+    /// positions, makes a list; anything else an object.
+    pub(crate) fn of_table(table: &Table, list: &ListMark) -> Self {
+        if list.is_list(table) || table.raw_len() > 0 {
+            Self::List
+        } else {
+            Self::Object
+        }
+    }
+}
+
+/// `record:copy()`: a deep copy of the table, shared structure and cycles kept as they are,
+/// every list still marked as one, with the record metatable so the copy can be copied too.
+/// Written in Lua so it runs under the instruction budget and the memory cap like the
+/// script's own code. The chunk takes the metatable and a function that marks the copy of a
+/// list, and returns the method.
+const COPY: &str = r#"
+local mark, finish = ...
+local next, type = next, type
+local function deep(value, seen)
+  if type(value) ~= "table" then return value end
+  local done = seen[value]
+  if done then return done end
+  local out = {}
+  mark(value, out)
+  seen[value] = out
+  for k, v in next, value do
+    out[deep(k, seen)] = deep(v, seen)
+  end
+  return out
+end
+return function(record)
+  return finish(record, deep(record, {}))
+end
+"#;
+
+/// The two metatables a record table can carry: one for a record that is an object, one for
+/// a record that is a list. Both answer `"record"` to `getmetatable`, both refuse
+/// `setmetatable`, and both share the `copy` method, so a script cannot tell them apart or
+/// change `copy` for the records after it. Which one a table carries is how the stage reads a
+/// returned record back in the shape it handed over, so an empty list does not come back an
+/// empty object.
+#[derive(Clone)]
+pub(crate) struct RecordMark {
+    object: Table,
+    list: Table,
+}
+
+impl RecordMark {
+    pub(crate) fn new(lua: &mlua::Lua, lists: &ListMark) -> mlua::Result<Self> {
+        let object = lua.create_table()?;
+        let list = lua.create_table()?;
+        // A script cannot read the list mark, so the copy asks Rust which tables carry it.
+        let marker = lists.clone();
+        let mark = lua.create_function(move |_, (from, to): (Table, Table)| {
+            if marker.is_list(&from) {
+                marker.mark(&to)?;
+            }
+            Ok(())
+        })?;
+        // The copy of a record table is a record table of the same flavour.
+        let this = Self {
+            object: object.clone(),
+            list: list.clone(),
+        };
+        let for_copy = this.clone();
+        let finish = lua.create_function(move |_, (from, to): (Table, Table)| {
+            if let Some(shape) = for_copy.shape(&from) {
+                for_copy.mark(&to, shape)?;
+            }
+            Ok(to)
+        })?;
+        let copy: Function = lua
+            .load(COPY)
+            .set_name("=record:copy")
+            .call((mark, finish))?;
+        let methods = lua.create_table()?;
+        methods.raw_set("copy", copy)?;
+        for metatable in [&object, &list] {
+            metatable.raw_set("__index", methods.clone())?;
+            metatable.raw_set("__metatable", "record")?;
+        }
+        Ok(this)
+    }
+
+    /// Mark `table` as the record, in the flavour its JSON shape calls for.
+    pub(crate) fn mark(&self, table: &Table, shape: Shape) -> mlua::Result<()> {
+        let metatable = match shape {
+            Shape::List => &self.list,
+            Shape::Object => &self.object,
+        };
+        table.set_metatable(Some(metatable.clone()))
+    }
+
+    /// The shape `table` carries, or `None` when it is not a record table.
+    pub(crate) fn shape(&self, table: &Table) -> Option<Shape> {
+        let metatable = table.metatable()?;
+        if metatable == self.list {
+            Some(Shape::List)
+        } else if metatable == self.object {
+            Some(Shape::Object)
+        } else {
+            None
+        }
     }
 }

@@ -1,12 +1,15 @@
 # lua script API
 
-## The record table
+## The record
 
-Each field of the record is a key in the table, under its own name: `id`, `kind`, `time_unix_nano`, `observed_time_unix_nano`, `severity_text`, `severity_number`, `body`, `attributes`, `resource`, `scope`, `trace_id` and `span_id`. See [Concepts](../../concepts.md) for their types.
+`process` gets the record as the JSON it is. There is no field list: whatever keys the producer sent are the keys you get.
 
-- A field the record does not have is `nil`. `kind` is always there.
-- `attributes`, `resource` and `scope` are always tables, maybe empty. Their keys are the full flat keys: `record.attributes["http.status"]`.
-- `id` is the payload's `id`. The record id the pipeline uses is `meta.id`.
+- A JSON object is a table, and a list is a table too.
+- A record that is one piece of text, as a [`codec: text`](../../nats.md) source gives it, is a Lua string. A number or a bool crosses as itself.
+- **Nothing is there unless it was sent.** A key the record does not have is `nil`, including `attributes`, `kind` and `id`. Before adding to a table that may be absent, write `record.attributes = record.attributes or {}`.
+- A key whose name holds a dot is just a key: `record.resource["log.format"]`.
+- `record.id` is the payload's own `id`, if it has one. The record id the pipeline uses is `meta.id`.
+- `record:copy()` is a method on the record table, so it exists only when the record is an object or a list. A record that is text, a number or a bool is a Lua value you can copy by assigning it.
 
 ## The meta table
 
@@ -14,7 +17,7 @@ Each field of the record is a key in the table, under its own name: `id`, `kind`
 
 ## Return values
 
-Return the record to pass it on. The script can change any field, add fields under `attributes`, `resource` or `scope`, and remove fields by setting them to `nil`.
+Return the record to pass it on. The script can change any key, add keys anywhere it likes — there is no field list — and remove one by setting it to `nil`. A record the script leaves alone comes back exactly as it went in, whatever its shape.
 
 Return `nil` to drop the record. The message is still acked.
 
@@ -75,11 +78,26 @@ Every record from a split keeps the Meta of the message, so all three carry reco
 
 Before a returned record leaves the stage, the pipeline checks it:
 
-- Every top-level key must be a record field. A key such as `colour` is an error.
-- Each field must have the right type. `kind` must be `log`, `metric` or `span`, and `id` a whole number that is not negative.
-- A whole number written as a float, such as `18 / 2`, is turned into the number `9`. For `id` only, a text of digits such as `"7"` becomes the number.
+- Every value must have a JSON form. A function, a coroutine, userdata, a number that is not finite, or text that is not UTF-8 is an error.
 - The text values in one record, added up, must fit in `limits.output_kib`.
-- Tables may nest at most 128 levels.
+- Tables may nest at most 127 levels below the record table (128 counting it).
+- A returned boolean is an error, unless the record itself arrived as a boolean: return `nil` to drop a record.
+
+No key and no type is checked, because a record is any JSON. A key such as `colour` is fine.
+
+A returned boolean is the one shape rule: `return false` almost always means an author wanted
+to drop the record, so it is refused and says to return `nil` instead. A record that *is* a
+boolean is exempt, so an identity script on one still works.
+
+The value you return is read as **one record or a split**, so a table you build with positions
+`1..n` is a split, not a list record. To pass a list record on, return `record` or
+`record:copy()`; both keep the record's own shape.
+
+Setting a key to `nil` removes it. Setting it to `json.null` keeps it as an explicit `null`.
+
+A whole number larger than 2^63 does not survive a script: Lua holds it as a floating-point
+number, so it comes back as one. `meta.id` is the exception, handed over as text when it is
+that large.
 
 ```yaml
 # messages in
@@ -100,8 +118,8 @@ Before a returned record leaves the stage, the pipeline checks it:
 
 A Lua table with keys `1..n` and nothing else becomes a JSON list. A table with no such keys becomes an object. A table with `1..n` and other keys is refused. Two helpers cover the cases Lua cannot say on its own:
 
-- `json.null` is JSON `null`. Use it inside a list or object. A field set to `json.null` is removed, the same as `nil`. `json.null` counts as true in an `if`, so compare with `== json.null`.
-- `json.list(t)` marks `t` as a list, so an empty table stays `[]`. `json.list()` makes a new empty list.
+- `json.null` is JSON `null`. Use it anywhere a value goes. A key set to `json.null` keeps an explicit `null`; set it to `nil` to remove it. `json.null` counts as true in an `if`, so compare with `== json.null`.
+- `json.list(t)` marks `t` as a list, so an empty table stays `[]`. `json.list()` makes a new empty list. Use it for a value inside the record; at the top level a marked list is a split.
 
 ```yaml
 # messages in

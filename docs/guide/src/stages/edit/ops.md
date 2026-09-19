@@ -40,7 +40,9 @@ The rename moves the value of `a` to `b`, then `set` replaces it.
 
 ## rename
 
-`rename: {from, to}` writes the value of `from` to `to`, replacing what `to` held, then removes `from`.
+`rename: {from, to}` takes the value out of `from` and writes it to `to`, replacing what `to` held.
+
+The removal happens first, which matters in two cases. `to` may live under `from` — `rename {from: a, to: a.b}` nests the old `a` under the new one — and removing afterwards would take the value with it. And removing a list position closes the gap, so `rename {from: arr.0, to: arr.1}` on `["x", "y", "z"]` gives `["y", "x"]`.
 
 ```yaml
 # messages in
@@ -97,7 +99,7 @@ If `to` does not take the value, nothing changes, and `from` stays. `from` and `
 
 `meta.tenant` is text. `meta.id`, `meta.ingestion_time` and `meta.delivery_count` are numbers.
 
-The pipeline does not check at start that `to` takes the value `from` will have. A `copy` from `meta.tenant` to `severity_number` loads, and then is unapplied with cause `type` on every record.
+No path has a type, so a `copy` lands wherever it is sent: `copy {from: meta.tenant, to: severity_number}` writes the tenant's text there. A `copy` is unapplied only when its source reads as null, with cause `absent`.
 
 ## hash
 
@@ -145,7 +147,7 @@ The digest has no salt. It works as a join key: the same input always gives the 
 
 ## Fields you can change
 
-Every record field is yours: `id`, `kind` and `resource.tenant.id` too. Changing them changes what the sink writes, and nothing else. The pipeline keeps using the record's Meta for the tenant, the record id and its decisions.
+Every record field is yours: `id`, `kind` and `resource."tenant.id"` too. Changing them changes what the sink writes, and nothing else. The pipeline keeps using the record's Meta for the tenant, the record id and its decisions.
 
 ```yaml
 # messages in

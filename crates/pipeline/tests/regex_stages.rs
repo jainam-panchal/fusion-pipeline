@@ -4,12 +4,13 @@
 
 mod common;
 
-use fusion_core::memory::AckOutcome;
+use fusion_core::memory::{AckOutcome, MemorySinks};
 use fusion_core::metrics::{CounterMetric, HistogramMetric};
+use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use serde_json::{Value, json};
 
-use common::{Harness, WAIT, deploy_pattern, for_each_worker_count, start};
+use common::{Harness, WAIT, deploy_pattern, for_each_worker_count, registry, start};
 
 /// The spec's Linux syslog pattern, lifting the structured CSV's columns, as the POC config
 /// ships it.
@@ -35,13 +36,14 @@ fn record(id: u64, body: &str) -> Record {
     Record::from_json(&json!({"id": id, "body": body}).to_string()).expect("record parses")
 }
 
-fn attributes(h: &Harness, sink: &str, id: u64) -> serde_json::Map<String, Value> {
+fn attributes(h: &Harness, sink: &str, id: u64) -> Value {
     h.sinks
         .records(sink)
         .into_iter()
-        .find(|r| r.id.map(|i| i.0) == Some(id))
+        .find(|r| r.value()["id"].as_u64() == Some(id))
         .unwrap_or_else(|| panic!("record {id} reached `{sink}`"))
-        .attributes
+        .into_value()["attributes"]
+        .clone()
 }
 
 #[test]
@@ -63,9 +65,9 @@ fn named_groups_become_attributes_and_the_body_is_kept() {
             "PID": "19939",
             "Content": "authentication failure; logname= uid=0 euid=0 tty=NODEVssh ruser= rhost=218.188.2.4 ",
         });
-        assert_eq!(Value::Object(attrs), expected, "workers={workers}");
-        let body = h.sinks.records("out")[0].body.clone();
-        assert_eq!(body, Some(Value::String(line.to_owned())));
+        assert_eq!(attrs, expected, "workers={workers}");
+        let body = h.sinks.records("out")[0].value()["body"].clone();
+        assert_eq!(body, Value::String(line.to_owned()));
         h.finish();
     });
 }
@@ -134,10 +136,7 @@ fn regex_node_metrics_carry_the_engine_label_and_other_nodes_do_not() {
         ("engine", "backtracking"),
     ];
     assert_eq!(h.counter(CounterMetric::RecordsIn, &backtracking), 1);
-    assert_eq!(
-        attributes(&h, "out", 2),
-        json!({"Id": "42"}).as_object().cloned().expect("object")
-    );
+    assert_eq!(attributes(&h, "out", 2), json!({"Id": "42"}));
     h.finish();
 }
 
@@ -175,10 +174,7 @@ fn on_redos_risk_warn_loads_the_pattern_and_serves_records() {
     let yaml = extract_yaml_with(r"(?<x>(?:a|b)*)(?=c)", "    on_redos_risk: warn");
     let h = start(&yaml, 1);
     assert_eq!(h.push(record(1, "abc")).wait(WAIT), Some(AckOutcome::Ack));
-    assert_eq!(
-        attributes(&h, "out", 1),
-        json!({"x": "ab"}).as_object().cloned().expect("object")
-    );
+    assert_eq!(attributes(&h, "out", 1), json!({"x": "ab"}));
     h.finish();
 }
 
@@ -229,10 +225,7 @@ fn a_tripped_match_limit_drops_the_record_and_the_stage_keeps_serving() {
     assert_eq!(h.push(record(2, "aaaa")).wait(WAIT), Some(AckOutcome::Ack));
 
     assert_eq!(h.ids("out"), vec![2]);
-    assert_eq!(
-        attributes(&h, "out", 2),
-        json!({"run": "aaaa"}).as_object().cloned().expect("object")
-    );
+    assert_eq!(attributes(&h, "out", 2), json!({"run": "aaaa"}));
     let dropped = [
         ("tenant", "acme"),
         ("stage", "parse_linux"),
@@ -279,9 +272,9 @@ fn redact_replaces_every_match_in_each_listed_field_and_nothing_else() {
         assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "workers={workers}");
 
         let out = &h.sinks.records("out")[0];
-        assert_eq!(out.body, Some(json!("call [phone] or [phone]")));
-        assert_eq!(out.attributes["msg"], json!("cell [phone]"));
-        assert_eq!(out.attributes["other"], json!("555-1111 stays"));
+        assert_eq!(out.value()["body"], json!("call [phone] or [phone]"));
+        assert_eq!(out.value()["attributes"]["msg"], json!("cell [phone]"));
+        assert_eq!(out.value()["attributes"]["other"], json!("555-1111 stays"));
         let labels = [
             ("tenant", "acme"),
             ("stage", "mask_phones"),
@@ -299,8 +292,8 @@ fn redact_counts_a_record_where_no_listed_field_matched_once_and_skips_non_strin
     assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack));
 
     let out = &h.sinks.records("out")[0];
-    assert_eq!(out.body, Some(json!("no phone")));
-    assert_eq!(out.attributes["msg"], json!(42));
+    assert_eq!(out.value()["body"], json!("no phone"));
+    assert_eq!(out.value()["attributes"]["msg"], json!(42));
     let labels = [
         ("tenant", "acme"),
         ("stage", "mask_phones"),
@@ -332,26 +325,19 @@ fn redact_over_input_bytes_drops_with_reason_regex_limit_and_nothing_reaches_the
 }
 
 #[test]
-fn redact_rejects_fields_that_take_no_string_and_malformed_fields_at_load_naming_the_node() {
-    for field in ["id", "kind", "severity_number"] {
-        let message = load_error(&REDACT.replace("[body, attributes.msg]", &format!("[{field}]")));
-        assert!(
-            message.contains("mask_phones")
-                && message.contains(field)
-                && message.contains("string"),
-            "{message}"
-        );
+fn redact_rejects_only_meta_and_malformed_fields_at_load_naming_the_node() {
+    // No field has a type any more (issue #79), so a field that cannot hold a string is not
+    // a load error: `redact` skips it at run time, as it always did for a non-string value.
+    for field in ["id", "kind", "severity_number", "attributes"] {
+        let yaml = REDACT.replace("[body, attributes.msg]", &format!("[{field}]"));
+        Pipeline::from_yaml(&yaml, &registry(&MemorySinks::new()))
+            .unwrap_or_else(|e| panic!("`{field}` is an ordinary path now: {e}"));
     }
 
+    // `meta` is the one path a redaction is still refused, since it writes what it read.
     let message = load_error(&REDACT.replace("[body, attributes.msg]", "[meta.tenant]"));
     assert!(
         message.contains("mask_phones") && message.contains("`meta.tenant` is the pipeline's"),
-        "{message}"
-    );
-
-    let message = load_error(&REDACT.replace("[body, attributes.msg]", "[attributes]"));
-    assert!(
-        message.contains("mask_phones") && message.contains("attributes"),
         "{message}"
     );
 

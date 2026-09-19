@@ -1,5 +1,5 @@
 acks: [ack, ack, ack]
 sinks:
   out:
-    - payload: {kind: log, body: acme first}
-    - payload: {kind: log, body: globex first}
+    - payload: {body: acme first}
+    - payload: {body: globex first}

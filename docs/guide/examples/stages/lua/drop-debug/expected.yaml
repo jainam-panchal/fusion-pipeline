@@ -1,4 +1,4 @@
 acks: [ack, ack]
 sinks:
   out:
-    - payload: {kind: log, severity_text: WARN, body: payment retry}
+    - payload: {severity_text: WARN, body: payment retry}

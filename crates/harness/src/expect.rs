@@ -25,8 +25,8 @@ pub const SAMPLE_PERCENT: f64 = 90.0;
 
 /// Whether the POC config's `sample` node keeps line `line_id` in `cycle`.
 ///
-/// The node runs in `consistent` mode on `[attributes.loghub.line_id,
-/// attributes.loghub.cycle]`, both integers, so every copy of a duplicate group gets one
+/// The node runs in `consistent` mode on `[attributes."loghub.line_id",
+/// attributes."loghub.cycle"]`, both integers, so every copy of a duplicate group gets one
 /// verdict, and a line left out in one cycle is kept in others. The rule is the one the
 /// mode documents: FNV-1a 64 over the key values as a canonical JSON array, the splitmix
 /// finalizer, kept at or below `percent` of the hash space.
@@ -41,7 +41,7 @@ pub fn sample_keeps(line_id: usize, cycle: u64) -> bool {
 pub struct Expectation {
     /// The record id the message carried in `Fusion-Record-Id`.
     pub id: u64,
-    /// Its set, which is its `resource.log.format`.
+    /// Its set, which is its `resource."log.format"`.
     pub set: String,
     /// The tenant it was published under.
     pub tenant: String,

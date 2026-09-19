@@ -1,17 +1,27 @@
-//! Field paths: the one way every stage names a record field.
+//! Field paths: the one way every stage names part of a record.
 //!
-//! A path is `root ("." segment)*`. The root is a top-level record field. When it is
-//! `attributes`, `resource` or `scope`, the segments joined with dots are the map key, so
-//! `attributes.http.status` names the `http.status` key of `attributes` and
-//! `resource.k8s.pod-name` the `k8s.pod-name` key of `resource`. A bare segment is one or
-//! more of `[A-Za-z0-9_-]`; a segment with any other character is double-quoted, with `\"`
-//! and `\\` as the only escapes: `attributes."Event ID".code` names the `Event ID.code` key.
-//! The three maps are flat: values are scalars and nothing below a key is addressable.
-//! `body` is addressed only as a whole, and the scalar fields take no segments.
+//! A record is any JSON value (issue #79, ADR 0008), so a path is a list of segments walked
+//! over it: `level` names a top-level key, `test2.key2` a key inside an object,
+//! `attributes.0.value` a list position and then keys below it. A segment that is one or
+//! more of `[A-Za-z0-9_-]` is written bare; any other segment is double-quoted, with `\"`
+//! and `\\` as the only escapes, so `resource."log.format"` names the key `log.format` of
+//! `resource` and `attributes."Event ID".code` the `code` key under `Event ID`.
 //!
-//! A fourth root, `meta`, names the pipeline's view of the record rather than the record:
-//! `meta.id`, `meta.tenant`, `meta.ingestion_time`, `meta.delivery_count` (ADR 0005). A meta
-//! path reads the record's [`Meta`] and refuses every write and removal.
+//! `.` alone names the whole record. A path may also be written with a leading dot, which
+//! names the record and nothing else: `."log.format"` and `.0.value` are the way to start a
+//! path at a key that is not a bare word, and `.meta` is the payload's own `meta` key.
+//!
+//! Without that leading dot, `meta` is reserved: `meta.id`, `meta.tenant`,
+//! `meta.ingestion_time` and `meta.delivery_count` name the pipeline's view of the record
+//! rather than the record (ADR 0005). A meta path reads the record's [`Meta`] and refuses
+//! every write and removal, which is the one refusal left in this module.
+//!
+//! Reading a path that is not there is [`FieldValue::Null`], never an error: with no field
+//! list there is no such thing as a wrong path, only one that matches nothing. Writing
+//! through a path makes the path exist: a missing key is created, and a value in the way of
+//! the walk (a scalar, or a list with no such position) is replaced by an object. So a write
+//! through a record path cannot fail, and [`FieldPath::writable`] proves that once, at load,
+//! by handing back a [`WritePath`].
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -19,18 +29,17 @@ use std::sync::LazyLock;
 
 use serde_json::{Map, Value};
 
-use crate::closed_set::closed_set;
 use crate::meta::{Meta, MetaField, MetaValue};
-use crate::record::{Kind, Record, RecordId};
+use crate::record::Record;
 
 /// Errors from parsing a path or writing through one. Each message says what is wrong and
 /// what to write instead.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum PathError {
-    /// The path is empty or has an empty segment (`a..b`, `a.""`, a leading or trailing dot).
+    /// The path is empty or has an empty segment (`a..b`, `a.""`, a trailing dot).
     #[error(
-        "`{path}` has an empty segment; instead use `<field>.<key>` with one dot between names"
+        "`{path}` has an empty segment; instead use `<name>.<name>` with one dot between names"
     )]
     EmptySegment {
         /// The path text.
@@ -53,20 +62,18 @@ pub enum PathError {
         /// The path text.
         path: String,
     },
-    /// The path uses `[...]`, which is no longer part of the grammar.
+    /// The path uses `[...]`, which is not part of the grammar.
     #[error("brackets are not allowed; instead use `{instead}`")]
     BracketSyntax {
         /// The same path in dotted form.
         instead: String,
     },
-    /// The first segment is not a record field.
-    #[error("`{name}` is not a record field; instead use one of {}", FIELDS.as_str())]
-    UnknownField {
-        /// The segment text.
-        name: String,
-    },
     /// `meta` was named without a field, or with one that is not a meta field.
-    #[error("`{path}` is not a meta field; instead use one of {}", META_FIELDS.as_str())]
+    #[error(
+        "`{path}` is not a meta field; instead use one of {}, or `.{META_ROOT}...` for a \
+         payload key spelled `{META_ROOT}`",
+        META_FIELDS.as_str()
+    )]
     UnknownMetaField {
         /// The path text.
         path: String,
@@ -80,48 +87,7 @@ pub enum PathError {
         /// The meta path.
         path: String,
     },
-    /// A field that is addressed only as a whole was given further segments.
-    #[error("`{field}` is one value and has no fields; instead use `{field}`{hint}")]
-    NotAMap {
-        /// The field name.
-        field: String,
-        /// Extra advice for `body`; empty otherwise.
-        hint: &'static str,
-    },
-    /// A map field was named without a key.
-    #[error("`{field}` needs a key; instead use `{field}.<key>`")]
-    MapNeedsKey {
-        /// The map field name.
-        field: String,
-    },
-    /// The value has the wrong JSON type for the field.
-    #[error("`{field}` takes {expected}, not {actual}")]
-    WrongType {
-        /// The field or map key.
-        field: String,
-        /// What the field accepts.
-        expected: &'static str,
-        /// The JSON type of the offered value.
-        actual: &'static str,
-    },
 }
-
-/// The roots a path may start at, as the unknown-field error lists them: every [`Field`],
-/// then every [`MapField`] with `.<key>`, then `meta.<field>`.
-static FIELDS: LazyLock<String> = LazyLock::new(|| {
-    let fields = Field::ALL
-        .into_iter()
-        .map(|field| field.as_str().to_owned());
-    let maps = MapField::ALL
-        .into_iter()
-        .map(|map| format!("{}.<key>", map.as_str()));
-    let meta = std::iter::once(format!("{META_ROOT}.<field>"));
-    fields
-        .chain(maps)
-        .chain(meta)
-        .collect::<Vec<_>>()
-        .join(", ")
-});
 
 /// Every meta path, as the unknown-meta-field error lists them.
 static META_FIELDS: LazyLock<String> = LazyLock::new(|| {
@@ -135,119 +101,13 @@ static META_FIELDS: LazyLock<String> = LazyLock::new(|| {
 /// The root of the meta paths.
 const META_ROOT: &str = "meta";
 
-closed_set! {
-    /// A top-level field that is addressed as a whole, by its path spelling, in the order the
-    /// unknown-field error lists them.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Field {
-        Id = "id",
-        Kind = "kind",
-        Body = "body",
-        SeverityText = "severity_text",
-        SeverityNumber = "severity_number",
-        TimeUnixNano = "time_unix_nano",
-        ObservedTimeUnixNano = "observed_time_unix_nano",
-        TraceId = "trace_id",
-        SpanId = "span_id",
-    }
-}
-
-closed_set! {
-    /// One of the three flat maps, by its path spelling.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum MapField {
-        Attributes = "attributes",
-        Resource = "resource",
-        Scope = "scope",
-    }
-}
-
-/// What a path may start at: a record field or a map, each a closed set, or `meta`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Root {
-    Field(Field),
-    Map(MapField),
-    Meta,
-}
-
-impl Root {
-    /// The root spelled `name`. Every variant of `Root` needs its arm here; `name` below is
-    /// exhaustive, this is not.
-    fn parse(name: &str) -> Option<Self> {
-        Field::parse(name)
-            .map(Self::Field)
-            .or_else(|| MapField::parse(name).map(Self::Map))
-            .or_else(|| (name == META_ROOT).then_some(Self::Meta))
-    }
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Field(field) => field.as_str(),
-            Self::Map(map) => map.as_str(),
-            Self::Meta => META_ROOT,
-        }
-    }
-}
-
-impl MapField {
-    fn get(self, record: &Record) -> &Map<String, Value> {
-        match self {
-            Self::Attributes => &record.attributes,
-            Self::Resource => &record.resource,
-            Self::Scope => &record.scope,
-        }
-    }
-
-    fn get_mut(self, record: &mut Record) -> &mut Map<String, Value> {
-        match self {
-            Self::Attributes => &mut record.attributes,
-            Self::Resource => &mut record.resource,
-            Self::Scope => &mut record.scope,
-        }
-    }
-}
-
 /// What a path names once parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Target {
-    Field(Field),
-    /// A key of one of the maps.
-    Key(MapField, String),
+    /// Segments walked over the record. Empty is the whole record.
+    Record(Vec<String>),
     /// A value of the record's `Meta`.
     Meta(MetaField),
-}
-
-/// A value the write rules accepted, in the type its field stores. Storing it cannot fail.
-enum Typed<'p> {
-    Key(MapField, &'p str, Value),
-    Id(Option<RecordId>),
-    Kind(Kind),
-    TimeUnixNano(Option<u64>),
-    ObservedTimeUnixNano(Option<u64>),
-    SeverityText(Option<String>),
-    SeverityNumber(Option<i32>),
-    Body(Value),
-    TraceId(Option<String>),
-    SpanId(Option<String>),
-}
-
-impl Typed<'_> {
-    fn store(self, record: &mut Record) {
-        match self {
-            Self::Key(map, key, value) => {
-                map.get_mut(record).insert(key.to_owned(), value);
-            }
-            Self::Id(id) => record.id = id,
-            Self::Kind(kind) => record.kind = kind,
-            Self::TimeUnixNano(n) => record.time_unix_nano = n,
-            Self::ObservedTimeUnixNano(n) => record.observed_time_unix_nano = n,
-            Self::SeverityText(s) => record.severity_text = s,
-            Self::SeverityNumber(n) => record.severity_number = n,
-            Self::Body(value) => record.body = Some(value),
-            Self::TraceId(s) => record.trace_id = s,
-            Self::SpanId(s) => record.span_id = s,
-        }
-    }
 }
 
 /// A number as read from a record. Two integers compare exactly; when either side is a
@@ -295,8 +155,8 @@ impl PartialOrd for Num {
     }
 }
 
-/// A field as read from a record: a borrowed view, never a copy. An absent field is
-/// [`FieldValue::Null`].
+/// A value as read from a record: a borrowed view, never a copy. A path that matches nothing
+/// reads as [`FieldValue::Null`], the same as a JSON `null`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum FieldValue<'a> {
@@ -306,9 +166,9 @@ pub enum FieldValue<'a> {
     Bool(bool),
     /// A JSON number.
     Num(Num),
-    /// A string field or a JSON string.
+    /// A JSON string.
     Str(&'a str),
-    /// An array or object: `body` when structured. Comparable to nothing.
+    /// An array or object. Comparable to nothing.
     Json(&'a Value),
 }
 
@@ -326,33 +186,18 @@ impl<'a> FieldValue<'a> {
     }
 }
 
-/// A top-level record field by name, as [`FieldPath::top_level`] answers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TopLevel {
-    /// A field that holds one value.
-    Field(FieldPath),
-    /// One of the three flat maps.
-    Map(RecordMap),
-}
-
-/// One of the three flat maps, `attributes`, `resource` or `scope`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecordMap(MapField);
-
-impl RecordMap {
-    /// The path of `key` under this map, whatever characters `key` holds.
-    #[must_use]
-    pub fn key(self, key: &str) -> FieldPath {
-        FieldPath {
-            target: Target::Key(self.0, key.to_owned()),
-        }
-    }
-}
-
-/// A parsed dotted path into a record.
+/// A parsed path into a record or its `Meta`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldPath {
     target: Target,
+}
+
+/// A path proved to name the record rather than its `Meta`, so writing and removing through
+/// it cannot fail. [`FieldPath::writable`] is the only way to get one, which puts the one
+/// refusal in this module at config load, where the node can be named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WritePath {
+    segments: Vec<String>,
 }
 
 /// Whether `c` may appear in a bare path segment.
@@ -360,15 +205,17 @@ const fn is_segment_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
-fn json_type(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "a bool",
-        Value::Number(_) => "a number",
-        Value::String(_) => "a string",
-        Value::Array(_) => "an array",
-        Value::Object(_) => "an object",
+/// The list position `segment` names, if it names one: digits with no leading zero, so one
+/// segment cannot mean two things by the record's shape. `007` would otherwise be position 7
+/// in a list and the key `007` in an object; it is only ever the key.
+fn position(segment: &str) -> Option<usize> {
+    if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
+    if segment.len() > 1 && segment.starts_with('0') {
+        return None;
+    }
+    segment.parse().ok()
 }
 
 /// A segment as written in a path: bare when it can be, quoted otherwise.
@@ -380,10 +227,9 @@ fn display_segment(segment: &str) -> String {
     }
 }
 
-/// `attributes["http.status"]["a b"]` as `attributes.http.status."a b"`, for the bracket
+/// `attributes["http.status"]["a b"]` as `attributes."http.status"."a b"`, for the bracket
 /// error's hint. The scan honours quotes, so `["a[0]"]` and `['a]b']` name the key the user
-/// wrote; an unclosed quote runs to the end of the path. The hint is a valid path whenever
-/// the input named a key; an empty bracket on a map hints `<map>.<key>`.
+/// wrote; an unclosed quote runs to the end of the path.
 fn unbracket(path: &str) -> String {
     let mut segments: Vec<String> = Vec::new();
     let mut i = 0;
@@ -402,12 +248,8 @@ fn unbracket(path: &str) -> String {
         }
     }
     let mut out: Vec<String> = segments.iter().map(|s| display_segment(s)).collect();
-    if out.len() == 1 {
-        match Root::parse(&out[0]) {
-            Some(Root::Map(_)) => out.push("<key>".to_owned()),
-            Some(Root::Meta) => out.push("<field>".to_owned()),
-            Some(Root::Field(_)) | None => {}
-        }
+    if out.len() == 1 && out[0] == META_ROOT {
+        out.push("<field>".to_owned());
     }
     out.join(".")
 }
@@ -431,23 +273,27 @@ fn bracket_contents(text: &str) -> (&str, usize) {
     (text, text.len())
 }
 
-/// The pieces one bracket's contents name: a quoted part is unescaped, then split on dots
-/// since `["http.status"]` and `.http.status` name the same flat key. Empty pieces are
-/// dropped.
+/// What one bracket's contents name: a quoted part is unescaped and kept whole, since
+/// `["http.status"]` named one flat key and `."http.status"` is how that key is written now.
+/// An unquoted part is split on dots. Empty pieces are dropped.
 fn bracket_pieces(inner: &str) -> Vec<String> {
     let inner = inner.trim();
-    let unquoted = match inner.chars().next() {
+    match inner.chars().next() {
         Some(quote @ ('"' | '\'')) => {
             let body = &inner[1..];
-            unescape(body.strip_suffix(quote).unwrap_or(body))
+            let key = unescape(body.strip_suffix(quote).unwrap_or(body));
+            if key.is_empty() {
+                Vec::new()
+            } else {
+                vec![key]
+            }
         }
-        _ => inner.to_owned(),
-    };
-    unquoted
-        .split('.')
-        .filter(|piece| !piece.is_empty())
-        .map(str::to_owned)
-        .collect()
+        _ => inner
+            .split('.')
+            .filter(|piece| !piece.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    }
 }
 
 /// The pieces of dotted text outside brackets, each bare or `"`-quoted. Empty pieces are
@@ -513,8 +359,8 @@ pub fn quoted_end(text: &str, start: usize) -> Option<usize> {
     None
 }
 
-/// The segments of `path`, in order, with quotes and escapes resolved. Only key segments
-/// have a charset; the root is judged by name afterwards.
+/// The segments of `path`, in order, with quotes and escapes resolved. Every segment has the
+/// same rules, the first one included: bare within the charset, quoted otherwise.
 fn split_segments(path: &str) -> Result<Vec<String>, PathError> {
     let empty = || PathError::EmptySegment {
         path: path.to_owned(),
@@ -524,7 +370,7 @@ fn split_segments(path: &str) -> Result<Vec<String>, PathError> {
     loop {
         let start = i;
         let rest = &path[i..];
-        let segment = if rest.starts_with('"') && !segments.is_empty() {
+        let segment = if rest.starts_with('"') {
             let (segment, end) = unquote(path, i)?;
             i = end;
             if segment.is_empty() {
@@ -540,10 +386,7 @@ fn split_segments(path: &str) -> Result<Vec<String>, PathError> {
             if segment.is_empty() && !path[i..].starts_with(['[', ']']) {
                 return Err(empty());
             }
-            if let Some(ch) = segment
-                .chars()
-                .find(|&c| !segments.is_empty() && !is_segment_char(c))
-            {
+            if let Some(ch) = segment.chars().find(|&c| !is_segment_char(c)) {
                 return Err(PathError::InvalidSegment {
                     segment: segment.to_owned(),
                     ch,
@@ -622,289 +465,232 @@ fn quoted_hint(before: &[String], bad: &str, rest: &str) -> String {
     format!("{}{rest}", out.join("."))
 }
 
+/// Walk `value` by `segments`, or `None` when the walk leaves the record.
+fn read_at<'a>(value: &'a Value, segments: &[String]) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in segments {
+        current = match current {
+            Value::Object(map) => map.get(segment)?,
+            Value::Array(items) => items.get(position(segment)?)?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+/// The slot `segment` names under `current`, making it exist: an existing list position is
+/// itself, and anything else becomes a key of an object, replacing whatever was in the way.
+fn slot<'a>(current: &'a mut Value, segment: &str) -> &'a mut Value {
+    let at = match &*current {
+        Value::Array(items) => position(segment).filter(|i| *i < items.len()),
+        _ => None,
+    };
+    match (current, at) {
+        (Value::Array(items), Some(i)) => &mut items[i],
+        (current, _) => {
+            if !current.is_object() {
+                *current = Value::Object(Map::new());
+            }
+            current
+                .as_object_mut()
+                .expect("just replaced by an object")
+                .entry(segment.to_owned())
+                .or_insert(Value::Null)
+        }
+    }
+}
+
+/// Store `value` at `segments`, creating what the path needs. Empty segments replace the
+/// whole record.
+fn write_at(record: &mut Value, segments: &[String], value: Value) {
+    let Some((last, prefix)) = segments.split_last() else {
+        *record = value;
+        return;
+    };
+    let mut current = record;
+    for segment in prefix {
+        current = slot(current, segment);
+    }
+    *slot(current, last) = value;
+}
+
+/// Remove what `segments` names, returning it, or `None` when it was not there. Removing a
+/// list position closes the gap; removing the whole record leaves `null`.
+fn remove_at(record: &mut Value, segments: &[String]) -> Option<Value> {
+    let Some((last, prefix)) = segments.split_last() else {
+        return Some(std::mem::replace(record, Value::Null));
+    };
+    let mut current = record;
+    for segment in prefix {
+        current = match current {
+            Value::Object(map) => map.get_mut(segment)?,
+            Value::Array(items) => {
+                let at = position(segment)?;
+                items.get_mut(at)?
+            }
+            _ => return None,
+        };
+    }
+    match current {
+        Value::Object(map) => map.remove(last),
+        Value::Array(items) => {
+            let at = position(last).filter(|i| *i < items.len())?;
+            Some(items.remove(at))
+        }
+        _ => None,
+    }
+}
+
 impl FieldPath {
-    /// Parse a dotted path.
+    /// Parse a path.
     ///
     /// # Errors
     ///
-    /// A [`PathError`] when the text is not `root ("." segment)*`, the root is not a record
-    /// field or `meta`, a scalar or `body` is given segments, a map is named without a key,
-    /// or `meta` is not followed by exactly one meta field.
+    /// A [`PathError`] when the text is not `segment ("." segment)*`, a segment holds a
+    /// character that needs quoting, a quote is unclosed, brackets are used, or `meta` is
+    /// not followed by exactly one meta field.
     pub fn parse(path: &str) -> Result<Self, PathError> {
-        let segments = split_segments(path)?;
-        let (name, keys) = segments
-            .split_first()
-            .ok_or_else(|| PathError::EmptySegment {
+        // A leading dot names the record and nothing else, so a root that is not a bare word
+        // (`."log.format"`, `.0`) can be written, and `meta` stops being reserved.
+        let (text, rooted) = match path.strip_prefix('.') {
+            Some(rest) => (rest, true),
+            None => (path, false),
+        };
+        if rooted && text.is_empty() {
+            return Ok(Self::whole());
+        }
+        // The error names the path the author wrote, not the text left after the dot.
+        let segments = split_segments(text).map_err(|e| match e {
+            PathError::EmptySegment { .. } => PathError::EmptySegment {
                 path: path.to_owned(),
-            })?;
-        let root =
-            Root::parse(name).ok_or_else(|| PathError::UnknownField { name: name.clone() })?;
-        match (root, keys.is_empty()) {
-            (Root::Map(_), true) => Err(PathError::MapNeedsKey {
-                field: name.clone(),
-            }),
-            (Root::Map(map), false) => Ok(Self {
-                target: Target::Key(map, keys.join(".")),
-            }),
-            (Root::Field(field), true) => Ok(Self {
-                target: Target::Field(field),
-            }),
-            (Root::Meta, _) => match keys {
-                [field] => MetaField::parse(field)
-                    .map(|field| Self {
-                        target: Target::Meta(field),
-                    })
-                    .ok_or_else(|| PathError::UnknownMetaField {
-                        path: path.to_owned(),
-                    }),
-                _ => Err(PathError::UnknownMetaField {
-                    path: path.to_owned(),
-                }),
             },
-            (Root::Field(field), false) => Err(PathError::NotAMap {
-                field: name.clone(),
-                hint: if field == Field::Body {
-                    ", or parse it into attributes first"
-                } else {
-                    ""
-                },
-            }),
+            PathError::UnterminatedQuote { .. } => PathError::UnterminatedQuote {
+                path: path.to_owned(),
+            },
+            other => other,
+        })?;
+        if !rooted && segments.first().is_some_and(|first| first == META_ROOT) {
+            let unknown = || PathError::UnknownMetaField {
+                path: path.to_owned(),
+            };
+            let [field] = &segments[1..] else {
+                return Err(unknown());
+            };
+            return MetaField::parse(field)
+                .map(|field| Self {
+                    target: Target::Meta(field),
+                })
+                .ok_or_else(unknown);
         }
-    }
-
-    /// The top-level record field spelled `name`: a field with its path, as `parse(name)`
-    /// gives it, or one of the three maps; `None` for `meta` and for anything that is not a
-    /// record field. For a caller that holds a record as named values rather than as path
-    /// text.
-    #[must_use]
-    pub fn top_level(name: &str) -> Option<TopLevel> {
-        if let Some(map) = MapField::parse(name) {
-            return Some(TopLevel::Map(RecordMap(map)));
-        }
-        Field::parse(name).map(|field| {
-            TopLevel::Field(Self {
-                target: Target::Field(field),
-            })
+        Ok(Self {
+            target: Target::Record(segments),
         })
     }
 
-    /// Whether the path names the record's `id` field.
+    /// The path of the whole record, `.`.
     #[must_use]
-    pub fn is_id(&self) -> bool {
-        self.target == Target::Field(Field::Id)
-    }
-
-    /// The flat map key when the path names a key of `attributes`, `resource` or `scope`.
-    #[must_use]
-    pub fn map_key(&self) -> Option<&str> {
-        match &self.target {
-            Target::Key(_, key) => Some(key),
-            Target::Field(_) | Target::Meta(_) => None,
+    pub const fn whole() -> Self {
+        Self {
+            target: Target::Record(Vec::new()),
         }
     }
 
-    /// Read the field as a borrowed view: from `record`, or from `meta` for a meta path. An
-    /// absent field is [`FieldValue::Null`].
+    /// Read what the path names: from `record`, or from `meta` for a meta path. A path that
+    /// matches nothing reads as [`FieldValue::Null`].
     #[must_use]
     pub fn read<'a>(&self, record: &'a Record, meta: &'a Meta) -> FieldValue<'a> {
-        fn num(n: impl Into<i128>) -> FieldValue<'static> {
-            FieldValue::Num(Num::Int(n.into()))
-        }
-        fn opt_str(s: Option<&str>) -> FieldValue<'_> {
-            s.map_or(FieldValue::Null, FieldValue::Str)
-        }
-        let field = match &self.target {
-            Target::Key(map, key) => {
-                return map
-                    .get(record)
-                    .get(key)
-                    .map_or(FieldValue::Null, FieldValue::from_json);
+        match &self.target {
+            Target::Meta(field) => match meta.get(*field) {
+                MetaValue::Str(text) => FieldValue::Str(text),
+                MetaValue::U64(n) => FieldValue::Num(Num::Int(i128::from(n))),
+            },
+            Target::Record(segments) => {
+                read_at(record.value(), segments).map_or(FieldValue::Null, FieldValue::from_json)
             }
-            Target::Meta(field) => {
-                return match meta.get(*field) {
-                    MetaValue::Str(text) => FieldValue::Str(text),
-                    MetaValue::U64(n) => num(n),
-                };
-            }
-            Target::Field(field) => *field,
-        };
-        match field {
-            Field::Id => record.id.map_or(FieldValue::Null, |id| num(id.0)),
-            Field::Kind => FieldValue::Str(record.kind.as_str()),
-            Field::TimeUnixNano => record.time_unix_nano.map_or(FieldValue::Null, num),
-            Field::ObservedTimeUnixNano => {
-                record.observed_time_unix_nano.map_or(FieldValue::Null, num)
-            }
-            Field::SeverityText => opt_str(record.severity_text.as_deref()),
-            Field::SeverityNumber => record.severity_number.map_or(FieldValue::Null, num),
-            Field::Body => record
-                .body
-                .as_ref()
-                .map_or(FieldValue::Null, FieldValue::from_json),
-            Field::TraceId => opt_str(record.trace_id.as_deref()),
-            Field::SpanId => opt_str(record.span_id.as_deref()),
         }
     }
 
-    /// Whether a write through this path can happen at all: every record field is payload
-    /// and writable within its type (ADR 0005); a meta path is the pipeline's.
+    /// The same path, proved to name the record, so writes and removals through it cannot
+    /// fail. Asked once at config load, where the node can be named.
     ///
     /// # Errors
     ///
     /// [`PathError::ReadOnly`] for a meta path.
-    pub fn writable(&self) -> Result<(), PathError> {
-        match self.target {
-            Target::Meta(_) => Err(self.read_only()),
-            Target::Field(_) | Target::Key(..) => Ok(()),
+    pub fn writable(&self) -> Result<WritePath, PathError> {
+        match &self.target {
+            Target::Meta(_) => Err(PathError::ReadOnly {
+                path: self.to_string(),
+            }),
+            Target::Record(segments) => Ok(WritePath {
+                segments: segments.clone(),
+            }),
+        }
+    }
+}
+
+impl WritePath {
+    /// The path this writes through, for a message or a metric label.
+    #[must_use]
+    pub fn path(&self) -> FieldPath {
+        FieldPath {
+            target: Target::Record(self.segments.clone()),
         }
     }
 
-    /// Core's write rules for `value` through this path, without a record: `Ok` exactly when
-    /// [`FieldPath::write`] would store it, and otherwise the error `write` would give. A
-    /// stage that needs to know a type at load asks this instead of writing onto an empty
-    /// record. It runs the same typing step as `write` on a copy of `value`: the copy is paid
-    /// once per op at load, and one typing step keeps a field's type spelled in one place.
-    ///
-    /// # Errors
-    ///
-    /// As [`FieldPath::write`].
-    pub fn accepts(&self, value: &Value) -> Result<(), PathError> {
-        self.typed(value.clone()).map(drop)
+    /// The path of `segment` under this one.
+    #[must_use]
+    pub fn child(&self, segment: &str) -> Self {
+        let mut segments = self.segments.clone();
+        segments.push(segment.to_owned());
+        Self { segments }
     }
 
-    /// Write `value` to the field, creating or replacing it.
-    ///
-    /// `null` clears an optional top-level field and is stored as-is under a map key. A map
-    /// key takes any JSON value: the flat-map rule is the source's contract, unenforced at
-    /// ingest, and a record must be able to leave the way it came. Every record field is
-    /// payload (ADR 0005), `id` and `kind` included; they only have types.
-    ///
-    /// # Errors
-    ///
-    /// [`PathError::WrongType`] when a typed field is offered the wrong JSON type (`id` and
-    /// the time fields take an integer in `u64`, `kind` one of `log`, `metric` or `span`,
-    /// `severity_number` an integer in `i32`, `severity_text`, `trace_id` and `span_id` a
-    /// string); [`PathError::ReadOnly`] for a meta path. The record is unchanged on error.
-    pub fn write(&self, record: &mut Record, value: Value) -> Result<(), PathError> {
-        self.typed(value)?.store(record);
-        Ok(())
+    /// Read what the path names. A [`WritePath`] is never the pipeline's, so this needs no
+    /// `Meta`; a path that matches nothing reads as [`FieldValue::Null`].
+    #[must_use]
+    pub fn read<'a>(&self, record: &'a Record) -> FieldValue<'a> {
+        read_at(record.value(), &self.segments).map_or(FieldValue::Null, FieldValue::from_json)
     }
 
-    /// `value` as the field stores it, or why the field refuses it. The one place a field's
-    /// type is spelled.
-    fn typed(&self, value: Value) -> Result<Typed<'_>, PathError> {
-        let field = match &self.target {
-            Target::Key(map, key) => return Ok(Typed::Key(*map, key, value)),
-            Target::Meta(_) => return Err(self.read_only()),
-            Target::Field(field) => *field,
-        };
-        Ok(match field {
-            Field::Id => Typed::Id(self.expect_u64(value)?.map(RecordId)),
-            Field::Kind => Typed::Kind(self.expect_kind(&value)?),
-            Field::TimeUnixNano => Typed::TimeUnixNano(self.expect_u64(value)?),
-            Field::ObservedTimeUnixNano => Typed::ObservedTimeUnixNano(self.expect_u64(value)?),
-            Field::SeverityText => Typed::SeverityText(self.expect_string(value)?),
-            Field::SeverityNumber => Typed::SeverityNumber(self.expect_i32(value)?),
-            Field::Body => Typed::Body(value),
-            Field::TraceId => Typed::TraceId(self.expect_string(value)?),
-            Field::SpanId => Typed::SpanId(self.expect_string(value)?),
-        })
+    /// Write `value`, creating what the path needs: a missing key is added, and a scalar or
+    /// a list with no such position in the way is replaced by an object. A write through the
+    /// whole-record path, `.`, replaces the record.
+    pub fn write(&self, record: &mut Record, value: Value) {
+        write_at(record.value_mut(), &self.segments, value);
     }
 
-    /// Remove the field, returning the old value, or `None` when it was absent. Every record
-    /// field can be removed. `kind` is never absent: removing it leaves the wire default,
-    /// `log`.
-    ///
-    /// # Errors
-    ///
-    /// [`PathError::ReadOnly`] for a meta path. The record is unchanged on error.
-    pub fn remove(&self, record: &mut Record) -> Result<Option<Value>, PathError> {
-        let field = match &self.target {
-            Target::Key(map, key) => return Ok(map.get_mut(record).remove(key)),
-            Target::Meta(_) => return Err(self.read_only()),
-            Target::Field(field) => *field,
-        };
-        Ok(match field {
-            Field::Id => record.id.take().map(|id| Value::from(id.0)),
-            Field::Kind => Some(Value::from(std::mem::take(&mut record.kind).as_str())),
-            Field::TimeUnixNano => record.time_unix_nano.take().map(Value::from),
-            Field::ObservedTimeUnixNano => record.observed_time_unix_nano.take().map(Value::from),
-            Field::SeverityText => record.severity_text.take().map(Value::from),
-            Field::SeverityNumber => record.severity_number.take().map(Value::from),
-            Field::Body => record.body.take(),
-            Field::TraceId => record.trace_id.take().map(Value::from),
-            Field::SpanId => record.span_id.take().map(Value::from),
-        })
-    }
-
-    fn read_only(&self) -> PathError {
-        PathError::ReadOnly {
-            path: self.to_string(),
-        }
-    }
-
-    fn wrong_type(&self, expected: &'static str, actual: &Value) -> PathError {
-        PathError::WrongType {
-            field: self.to_string(),
-            expected,
-            actual: json_type(actual),
-        }
-    }
-
-    fn expect_string(&self, value: Value) -> Result<Option<String>, PathError> {
-        match value {
-            Value::Null => Ok(None),
-            Value::String(s) => Ok(Some(s)),
-            other => Err(self.wrong_type("a string", &other)),
-        }
-    }
-
-    fn expect_u64(&self, value: Value) -> Result<Option<u64>, PathError> {
-        match &value {
-            Value::Null => Ok(None),
-            Value::Number(n) => n
-                .as_u64()
-                .map(Some)
-                .ok_or_else(|| self.wrong_type("a non-negative integer", &value)),
-            _ => Err(self.wrong_type("a non-negative integer", &value)),
-        }
-    }
-
-    fn expect_kind(&self, value: &Value) -> Result<Kind, PathError> {
-        value
-            .as_str()
-            .and_then(Kind::parse)
-            .ok_or_else(|| self.wrong_type(Kind::ONE_OF, value))
-    }
-
-    fn expect_i32(&self, value: Value) -> Result<Option<i32>, PathError> {
-        match &value {
-            Value::Null => Ok(None),
-            Value::Number(n) => n
-                .as_i64()
-                .and_then(|i| i32::try_from(i).ok())
-                .map(Some)
-                .ok_or_else(|| self.wrong_type("an integer", &value)),
-            _ => Err(self.wrong_type("an integer", &value)),
-        }
+    /// Remove what the path names, returning it, or `None` when it was not there. Removing a
+    /// list position closes the gap; removing `.` leaves a `null` record.
+    pub fn remove(&self, record: &mut Record) -> Option<Value> {
+        remove_at(record.value_mut(), &self.segments)
     }
 }
 
 impl fmt::Display for FieldPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.target {
-            Target::Field(field) => f.write_str(Root::Field(*field).name()),
-            Target::Meta(field) => write!(f, "{}.{}", Root::Meta.name(), field.as_str()),
-            Target::Key(map, key) => {
-                f.write_str(Root::Map(*map).name())?;
-                if key.split('.').any(str::is_empty) {
-                    return write!(f, ".{}", display_segment(key));
+            Target::Meta(field) => write!(f, "{META_ROOT}.{}", field.as_str()),
+            Target::Record(segments) => {
+                let Some((first, rest)) = segments.split_first() else {
+                    return f.write_str(".");
+                };
+                // A record path whose first segment is `meta` needs the leading dot back, or
+                // it would parse as the pipeline's `meta`.
+                if first == META_ROOT {
+                    f.write_str(".")?;
                 }
-                for part in key.split('.') {
-                    write!(f, ".{}", display_segment(part))?;
+                f.write_str(&display_segment(first))?;
+                for segment in rest {
+                    write!(f, ".{}", display_segment(segment))?;
                 }
                 Ok(())
             }
         }
+    }
+}
+
+impl fmt::Display for WritePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.path(), f)
     }
 }

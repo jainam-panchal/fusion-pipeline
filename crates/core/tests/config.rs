@@ -150,7 +150,7 @@ nodes:
   - id: by.format
     type: route
     routes:
-      linux: resource.log.format == "Linux"
+      linux: resource."log.format" == "Linux"
     default: drop
   - id: out
     type: sink.memory

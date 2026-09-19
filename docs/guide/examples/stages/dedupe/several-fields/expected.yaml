@@ -1,5 +1,5 @@
 acks: [ack, ack, ack]
 sinks:
   out:
-    - payload: {kind: log, body: disk full, resource: {host: web-0}}
-    - payload: {kind: log, body: disk full, resource: {host: web-1}}
+    - payload: {body: disk full, resource: {host: web-0}}
+    - payload: {body: disk full, resource: {host: web-1}}

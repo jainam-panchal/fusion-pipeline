@@ -7,7 +7,7 @@ An observability pipeline that takes log records from NATS JetStream, runs them 
 ### Data
 
 **Record**:
-The single unit of data flowing through the pipeline: one flat OTLP-shaped log with `id`, `kind`, `body`, `attributes`, `resource`, `scope` and trace fields.
+The single unit of data flowing through the pipeline: whatever JSON the producer sent. An object, a list, a piece of text and a number are all records; there is no field list, no declared type and no default, and nothing is dropped at decode or added on the way out (ADR 0008). OTLP names such as `body`, `severity_text` and `attributes` are ordinary keys the pipeline treats no differently.
 _Avoid_: event, log line, entry
 
 **Message**:
@@ -45,7 +45,7 @@ The owner of a record, as the meta names it: the one its transport names (the NA
 _Avoid_: customer, org, namespace
 
 **Body**:
-The opaque payload of a record. Sources never interpret it; stages parse content out of it into attributes.
+By convention, the key holding a record's message text. It is an ordinary key: sources never interpret it, and a stage parses content out of it into wherever its `into` says. A record from a `codec: text` source has no keys at all, being the line itself.
 
 ### Topology
 
@@ -88,7 +88,7 @@ Two or more nodes consuming the same upstream output. The record is copy-on-writ
 One node with a list in `from`, consuming several upstream outputs.
 
 **Field path**:
-The one dotted path every stage uses to name a record field: `root ("." segment)*`. Under `attributes`, `resource` or `scope` the segments joined with dots are the flat map key (`attributes.http.status` is the `http.status` key). Segments with characters outside letters, digits, `_` and `-` are double-quoted.
+The one dotted path every stage uses to name part of a record: names joined with dots, walked over the record's JSON. A name may be a key of an object or a position in a list (`test2.key2`, `attributes.0.value.intValue`). A name with characters outside letters, digits, `_` and `-` is double-quoted, so `resource."log.format"` is the key `log.format` while `resource.log.format` is three levels. `.` is the whole record, and a leading dot names the record only (`."log.format"`, `.0`, `.meta`). A path that matches nothing reads as null; a write makes its path exist.
 _Avoid_: selector, accessor, bracket path
 
 **Meta path**:
@@ -96,8 +96,16 @@ A field path under the `meta` root: `meta.id`, `meta.tenant`, `meta.ingestion_ti
 _Avoid_: header path, system field
 
 **Write rules**:
-Core's one check of what a field path accepts: a JSON value of the field's type, anything under a map key, nothing under `meta`. Every write runs it first; a stage that needs a type at load asks it instead of writing, and `lua` writes a returned record through it.
-_Avoid_: schema, validation, probe
+How a write through a field path behaves: a write makes its path exist. A missing name is created, an existing list position is used, and a value in the way — a scalar, or a list with no such position — is replaced by an object. No path has a type, so no value is refused for being the wrong one, and a write through a record path cannot fail. `meta` is the one refusal, answered once at load by `FieldPath::writable`, which returns a **Write path** (ADR 0008).
+_Avoid_: schema, validation, probe, accepts check
+
+**Codec**:
+How the source reads a message's payload into a record: `json` decodes it as JSON, whatever shape; `text` makes the payload's bytes the record, one string, so a producer sends raw lines with no wrapper. The two ways to be **undecodable**.
+_Avoid_: parser, format, deserializer
+
+**Encoding**:
+How the sink writes a record onto the wire: `json` writes the record's JSON as the last stage left it; `text` writes a record that is a string as its bytes, and any other record as its JSON, so a stage that turned a line into an object still delivers.
+_Avoid_: serializer, output format
 
 **Condition**:
 A `field op literal` expression with `and`, `or`, `not` and parentheses, evaluated against a record. Used by `filter` and `route`.
@@ -188,7 +196,7 @@ A `lua` node's `on_error`: `pass` forwards the record as it entered the node (th
 _Avoid_: fallback, on_fail
 
 **Output check**:
-The validation of what `process` returned before it leaves the stage: every key a record field, strings under the output cap, not an empty table or list, every table read as a list (a marked one, one with keys `1..n`, or the list returned for a split) holding only its positions `1..n`, and every value, once converted from Lua (an integral float to an integer, an `id` given as decimal text to the integer), accepted by core's write rules onto a fresh record. No field is required and none must come back unchanged. A refusal is a Lua error of kind `output` with core's message.
+The validation of what `process` returned before it leaves the stage: every value has a JSON form (no function, coroutine, userdata, non-finite number or non-UTF-8 string), strings under the output cap, tables nested at most 127 below the record, not an empty table or list, not a boolean unless the record arrived as one (return `nil` to drop), and every table read as a list (a marked one, one with keys `1..n`, or the list returned for a split) holding only its positions `1..n`. No key and no type is checked, since a record is any JSON. A returned table carrying the **record mark** is one record whatever its shape. A refusal is a Lua error of kind `output`.
 _Avoid_: schema validation, sanitising
 
 **Sandbox**:
@@ -316,3 +324,10 @@ _Avoid_: sentinel, flag file, lock
 A loghub harness run (`make chaos`) during which the pipeline container is killed at 20s and started at 25s, and Dragonfly is paused at 40s for 5s. It passes as any run does, and is judged at all only when the chaos landed: the source consumer redelivered messages, `dedupe_body` counted state errors, and nothing was nakked.
 _Avoid_: chaos test (the spec's name for the requirement), fault injection, soak
 
+**Record mark**:
+The pair of metatables a record table carries, one per JSON shape, so the way back reads a
+record in the shape it was handed over and an empty list does not come back an empty object.
+Both answer `"record"` to `getmetatable`, both refuse `setmetatable`, and both share `copy`.
+`record:copy()` carries the shape too. Distinct from the **list mark**, which marks an
+ordinary table as a JSON list.
+_Avoid_: record metatable (singular), type tag

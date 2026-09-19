@@ -1,0 +1,6 @@
+acks: [ack]
+sinks:
+  out:
+    - payload:
+        body: 'ERROR: disk full on /var'
+        parsed: {level: ERROR, message: disk full on /var}

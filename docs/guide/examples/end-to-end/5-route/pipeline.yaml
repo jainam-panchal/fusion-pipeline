@@ -19,7 +19,7 @@ nodes:
   - id: stamp_tenant
     type: edit
     ops:
-      - copy: {from: meta.tenant, to: resource.tenant.id}
+      - copy: {from: meta.tenant, to: resource."tenant.id"}
   - id: by_level
     type: route
     routes:

@@ -2,7 +2,7 @@ nodes:
   - id: normalise
     type: edit
     ops:
-      - rename: {from: attributes.http.path, to: attributes.http.route}
+      - rename: {from: attributes."http.path", to: attributes."http.route"}
   - id: out
     type: sink.nats
     stream: PROCESSED

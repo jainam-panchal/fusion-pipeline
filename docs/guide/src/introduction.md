@@ -36,7 +36,7 @@ Most examples leave out the `source` block to stay short. A real config needs on
 
 Some examples show a config the pipeline refuses. Those have no messages, and the result is the error the pipeline prints.
 
-`sinks` lists what each sink wrote. The pipeline adds the `Fusion-*` headers to each record it writes. The payload is the record as the last stage left it. The sink always writes `kind`: the payload's own value, or `log` when the payload has none.
+`sinks` lists what each sink wrote. The pipeline adds the `Fusion-*` headers to each record it writes. The payload is the record as the last stage left it, with nothing added.
 
 ## Words
 

@@ -11,10 +11,11 @@
 //! literal   := string | number | "true" | "false" | "null"
 //! ```
 //!
-//! A path is resolved by [`FieldPath`]: the root is a top-level record field and, under
-//! `attributes`, `resource` or `scope`, the segments joined with dots are the flat map key;
-//! a `meta.*` path reads the record's `Meta`, so a condition can decide on the pipeline's
-//! tenant rather than the payload's.
+//! A path is resolved by [`FieldPath`]: names joined with dots, walked over the record's
+//! JSON (issue #79). A name that is not a bare word needs the leading-dot form, since the
+//! lexer would otherwise read it as a literal: `."log.format"`, `.0`, and `.` for the whole
+//! record. A `meta.*` path reads the record's `Meta`, so a condition can decide on the
+//! pipeline's tenant rather than the payload's.
 //! `=~` and `!~` take a string literal, the pattern. Core has no regex engine: a stage
 //! compiles the patterns [`Condition::regex_patterns`] lists through the facade and
 //! evaluates with [`Condition::matches_with`], handing in the match function; a `!~` is the
@@ -346,6 +347,12 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
                 i = end;
                 Tok::Str(s)
             }
+            // A path written from the record root: `.` for the whole record, and the way to
+            // start one at a key that is not a bare word, `."log.format"` or `.0.value`.
+            b'.' => {
+                i = lex_path_rest(expr, start, i)?;
+                Tok::Path(expr[start..i].to_owned())
+            }
             b'-' | b'0'..=b'9' => {
                 i += 1;
                 while i < bytes.len()
@@ -365,11 +372,22 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
                     });
                 }
             }
+            // The *first* byte is deliberately narrower than a bare path segment, which also
+            // takes digits and `-`: a token starting with either of those is a number, and
+            // the lexer has to tell `0.5` from the path `.0` and `-1` from a key named
+            // `-foo`. So `-foo == 1` at the root is an invalid number where `a.-foo` is a
+            // clean path; the leading-dot form, `."-foo"`, is how such a root is written.
+            // Past the first byte there is no ambiguity, so the rule below is the same one
+            // every later segment follows.
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
                 i += 1;
-                while i < bytes.len()
-                    && matches!(bytes[i], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
-                {
+                // The first name follows the same rule as every later one,
+                // [`continues_bare_segment`], rather than a second charset of its own. Two
+                // definitions is what made `a.b-c` work while `user-agent` did not, and what
+                // still made `user:agent` an unexpected character at the root and a path
+                // error with a hint after a dot. This grammar has no subtraction, and a `-`
+                // that starts a number is only ever reached after an operator or `(`.
+                while i < bytes.len() && continues_bare_segment(bytes[i]) {
                     i += 1;
                 }
                 if i < bytes.len() && matches!(bytes[i], b'.' | b'[') {

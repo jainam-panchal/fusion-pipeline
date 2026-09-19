@@ -1,6 +1,6 @@
 acks: [ack, ack]
 sinks:
   errors_out:
-    - payload: {kind: log, severity_text: ERROR, resource: {service.name: checkout}}
+    - payload: {severity_text: ERROR, resource: {service.name: checkout}}
   checkout_out:
-    - payload: {kind: log, severity_text: INFO, resource: {service.name: checkout}}
+    - payload: {severity_text: INFO, resource: {service.name: checkout}}

@@ -4,25 +4,30 @@ The exact meaning of each term is in the glossary, [`CONTEXT.md`](https://github
 
 ## Message and record
 
-A **message** is what NATS delivers: a subject, headers and a payload. The payload is a JSON **record**, one log in OTLP shape. Stages see and change the record. NATS acks or naks the message.
+A **message** is what NATS delivers: a subject, headers and a payload. The payload is the **record**. Stages see and change the record. NATS acks or naks the message.
 
-A record has these top-level fields, all optional:
+**A record is whatever JSON the producer sent.** There is no field list and no declared type. An object, a list, a piece of text and a number are all records. The pipeline keeps what it was given, changes only what the config tells it to change, and the sink writes what the last stage left.
 
-| Field | Holds |
-|---|---|
-| `id` | a whole number |
-| `kind` | `log`, `metric` or `span` |
-| `time_unix_nano`, `observed_time_unix_nano` | whole numbers, nanoseconds |
-| `severity_text` | text, such as `ERROR` |
-| `severity_number` | a whole number |
-| `body` | any JSON value, usually text |
-| `attributes`, `resource`, `scope` | objects with any keys and values |
-| `trace_id`, `span_id` | text |
+So a vendor that emits one JSON object per line goes through whole:
 
-Put your own fields under `attributes` or `resource`. Two things to know:
+```yaml
+# messages in
+{{#include ../examples/concepts/free-form/input.yaml}}
+```
 
-- Any other top-level key is dropped when the message is read. It is not in the record, and the sink does not write it.
-- The sink always writes `kind`. When the payload had none, it writes `kind: log`, which means the same thing.
+```yaml
+# config
+{{#include ../examples/concepts/free-form/pipeline.yaml}}
+```
+
+```yaml
+# result
+{{#include ../examples/concepts/free-form/expected.yaml}}
+```
+
+Both records come out as they went in. The second one holds an `id` that is not a number and a `severity_number` that is text; earlier versions refused those, and nothing refuses them now.
+
+Names like `body`, `severity_text` and `attributes` come from OpenTelemetry and are a good default if you are choosing. They are ordinary keys: nothing in the pipeline treats them specially, and nothing adds them. A payload with no `kind` comes out with no `kind`.
 
 ```yaml
 # messages in
@@ -39,22 +44,21 @@ Put your own fields under `attributes` or `resource`. Two things to know:
 {{#include ../examples/concepts/record-fields/expected.yaml}}
 ```
 
-A payload that is not a JSON object, or a field that holds the wrong type, cannot be read at all. The message is nakked, and after the last delivery it becomes a dead letter:
+The top-level `host` is kept beside the one under `attributes`: nothing is dropped for being unexpected.
 
-```yaml
-# messages in
-{{#include ../examples/concepts/bad-field/input.yaml}}
-```
+Two things the pipeline still refuses to read, both from the [source](nats.md):
 
-```yaml
-# config
-{{#include ../examples/concepts/bad-field/pipeline.yaml}}
-```
+- Under `codec: json`, a payload that is not JSON at all.
+- Under `codec: text`, bytes that are not UTF-8.
 
-```yaml
-# result
-{{#include ../examples/concepts/bad-field/expected.yaml}}
-```
+Either one is nakked, and after the last delivery it becomes a dead letter.
+
+Object keys come back sorted. Every key and value survives; the order they were written in does
+not. Two other things a JSON decoder settles before the pipeline sees the record: a duplicate
+key keeps its last value, and a number keeps its value but not its spelling (`1.0` is `1.0`,
+`1e3` is `1000.0`).
+
+To name part of a record, see [field paths](field-paths.md).
 
 ## Meta
 
@@ -67,7 +71,7 @@ The pipeline also keeps its own facts about each record. These are called **Meta
 | ingestion time | the `Fusion-Ingestion-Time` header, else the time NATS stored the message |
 | delivery count | NATS: 1 the first time, 2 on the first redelivery, and so on |
 
-Meta never comes from the payload. The pipeline does not use a payload `id` or `resource.tenant.id` for anything. It also never puts Meta into the record. It sends Meta along as headers on every message it writes.
+Meta never comes from the payload. The pipeline does not use a payload `id` or `resource."tenant.id"` for anything. It also never puts Meta into the record. It sends Meta along as headers on every message it writes.
 
 Here the payload has `id: 99` and a tenant of its own. The pipeline uses id 7 from the header and tenant `acme` from the subject, and leaves the payload's values alone.
 

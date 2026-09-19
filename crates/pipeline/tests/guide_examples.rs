@@ -32,6 +32,7 @@ use fusion_core::meta::Arrival;
 use fusion_core::pipeline::Pipeline;
 use fusion_core::record::Record;
 use fusion_nats::SourceParams;
+use fusion_nats::codec::{Codec, Encoding};
 use fusion_nats::config::DEFAULT_TENANT_PREFIX;
 use fusion_nats::headers::{Received, arrival, for_meta};
 use fusion_pipeline::StartError;
@@ -47,9 +48,47 @@ struct Message {
     subject: String,
     #[serde(default)]
     headers: BTreeMap<String, HeaderValues>,
-    payload: Value,
+    /// The payload as JSON, for a `codec: json` source. Exactly one of `payload` or `raw`.
+    #[serde(default)]
+    payload: Option<Value>,
+    /// The payload as the bytes on the wire, for a `codec: text` source, or for showing a
+    /// `codec: json` source a payload that is not JSON.
+    #[serde(default)]
+    raw: Option<String>,
     #[serde(default)]
     published: Option<u64>,
+}
+
+impl Message {
+    /// The bytes this message carries.
+    fn bytes(&self) -> Result<String, String> {
+        match one_of(&self.payload, &self.raw, "a message")? {
+            AsWritten::Json(payload) => {
+                Ok(serde_json::to_string(payload).expect("payload serializes"))
+            }
+            AsWritten::Raw(raw) => Ok(raw.clone()),
+        }
+    }
+}
+
+/// A payload as an example writes it: `payload:` for JSON, `raw:` for the bytes on the wire.
+enum AsWritten<'a> {
+    Json(&'a Value),
+    Raw(&'a String),
+}
+
+/// Exactly one of `payload` and `raw`, the rule an example's input and its expected output
+/// both follow.
+fn one_of<'a>(
+    payload: &'a Option<Value>,
+    raw: &'a Option<String>,
+    what: &str,
+) -> Result<AsWritten<'a>, String> {
+    match (payload, raw) {
+        (Some(payload), None) => Ok(AsWritten::Json(payload)),
+        (None, Some(raw)) => Ok(AsWritten::Raw(raw)),
+        _ => Err(format!("{what} needs exactly one of `payload` and `raw`")),
+    }
 }
 
 /// A header's value, or its values when the message carries it more than once.
@@ -82,7 +121,12 @@ enum Settled {
 struct Written {
     #[serde(default)]
     headers: Option<BTreeMap<String, String>>,
-    payload: Value,
+    /// What the sink wrote, as JSON. Exactly one of `payload` or `raw`.
+    #[serde(default)]
+    payload: Option<Value>,
+    /// What the sink wrote, as the bytes on the wire, for an `encoding: text` sink.
+    #[serde(default)]
+    raw: Option<String>,
 }
 
 /// An example folder, read and checked against itself.
@@ -97,7 +141,11 @@ enum Loaded {
 struct Example {
     yaml: String,
     tenant_prefix: String,
-    sink_ids: Vec<String>,
+    /// How the source reads a payload, so the runner decodes as the config says.
+    codec: Codec,
+    /// Every sink node with the encoding it declared, so the runner compares what that sink
+    /// would actually write.
+    sinks: BTreeMap<String, Encoding>,
     input: Vec<Message>,
     expected: Expected,
 }
@@ -138,14 +186,14 @@ fn load(dir: &Path) -> Result<Loaded, String> {
         return Ok(Loaded::Rejected { yaml, error });
     }
     let config = Config::from_yaml(&yaml).map_err(|err| format!("config does not load: {err}"))?;
-    let tenant_prefix = match &config.source {
+    let (tenant_prefix, codec) = match &config.source {
         Some(source) => {
-            source
+            let params = source
                 .parse_params::<SourceParams>()
-                .map_err(|err| format!("source block: {err}"))?
-                .tenant_prefix
+                .map_err(|err| format!("source block: {err}"))?;
+            (params.tenant_prefix, params.codec)
         }
-        None => DEFAULT_TENANT_PREFIX.to_owned(),
+        None => (DEFAULT_TENANT_PREFIX.to_owned(), Codec::default()),
     };
     let input: Vec<Message> = serde_yaml_ng::from_str(&read(dir, "input.yaml")?)
         .map_err(|err| format!("input.yaml: {err}"))?;
@@ -156,21 +204,37 @@ fn load(dir: &Path) -> Result<Loaded, String> {
             input.len()
         ));
     }
-    let sink_ids: Vec<String> = config
+    // A sink node's params must parse, or a mistyped `encoding:` would silently compare as
+    // `json`. Only `sink.nats` takes `SinkParams`; a `sink.memory` example has none.
+    let sinks: BTreeMap<String, Encoding> = config
         .nodes
         .iter()
         .filter(|node| node.is_sink())
-        .map(|node| node.id.clone())
-        .collect();
-    if let Some(unknown) = expected.sinks.keys().find(|id| !sink_ids.contains(id)) {
+        .map(|node| {
+            // Read `encoding` off the node itself rather than through one sink type's
+            // params, so a sink kind added later is not silently compared as `json` — the
+            // bug this hunk exists to prevent.
+            let encoding = match node.params.get("encoding") {
+                None => Encoding::default(),
+                Some(value) => serde_yaml_ng::from_value(value.clone())
+                    .map_err(|err| format!("sink `{}`: `encoding`: {err}", node.id))?,
+            };
+            Ok((node.id.clone(), encoding))
+        })
+        .collect::<Result<_, String>>()?;
+    if let Some(unknown) = expected.sinks.keys().find(|id| !sinks.contains_key(*id)) {
         return Err(format!(
             "expected.yaml names `{unknown}`, which is not a sink node"
         ));
     }
+    for message in &input {
+        message.bytes()?;
+    }
     Ok(Loaded::Runs(Example {
         yaml,
         tenant_prefix,
-        sink_ids,
+        codec,
+        sinks,
         input,
         expected,
     }))
@@ -203,7 +267,7 @@ fn check_rejected(yaml: &str, error: &str) -> Vec<String> {
 
 /// The arrival NATS would give `message`, and its payload as bytes on the wire.
 fn arrival_of(message: &Message, tenant_prefix: &str) -> (Arrival, String) {
-    let payload = serde_json::to_string(&message.payload).expect("payload serializes");
+    let payload = message.bytes().expect("checked when the example loaded");
     let mut headers = async_nats::HeaderMap::new();
     for (name, values) in &message.headers {
         match values {
@@ -236,8 +300,9 @@ fn drive(example: &Example) -> Outcome {
         .iter()
         .map(|message| {
             let (arrival, payload) = arrival_of(message, &example.tenant_prefix);
+            // The source's own codec, so an example says what the config says.
             let decoded = if arrival.is_log() {
-                Record::from_json(&payload)
+                example.codec.decode(payload.as_bytes())
             } else {
                 Ok(Record::default())
             };
@@ -258,8 +323,8 @@ fn drive(example: &Example) -> Outcome {
         })
         .collect();
     let written = example
-        .sink_ids
-        .iter()
+        .sinks
+        .keys()
         .map(|id| (id.clone(), sinks.outgoing(id)))
         .collect();
     h.finish();
@@ -309,14 +374,32 @@ fn compare(example: &Example, outcome: &Outcome) -> Vec<String> {
             continue;
         }
         for (index, (want, got)) in want.iter().zip(outgoing).enumerate() {
-            let payload: Value = serde_json::from_str(&got.record.to_json().expect("serializes"))
-                .expect("record JSON parses");
-            if payload != want.payload {
-                problems.push(format!(
-                    "sink `{id}` record {}: payload\n  expected {}\n  got      {payload}",
-                    index + 1,
-                    want.payload
-                ));
+            match one_of(&want.payload, &want.raw, "an expected record") {
+                // `payload:` is what an `encoding: json` sink writes.
+                Ok(AsWritten::Json(expected)) => {
+                    let payload: Value =
+                        serde_json::from_str(&got.record.to_json().expect("serializes"))
+                            .expect("record JSON parses");
+                    if payload != *expected {
+                        problems.push(format!(
+                            "sink `{id}` record {}: payload\n  expected {expected}\n  got      {payload}",
+                            index + 1,
+                        ));
+                    }
+                }
+                // `raw:` is the bytes this sink writes, under the encoding it declared.
+                Ok(AsWritten::Raw(expected)) => {
+                    let encoding = example.sinks.get(id).copied().unwrap_or_default();
+                    let bytes = encoding.encode(&got.record).expect("record encodes");
+                    let written = String::from_utf8_lossy(&bytes);
+                    if written != *expected {
+                        problems.push(format!(
+                            "sink `{id}` record {}: raw\n  expected {expected}\n  got      {written}",
+                            index + 1,
+                        ));
+                    }
+                }
+                Err(rule) => problems.push(format!("sink `{id}` record {}: {rule}", index + 1)),
             }
             if let Some(want_headers) = &want.headers {
                 let got_headers = written_headers(got);

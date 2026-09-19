@@ -24,7 +24,7 @@ fn record() -> Record {
     .expect("record parses")
 }
 
-/// The record's `Meta`: tenant `globex`, where the record's own `resource.tenant.id` says
+/// The record's `Meta`: tenant `globex`, where the record's own `resource."tenant.id"` says
 /// `acme`, so a condition shows which one it read.
 fn meta() -> Meta {
     Meta {
@@ -143,10 +143,10 @@ fn parentheses_group() {
 
 #[test]
 fn dotted_paths_name_flat_map_keys() {
-    assert!(eval(r#"attributes.http.path == "/api/v1""#));
-    assert!(eval("attributes.http.status >= 500"));
-    assert!(eval(r#"resource.service.name == "api""#));
-    assert!(eval(r#"resource.service.name == "api""#));
+    assert!(eval(r#"attributes."http.path" == "/api/v1""#));
+    assert!(eval(r#"attributes."http.status" >= 500"#));
+    assert!(eval(r#"resource."service.name" == "api""#));
+    assert!(eval(r#"resource."service.name" == "api""#));
     assert!(eval(r#"body == "disk full on /var""#));
     assert!(eval(r#"kind == "log""#));
     assert!(eval("id == 7"));
@@ -156,12 +156,12 @@ fn dotted_paths_name_flat_map_keys() {
 #[test]
 fn segments_with_digits_hyphens_and_quotes() {
     assert!(eval(r#"attributes.x-request-id == "abc""#));
-    assert!(eval("attributes.5xx.count > 1"));
-    assert!(eval(r#"resource.k8s.pod-name == "web-0""#));
+    assert!(eval(r#"attributes."5xx.count" > 1"#));
+    assert!(eval(r#"resource."k8s.pod-name" == "web-0""#));
     assert!(eval(r#"attributes."something something" == 1"#));
-    assert!(eval(r#"attributes."Event ID".code == 4625"#));
+    assert!(eval(r#"attributes."Event ID.code" == 4625"#));
     assert!(eval(
-        r#"attributes.5xx.count > 1 and resource.k8s.pod-name != "web-1""#
+        r#"attributes."5xx.count" > 1 and resource."k8s.pod-name" != "web-1""#
     ));
 }
 
@@ -174,27 +174,43 @@ fn bracket_syntax_is_a_parse_error() {
     );
     assert!(
         err.to_string()
-            .contains("instead use `attributes.http.path`"),
+            .contains(r#"instead use `attributes."http.path"`"#),
         "{err}"
     );
 }
 
 #[test]
-fn body_and_scalars_take_no_segments_and_maps_need_a_key() {
-    let err = Condition::parse("body.x == 1").expect_err("body is whole");
+fn no_path_shape_is_refused_any_more_and_a_miss_is_null() {
+    // A record is any JSON (issue #79), so there is no field list to check a path against:
+    // every well-formed path parses, and one that matches nothing reads as null.
+    for text in [
+        "body.x == 1",
+        "severity_number.x == 1",
+        "attributes == null",
+        "severty_text == \"ERROR\"",
+        "nonsense.deeper == 1",
+    ] {
+        Condition::parse(text).unwrap_or_else(|e| panic!("{text} parses: {e}"));
+    }
+    let record = record();
+    let meta = meta();
     assert!(
-        matches!(err, ConditionError::Field { ref source, .. } if matches!(source, PathError::NotAMap { .. })),
-        "{err}"
+        Condition::parse("severty_text == null")
+            .expect("parses")
+            .matches(&record, &meta),
+        "a path that matches nothing equals null"
     );
-    let err = Condition::parse("severity_number.x == 1").expect_err("scalar");
     assert!(
-        matches!(err, ConditionError::Field { ref source, .. } if matches!(source, PathError::NotAMap { .. })),
-        "{err}"
+        !Condition::parse("attributes == null")
+            .expect("parses")
+            .matches(&record, &meta),
+        "an object is present, and compares equal to nothing"
     );
-    let err = Condition::parse("attributes == null").expect_err("map needs key");
     assert!(
-        matches!(err, ConditionError::Field { ref source, .. } if matches!(source, PathError::MapNeedsKey { .. })),
-        "{err}"
+        !Condition::parse("severty_text == \"ERROR\"")
+            .expect("parses")
+            .matches(&record, &meta),
+        "and equals nothing else"
     );
     let err =
         Condition::parse("severity_number > 1 and attributes.a:b == 1").expect_err("bad char");
@@ -208,7 +224,7 @@ fn body_and_scalars_take_no_segments_and_maps_need_a_key() {
 fn single_quoted_strings_and_escapes() {
     assert!(eval(r#"severity_text == 'ERROR'"#));
     assert!(eval(r#"body == "disk full on \/var""#));
-    assert!(eval(r#"attributes.http.path == "\/api\/v1""#));
+    assert!(eval(r#"attributes."http.path" == "\/api\/v1""#));
 }
 
 #[test]
@@ -245,12 +261,6 @@ fn parse_errors_name_the_problem() {
         "{err}"
     );
 
-    let err = Condition::parse(r#"nonsense == 1"#).expect_err("unknown root");
-    assert!(
-        matches!(err, ConditionError::Field { offset: 0, ref source } if matches!(source, PathError::UnknownField { name } if name == "nonsense")),
-        "{err}"
-    );
-
     let err = Condition::parse(r#"(severity_number == 1"#).expect_err("unbalanced");
     assert!(matches!(err, ConditionError::UnexpectedEnd), "{err}");
 
@@ -275,7 +285,7 @@ fn unclosed_quote_in_a_path_is_the_path_error_with_its_offset() {
 
 #[test]
 fn quoted_segment_escapes_match_the_path_rule() {
-    assert!(eval(r#"attributes."Event ID".code == 4625"#));
+    assert!(eval(r#"attributes."Event ID.code" == 4625"#));
     let err = Condition::parse(r#"attributes."a\nb" == 1"#).expect_err("unknown escape");
     assert!(
         matches!(err, ConditionError::Field { ref source, .. } if matches!(source, PathError::InvalidSegment { ch: 'n', .. })),
@@ -313,7 +323,54 @@ fn unterminated_quote_inside_a_bracket_is_the_bracket_error_for_both_quote_kinds
 fn a_meta_path_decides_on_the_pipelines_value_not_the_payloads() {
     assert!(eval(r#"meta.tenant == "globex""#));
     assert!(!eval(r#"meta.tenant == "acme""#));
-    assert!(eval(r#"resource.tenant.id == "acme""#));
+    assert!(eval(r#"resource."tenant.id" == "acme""#));
     assert!(eval("meta.delivery_count == 1 and meta.ingestion_time < 6"));
     assert!(eval("meta.id == 7 and not meta.delivery_count > 1"));
+}
+
+#[test]
+fn a_hyphen_keeps_a_bare_root_going_as_it_does_a_later_segment() {
+    // `field-paths.md` says `-` needs no quotes. It did not hold for the first name, which
+    // the lexer ended at the hyphen and then read `-` as a number.
+    let record = Record::from_json(r#"{"user-agent": "curl", "a": {"b-c": 1}}"#).expect("parses");
+    let meta = meta();
+    let eval = |expr: &str| {
+        Condition::parse(expr)
+            .unwrap_or_else(|e| panic!("{expr}: {e}"))
+            .matches(&record, &meta)
+    };
+    assert!(eval(r#"user-agent == "curl""#));
+    assert!(eval("a.b-c == 1"), "a later segment already worked");
+    assert!(eval(r#".user-agent == "curl""#), "the dotted form too");
+}
+
+#[test]
+fn the_keywords_still_lex_as_keywords() {
+    let record = record();
+    let meta = meta();
+    let eval = |expr: &str| {
+        Condition::parse(expr)
+            .unwrap_or_else(|e| panic!("{expr}: {e}"))
+            .matches(&record, &meta)
+    };
+    assert!(eval(
+        r#"severity_text == "ERROR" and severity_number == 17"#
+    ));
+    assert!(eval(r#"severity_text == "NOPE" or severity_number == 17"#));
+    assert!(eval(r#"not severity_text == "NOPE""#));
+    // A negative literal still lexes as one, since a `-` there follows an operator.
+    assert!(eval("severity_number > -1"));
+}
+
+#[test]
+fn a_stray_character_at_the_root_is_a_path_error_with_a_hint_as_it_is_later() {
+    // One rule for what keeps a bare name going, first name or later: `user:agent` used to be
+    // `UnexpectedChar` at the root and a path error with a hint after a dot.
+    for expr in [r#"user:agent == 1"#, r#"a.user:agent == 1"#] {
+        let err = Condition::parse(expr).expect_err("`:` needs quotes");
+        assert!(
+            matches!(&err, ConditionError::Field { source: PathError::InvalidSegment { ch, .. }, .. } if *ch == ':'),
+            "{expr}: {err}"
+        );
+    }
 }

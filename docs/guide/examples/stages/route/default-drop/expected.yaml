@@ -1,4 +1,4 @@
 acks: [ack, ack]
 sinks:
   linux_out:
-    - payload: {kind: log, body: a, resource: {log.format: Linux}}
+    - payload: {body: a, resource: {log.format: Linux}}

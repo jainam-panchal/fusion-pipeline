@@ -1,4 +1,4 @@
 acks: [ack]
 sinks:
   out:
-    - payload: {kind: log, body: "login password=*** ok"}
+    - payload: {body: "login password=*** ok"}

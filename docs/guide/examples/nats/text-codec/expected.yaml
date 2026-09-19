@@ -1,0 +1,5 @@
+acks: [ack, ack]
+sinks:
+  out:
+    - payload: {body: 'ERROR: disk full on /var', attributes: {level: ERROR, message: disk full on /var}}
+    - payload: {body: 'INFO: started', attributes: {level: INFO, message: started}}

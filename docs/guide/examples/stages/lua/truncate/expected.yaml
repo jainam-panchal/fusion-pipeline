@@ -1,5 +1,5 @@
 acks: [ack, ack]
 sinks:
   out:
-    - payload: {kind: log, body: short}
-    - payload: {kind: log, body: a much lon..., attributes: {body.length: 23}}
+    - payload: {body: short}
+    - payload: {body: a much lon..., attributes: {body.length: 23}}

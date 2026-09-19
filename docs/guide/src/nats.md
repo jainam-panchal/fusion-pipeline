@@ -22,6 +22,7 @@ source:
 | `consumer` | required | The consumer on that stream. It must exist. |
 | `tenant_prefix` | `logs` | The first word of subjects that name a tenant: `<tenant_prefix>.<tenant>.<anything>`. |
 | `dlq_prefix` | `dlq` | Dead letters go to `<dlq_prefix>.<tenant>`. |
+| `codec` | `json` | How a payload becomes a record. `json` reads the payload as JSON, whatever shape it is. `text` makes the payload's bytes the record, one piece of text, so a producer can send raw log lines with no JSON around them. |
 
 Any other key is an error. The pipeline reads every message the consumer delivers, whatever its subject.
 
@@ -40,6 +41,50 @@ Any other key is an error. The pipeline reads every message the consumer deliver
 | `url` | `nats://127.0.0.1:4222` | The server. `NATS_URL` replaces it when set and not empty. |
 | `stream` | required | The stream that stores `subject`. It must exist, and its subjects must include `subject`. |
 | `subject` | required | Every record is published to this subject. |
+| `encoding` | `json` | How a record becomes a payload. `json` writes the record's JSON. `text` writes a record that is text as its bytes, and any other record as its JSON, so a stage that turned a line into an object still gets written rather than failing. |
+
+## Raw lines
+
+With `codec: text` the record is the line itself, with no JSON around it, so a producer that
+only has log lines needs no wrapper. The record is then one piece of text and `.` is the whole
+of it, so copy it into a field before writing anything beside it:
+
+```yaml
+# messages in
+{{#include ../examples/nats/text-codec/input.yaml}}
+```
+
+```yaml
+# config
+{{#include ../examples/nats/text-codec/pipeline.yaml}}
+```
+
+```yaml
+# result
+{{#include ../examples/nats/text-codec/expected.yaml}}
+```
+
+`raw:` in an example is the bytes on the wire, where `payload:` is JSON.
+
+With `encoding: text` on the sink as well, a line goes out as a line:
+
+```yaml
+# messages in
+{{#include ../examples/nats/text-roundtrip/input.yaml}}
+```
+
+```yaml
+# config
+{{#include ../examples/nats/text-roundtrip/pipeline.yaml}}
+```
+
+```yaml
+# result
+{{#include ../examples/nats/text-roundtrip/expected.yaml}}
+```
+
+A record that is no longer text, because a stage made it an object, is written as JSON rather
+than failing.
 
 The subject is the same for every record. To split records across subjects, use a [`route`](stages/route.md) with one sink per label.
 
@@ -47,7 +92,7 @@ A sink counts a record as written once the stream confirms it has stored it. The
 
 The source and the sinks share one connection per server URL.
 
-The sink writes the record as the last stage left it. It always writes `kind`, so a payload that had none comes out with `kind: log`.
+The sink writes the record as the last stage left it, and adds nothing. A payload that had no `kind` comes out with no `kind`.
 
 ```yaml
 # config
@@ -216,7 +261,7 @@ A dead letter carries:
 
 - the producer's own headers, minus any starting with `Nats-` or `Fusion-` (in any case)
 - `Fusion-Tenant` with the tenant the pipeline gave the message (`unknown` if none), `Fusion-Ingestion-Time` and `Fusion-Ingestion-Time-Kind` with its ingestion time, `Fusion-Record-Id` when the message had a valid one, and `Fusion-Record-Kind` when it had a valid one
-- `Fusion-Dlq-Reason`: the node that failed and its error, at most 1024 bytes. The node is `source` for a message with no record id or a payload that is not a record.
+- `Fusion-Dlq-Reason`: the node that failed and its error, at most 1024 bytes. The node is `source` for a message with no record id, or one whose payload could not be read at all: not JSON under `codec: json`, or not UTF-8 under `codec: text`.
 - `Fusion-Dlq-Subject`: the subject the message arrived on
 - `Nats-Msg-Id`: `<stream>:<sequence>`, so the dead-letter stream drops a second copy of the same message within its duplicate window
 

@@ -17,7 +17,7 @@ use mlua::{
     VmState,
 };
 
-use crate::convert::{self, ListMark, OutputError, type_name};
+use crate::convert::{self, ListMark, OutputError, RecordMark, Shape};
 
 /// The globals a script may not name, and the names the sandbox leaves undefined. `load`
 /// and its siblings come with the base library and are removed; `os`, `io`, `package`
@@ -170,7 +170,7 @@ pub(crate) struct Vm {
     /// record's `Meta`, writes raise.
     meta_metatable: Table,
     /// The metatable of every record table `process` receives: it gives the table `copy`.
-    record_metatable: Table,
+    record_mark: RecordMark,
     /// The metatable of the `json` table each run gets: reads come from the API, writes
     /// raise.
     json_metatable: Table,
@@ -199,7 +199,7 @@ impl Vm {
         let meta_metatable = meta_metatable(&lua).map_err(runtime)?;
         let list = ListMark::new(&lua).map_err(runtime)?;
         let json_metatable = json_metatable(&lua, &list).map_err(runtime)?;
-        let record_metatable = record_metatable(&lua, &list).map_err(runtime)?;
+        let record_mark = RecordMark::new(&lua, &list).map_err(runtime)?;
         lua.set_memory_limit(script.memory_bytes).map_err(runtime)?;
 
         let used = Rc::new(Cell::new(0));
@@ -242,7 +242,7 @@ impl Vm {
             lua,
             process,
             meta_metatable,
-            record_metatable,
+            record_mark,
             json_metatable,
             list,
             used,
@@ -257,10 +257,17 @@ impl Vm {
             meta: ctx.meta.clone(),
         });
         self.used.set(0);
-        let table = convert::to_table(&self.lua, record, &self.list).map_err(classify)?;
-        table
-            .set_metatable(Some(self.record_metatable.clone()))
-            .map_err(classify)?;
+        let value = convert::to_lua(&self.lua, record, &self.list).map_err(classify)?;
+        if let LuaValue::Table(table) = &value {
+            // A record that is an object or a list crosses as a table carrying the record
+            // mark: it is what `record:copy()` hangs off, what tells a returned record from
+            // a returned split, and — in which of the two flavours it carries — what the
+            // record's own shape was, so an empty list does not come back an empty object
+            // (issue #79).
+            self.record_mark
+                .mark(table, Shape::of(record.value()))
+                .map_err(classify)?;
+        }
         // A fresh table per run, so a `rawset` on one run's `meta` is gone by the next;
         // nothing a script does to it reaches the pipeline either way.
         let meta = self.lua.create_table().map_err(classify)?;
@@ -269,7 +276,7 @@ impl Vm {
         // The same for `json`, which lives in the globals: a `rawset` on it, or a script
         // assigning the global, is gone by the next run.
         install_json(&self.lua, &self.json_metatable).map_err(classify)?;
-        let returned: LuaValue = self.process.call((table, meta)).map_err(classify)?;
+        let returned: LuaValue = self.process.call((value, meta)).map_err(classify)?;
         if self.used.get() > self.script.instructions {
             // Cannot happen while `pcall` re-raises the budget; kept so a run that somehow
             // swallowed the trip is still refused.
@@ -279,15 +286,25 @@ impl Vm {
         match returned {
             LuaValue::Nil => Ok(Returned::Drop),
             LuaValue::Table(t) => {
-                if t.raw_len() == 0 && !self.list.is_list(&t) {
-                    if t.is_empty() {
+                // The record table, and a `record:copy()` of it, carry the record mark, so
+                // `return record` is one record whatever shape it has. `from_lua` reads the
+                // mark itself, so the shape needs no second spelling here; the mark is asked
+                // only to tell a returned record from a returned split.
+                let returned_record = self.record_mark.shape(&t).is_some();
+                if returned_record || Shape::of_table(&t, &self.list) == Shape::Object {
+                    if !returned_record && t.is_empty() {
                         return Err(output(OutputError(
                             "an empty table is neither a record nor a list".to_owned(),
                         )));
                     }
-                    return convert::from_table(&t, output_bytes, &self.list)
-                        .map(|record| Returned::Record(Box::new(record)))
-                        .map_err(output);
+                    return convert::from_lua(
+                        &LuaValue::Table(t),
+                        output_bytes,
+                        &self.list,
+                        &self.record_mark,
+                    )
+                    .map(|record| Returned::Record(Box::new(record)))
+                    .map_err(output);
                 }
                 let len = convert::list_len(&t, "the returned list").map_err(output)?;
                 if len == 0 {
@@ -304,16 +321,32 @@ impl Vm {
                             "every entry of a returned list must be a record table".to_owned(),
                         )));
                     };
+                    // A `record:copy()` entry carries the record mark; `from_lua` reads it.
                     records.push(
-                        convert::from_table(&item, output_bytes, &self.list).map_err(output)?,
+                        convert::from_lua(
+                            &LuaValue::Table(item),
+                            output_bytes,
+                            &self.list,
+                            &self.record_mark,
+                        )
+                        .map_err(output)?,
                     );
                 }
                 Ok(Returned::Split(records))
             }
-            other => Err(output(OutputError(format!(
-                "`process` must return a record table, a list of them, or nil; got {}",
-                type_name(&other)
-            )))),
+            // `false` from a script working on anything but a boolean record is almost
+            // always an author meaning to drop it, and taking it as a one-bool record would
+            // swallow that silently; `nil` is how a record is dropped. A record that *is* a
+            // boolean has to be able to come back, so the guard only applies when the record
+            // did not arrive as one.
+            LuaValue::Boolean(_) if !record.value().is_boolean() => Err(output(OutputError(
+                "`process` returned a boolean; return nil to drop the record".to_owned(),
+            ))),
+            // Any other scalar is a record: a `codec: text` line comes in as a string and a
+            // script may return one.
+            other => convert::from_lua(&other, output_bytes, &self.list, &self.record_mark)
+                .map(|record| Returned::Record(Box::new(record)))
+                .map_err(output),
         }
     }
 }
@@ -543,55 +576,6 @@ fn install_json(lua: &mlua::Lua, metatable: &Table) -> mlua::Result<()> {
     let json = lua.create_table()?;
     json.set_metatable(Some(metatable.clone()))?;
     lua.globals().raw_set("json", json)
-}
-
-/// `record:copy()`: a deep copy of the table, shared structure and cycles kept as they are,
-/// every list still marked as one, with the record metatable so the copy can be copied too.
-/// Written in Lua so it runs under the instruction budget and the memory cap like the
-/// script's own code. The chunk takes the metatable and a function that marks the copy of a
-/// list, and returns the method.
-const COPY: &str = r#"
-local metatable, mark = ...
-local next, type, setmetatable = next, type, setmetatable
-local function deep(value, seen)
-  if type(value) ~= "table" then return value end
-  local done = seen[value]
-  if done then return done end
-  local out = {}
-  mark(value, out)
-  seen[value] = out
-  for k, v in next, value do
-    out[deep(k, seen)] = deep(v, seen)
-  end
-  return out
-end
-return function(record)
-  return setmetatable(deep(record, {}), metatable)
-end
-"#;
-
-/// The metatable behind every record table: `__index` holds `copy`, and `__metatable` hides
-/// the table from `getmetatable` and refuses `setmetatable`, so a script cannot change
-/// `copy` for the records after it.
-fn record_metatable(lua: &mlua::Lua, list: &ListMark) -> mlua::Result<Table> {
-    let metatable = lua.create_table()?;
-    // A script cannot read the list mark, so the copy asks Rust which tables carry it.
-    let list = list.clone();
-    let mark = lua.create_function(move |_, (from, to): (Table, Table)| {
-        if list.is_list(&from) {
-            list.mark(&to)?;
-        }
-        Ok(())
-    })?;
-    let copy: Function = lua
-        .load(COPY)
-        .set_name("=record:copy")
-        .call((metatable.clone(), mark))?;
-    let methods = lua.create_table()?;
-    methods.raw_set("copy", copy)?;
-    metatable.raw_set("__index", methods)?;
-    metatable.raw_set("__metatable", "record")?;
-    Ok(metatable)
 }
 
 /// The metatable behind `meta`: `__index` reads the current record's `Meta`, `__newindex`

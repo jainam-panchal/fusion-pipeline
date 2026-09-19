@@ -1,0 +1,6 @@
+- subject: logs.acme.syslog
+  headers: {Fusion-Record-Id: "1"}
+  raw: 'ERROR: disk full on /var'
+- subject: logs.acme.syslog
+  headers: {Fusion-Record-Id: "2"}
+  raw: 'INFO: started'

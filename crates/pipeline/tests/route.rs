@@ -18,8 +18,8 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource.log.format == "Linux"
-      apache: resource.log.format == "Apache"
+      linux: resource."log.format" == "Linux"
+      apache: resource."log.format" == "Apache"
     default: other
   - id: linux_out
     type: sink.memory
@@ -38,9 +38,7 @@ struct Touch;
 
 impl Stage for Touch {
     fn process(&self, mut record: Record, _ctx: &Context<'_>) -> StageOutput {
-        record
-            .attributes
-            .insert("touched".to_owned(), serde_json::Value::Bool(true));
+        record.value_mut()["attributes"]["touched"] = serde_json::Value::Bool(true);
         StageOutput::Pass(record)
     }
 }
@@ -124,8 +122,8 @@ nodes:
   - id: by_format
     type: route
     routes:
-      any: resource.log.format != ""
-      linux: resource.log.format == "Linux"
+      any: resource."log.format" != ""
+      linux: resource."log.format" == "Linux"
     default: drop
   - id: any_out
     type: sink.memory
@@ -147,7 +145,7 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource.log.format == "Linux"
+      linux: resource."log.format" == "Linux"
     default: drop
   - id: archive
     type: sink.memory
@@ -199,8 +197,8 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource.log.format == "Linux"
-      apache: resource.log.format == "Apache"
+      linux: resource."log.format" == "Linux"
+      apache: resource."log.format" == "Apache"
     default: drop
   - id: linux_touch
     type: touch
@@ -237,8 +235,8 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource.log.format == "Linux"
-      apache: resource.log.format == "Apache"
+      linux: resource."log.format" == "Linux"
+      apache: resource."log.format" == "Apache"
     default: other
   - id: linux_out
     type: sink.memory
@@ -273,7 +271,7 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource.log.format == "Linux"
+      linux: resource."log.format" == "Linux"
     default: drop
   - id: touch
     type: touch
@@ -295,9 +293,12 @@ nodes:
     assert_eq!(touched.len(), 1);
     assert_eq!(raw.len(), 1);
     assert_eq!(
-        touched[0].attributes.get("touched"),
+        touched[0].value()["attributes"].get("touched"),
         Some(&serde_json::Value::Bool(true))
     );
-    assert!(raw[0].attributes.get("touched").is_none(), "{raw:?}");
+    assert!(
+        raw[0].value()["attributes"].get("touched").is_none(),
+        "{raw:?}"
+    );
     h.finish();
 }

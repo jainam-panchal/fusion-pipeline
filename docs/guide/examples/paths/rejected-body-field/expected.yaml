@@ -1,1 +1,0 @@
-rejected: 'node `keep_disk`: condition `body.msg == "disk full"`: `body` is one value and has no fields; instead use `body`, or parse it into attributes first (path at offset 0)'

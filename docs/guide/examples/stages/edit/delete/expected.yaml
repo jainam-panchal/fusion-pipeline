@@ -1,4 +1,4 @@
 acks: [ack]
 sinks:
   out:
-    - payload: {kind: log, attributes: {keep: 2}}
+    - payload: {attributes: {keep: 2}}

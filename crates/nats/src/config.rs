@@ -6,6 +6,8 @@
 
 use serde::Deserialize;
 
+use crate::codec::{Codec, Encoding};
+
 /// The server URL when neither the environment nor the YAML gives one.
 pub const DEFAULT_URL: &str = "nats://127.0.0.1:4222";
 
@@ -51,6 +53,9 @@ pub struct SourceParams {
     /// default. A stream capturing every such subject must already exist.
     #[serde(default = "default_dlq_prefix")]
     pub dlq_prefix: String,
+    /// How a payload becomes a record; `json` by default.
+    #[serde(default)]
+    pub codec: Codec,
 }
 
 fn default_tenant_prefix() -> String {
@@ -76,4 +81,7 @@ pub struct SinkParams {
     pub stream: String,
     /// Subject every record is published to.
     pub subject: String,
+    /// How a record becomes a payload; `json` by default.
+    #[serde(default)]
+    pub encoding: Encoding,
 }

@@ -72,12 +72,9 @@ fn record(id: u64, severity: &str, format: &str) -> Record {
 /// [`host_record`] with the severity and log format the routing example switches on.
 fn record_from_host(id: u64, severity: &str, format: &str, host: &str) -> Record {
     let mut record = host_record(id, Some(host));
-    record.body = Some(serde_json::Value::String("line".to_owned()));
-    record.severity_text = Some(severity.to_owned());
-    record.resource.insert(
-        "log.format".to_owned(),
-        serde_json::Value::String(format.to_owned()),
-    );
+    record.value_mut()["body"] = serde_json::Value::String("line".to_owned());
+    record.value_mut()["severity_text"] = serde_json::Value::String(severity.to_owned());
+    record.value_mut()["resource"]["log.format"] = serde_json::Value::String(format.to_owned());
     record
 }
 
@@ -187,22 +184,22 @@ fn the_compose_pipeline_delivers_every_record_and_keeps_only_parsed_lines_on_the
         );
         let on_parsed = &h.sinks.records("parsed_out")[0];
         assert_eq!(
-            on_parsed.attributes.get("message"),
+            on_parsed.value()["attributes"].get("message"),
             Some(&serde_json::json!("authentication failure"))
         );
-        assert_eq!(on_parsed.attributes.get("Content"), None);
+        assert_eq!(on_parsed.value()["attributes"].get("Content"), None);
         let on_main: Vec<_> = h.sinks.records("out");
         let main_parsed = on_main
             .iter()
-            .find(|r| r.id.map(|id| id.0) == Some(1))
+            .find(|r| r.value()["id"].as_u64() == Some(1))
             .expect("record 1 on the main sink");
         assert_eq!(
-            main_parsed.attributes.get("Content"),
+            main_parsed.value()["attributes"].get("Content"),
             Some(&serde_json::json!("authentication failure")),
             "the main branch is untouched by the parsed branch's rename"
         );
         assert_eq!(
-            main_parsed.attributes.get("service"),
+            main_parsed.value()["attributes"].get("service"),
             Some(&serde_json::json!("sshd(pam_unix)"))
         );
         assert_eq!(
@@ -426,7 +423,10 @@ fn loghub_written(sinks: &MemorySinks) -> Vec<fusion_harness::verdict::Written> 
                     subject: params.subject.clone(),
                     record_id: Some(out.meta.record_id.0.to_string()),
                     tenant: Some(out.meta.tenant.to_string()),
-                    attributes: out.record.attributes,
+                    attributes: out.record.value()["attributes"]
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default(),
                 })
         })
         .collect()

@@ -4,7 +4,10 @@ nodes:
     on_error: pass
     source: |
       function process(record)
-        record.colour = "red"
+        -- Any key and any value is fine, but a Lua function has no JSON form,
+        -- so the returned record is refused and `on_error: pass` forwards the
+        -- record as it entered the node.
+        record.colour = function() return "red" end
         return record
       end
   - id: out

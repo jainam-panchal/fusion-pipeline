@@ -1,4 +1,0 @@
-acks: [ack, ack, ack]
-sinks:
-  out:
-    - payload: {kind: log, body: flat key, attributes: {http.status: 503}}

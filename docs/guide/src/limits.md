@@ -18,8 +18,11 @@ The [spec](https://github.com/jainam-panchal/fusion-pipeline/blob/main/docs/spec
 
 ## Things to know about records
 
-- A record has a fixed set of top-level fields. Any other top-level key in a payload is dropped when the message is read. Put your own fields under `attributes` or `resource`.
-- The sink always writes `kind`. A payload without one comes out with `kind: log`.
+- A record is any JSON. Nothing is dropped for being unexpected and nothing is added, so a payload with no `kind` comes out with no `kind`.
+- Object keys come back sorted. Every key and value survives; the order they were written in does not.
+- A path that names nothing is not an error. It reads as null, so a misspelled path quietly matches nothing. See [field paths](field-paths.md#a-path-that-matches-nothing-is-not-an-error).
+- A write makes its path exist and replaces a value in the way, so writing under a field that held text loses the text.
+- A payload key spelled `meta` needs a leading dot to address: `.meta`.
 - One NATS message carries one record.
 
 ## Fixed numbers
@@ -34,7 +37,7 @@ The [spec](https://github.com/jainam-panchal/fusion-pipeline/blob/main/docs/spec
 | `Fusion-Dlq-Reason` length | 1024 bytes |
 | longest regex pattern | 8192 bytes |
 | regex parentheses depth | 250 |
-| `lua` table nesting in a returned record | 128 |
+| `lua` table nesting in a returned record | 127 below the record table, 128 counting it |
 
 Configurable limits and their defaults are on [Regex limits](regex-limits.md) and [lua budgets](stages/lua/budgets-and-errors.md).
 

@@ -65,7 +65,7 @@ Fusion-Tenant: acme
 Fusion-Ingestion-Time: 1789636753651713591
 Fusion-Ingestion-Time-Kind: reported
 
-{"kind":"log","severity_text":"WARN","body":"payment retry"}
+{"severity_text":"WARN","body":"payment retry"}
 ```
 
 As an example result:

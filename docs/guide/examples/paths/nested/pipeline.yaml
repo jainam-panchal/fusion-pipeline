@@ -1,12 +1,8 @@
-source:
-  type: nats
-  stream: LOGS
-  consumer: pipeline
 nodes:
-  - id: normalise
+  - id: move
     type: edit
     ops:
-      - hash: {field: id}
+      - copy: {from: test2.key2, to: test2.key1}
   - id: out
     type: sink.nats
     stream: PROCESSED

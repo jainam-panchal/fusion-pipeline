@@ -3,6 +3,7 @@ nodes:
     type: lua
     source: |
       function process(record, meta)
+        record.attributes = record.attributes or {}
         record.severity_text = string.upper(record.severity_text)
         record.attributes["tenant"] = meta.tenant
         return record

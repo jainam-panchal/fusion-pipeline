@@ -1,5 +1,5 @@
 acks: [ack, ack, ack]
 sinks:
   out:
-    - payload: {kind: log, severity_text: WARN, body: slow disk}
-    - payload: {kind: log, body: no level}
+    - payload: {severity_text: WARN, body: slow disk}
+    - payload: {body: no level}

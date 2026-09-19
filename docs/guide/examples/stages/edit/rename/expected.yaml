@@ -1,4 +1,4 @@
 acks: [ack]
 sinks:
   out:
-    - payload: {kind: log, body: GET, attributes: {http.route: /users/42}}
+    - payload: {body: GET, attributes: {http.route: /users/42}}

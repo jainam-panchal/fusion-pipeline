@@ -1,4 +1,4 @@
 acks: [ack]
 sinks:
   out:
-    - payload: {kind: log, body: x, attributes: {tags: [a, null, b], empty: []}}
+    - payload: {body: x, trace_id: null, attributes: {tags: [a, null, b], empty: []}}

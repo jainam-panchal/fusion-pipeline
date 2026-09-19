@@ -1,4 +1,4 @@
 acks: [ack]
 sinks:
   out:
-    - payload: {kind: log, body: x, attributes: {pipeline: checkout-logs}, resource: {tenant.id: acme}}
+    - payload: {body: x, attributes: {pipeline: checkout-logs}, resource: {tenant.id: acme}}

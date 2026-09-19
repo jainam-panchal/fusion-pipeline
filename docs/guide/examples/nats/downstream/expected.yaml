@@ -6,10 +6,10 @@ sinks:
         Fusion-Tenant: acme
         Fusion-Ingestion-Time: "1757000000000000000"
         Fusion-Ingestion-Time-Kind: reported
-      payload: {kind: log, body: written by the first pipeline}
+      payload: {body: written by the first pipeline}
     - headers:
         Fusion-Record-Id: "2"
         Fusion-Tenant: globex
         Fusion-Ingestion-Time: "1757000000000000001"
         Fusion-Ingestion-Time-Kind: clock
-      payload: {kind: log, body: timed by a worker clock upstream}
+      payload: {body: timed by a worker clock upstream}

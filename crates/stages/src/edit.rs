@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::meta::Meta;
 use fusion_core::metrics::{EditCause, EditOp};
-use fusion_core::path::{FieldPath, FieldValue, Num};
+use fusion_core::path::{FieldPath, FieldValue, Num, WritePath};
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, DropReason, Stage, StageOutput};
 use serde::Deserialize;
@@ -47,7 +47,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::key_hash::write_canonical;
-use label::{LabelledPath, Unapplied};
+use label::{Labelled, Unapplied};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,37 +101,53 @@ pub struct Edit {
     on_unapplied: OnUnapplied,
 }
 
-/// One op as parsed. The path an op can be unapplied on is a [`LabelledPath`]; `delete` has
-/// none, since it is never unapplied.
+/// One op as parsed. The path an op can be unapplied on is a [`Labelled`]; `set` and
+/// `delete` have none, since neither can be unapplied: a write always lands, and removing
+/// what is not there is nothing to do.
 #[derive(Debug)]
 enum Op {
-    Set { field: LabelledPath, value: Value },
-    Rename { from: LabelledPath, to: FieldPath },
-    Copy { from: LabelledPath, to: FieldPath },
-    Hash { field: LabelledPath },
-    Delete { fields: Vec<FieldPath> },
+    Set {
+        field: WritePath,
+        value: Value,
+    },
+    Rename {
+        from: Labelled<WritePath>,
+        to: WritePath,
+    },
+    Copy {
+        from: Labelled<FieldPath>,
+        to: WritePath,
+    },
+    Hash {
+        field: Labelled<WritePath>,
+    },
+    Delete {
+        fields: Vec<WritePath>,
+    },
 }
 
 /// The `field` label and what can build it. A module of its own so the fields are private
-/// to it: outside, an [`Unapplied`] comes only from [`LabelledPath::unapplied`], and so its label
+/// to it: outside, an [`Unapplied`] comes only from [`Labelled::unapplied`], and so its label
 /// is always a source path rendered at load, never a literal.
 mod label {
-    use fusion_core::metrics::EditCause;
-    use fusion_core::path::FieldPath;
+    use std::fmt::Display;
 
-    /// A path an op reads (for `set`, the field it writes), with its `field` label for
-    /// `edit_unapplied_total` rendered once at load, so a record on the unapplied path pays
-    /// no display: under `on_unapplied: skip` that path is every record of a tenant lacking
-    /// the field, the steady state the metric exists to show. The label is never empty: a
-    /// path's canonical form always starts with the root's name.
+    use fusion_core::metrics::EditCause;
+
+    /// A path an op reads, with its `field` label for `edit_unapplied_total` rendered once
+    /// at load, so a record on the unapplied path pays no display: under
+    /// `on_unapplied: skip` that path is every record of a tenant lacking the field, the
+    /// steady state the metric exists to show. It is generic over the path type because an
+    /// op that also writes where it read (`rename`, `hash`) holds a
+    /// [`fusion_core::path::WritePath`], and `copy` may read `meta.*`.
     #[derive(Debug)]
-    pub(super) struct LabelledPath {
-        pub(super) path: FieldPath,
+    pub(super) struct Labelled<P> {
+        pub(super) path: P,
         label: Box<str>,
     }
 
-    impl LabelledPath {
-        pub(super) fn new(path: FieldPath) -> Self {
+    impl<P: Display> Labelled<P> {
+        pub(super) fn new(path: P) -> Self {
             Self {
                 label: path.to_string().into_boxed_str(),
                 path,
@@ -192,13 +208,12 @@ impl At<'_> {
         FieldPath::parse(text).map_err(|e| self.error(format!("`{key}`: {e}")))
     }
 
-    /// `text` parsed as a path an op writes or removes: core says whether it can be
-    /// written at all (any record field; no `meta.*` path).
-    fn target(&self, key: &str, text: &str) -> Result<FieldPath, ConfigError> {
-        let path = self.path(key, text)?;
-        path.writable()
-            .map_err(|e| self.error(format!("`{key}`: {e}")))?;
-        Ok(path)
+    /// `text` parsed as a path an op writes or removes: the record's, never the pipeline's.
+    /// A write through what this returns cannot fail.
+    fn target(&self, key: &str, text: &str) -> Result<WritePath, ConfigError> {
+        self.path(key, text)?
+            .writable()
+            .map_err(|e| self.error(format!("`{key}`: {e}")))
     }
 
     fn params<T: serde::de::DeserializeOwned>(&self, body: Value) -> Result<T, ConfigError> {
@@ -266,43 +281,38 @@ fn parse_op(
             if matches!(p.value, Value::Array(_) | Value::Object(_)) {
                 return Err(at.error("`value` must be a string, number, bool or null"));
             }
-            let field = at.target("field", &p.field)?;
-            // Core's write rules: the field's type, refused here rather than on every
-            // record.
-            field
-                .accepts(&p.value)
-                .map_err(|e| at.error(format!("value {}: {e}", p.value)))?;
             Op::Set {
-                field: LabelledPath::new(field),
+                field: at.target("field", &p.field)?,
                 value: p.value,
             }
         }
         EditOp::Rename | EditOp::Copy => {
             let p: MoveParams = at.params(body)?;
-            let from = if kind == EditOp::Rename {
-                at.target("from", &p.from)?
-            } else {
-                at.path("from", &p.from)?
-            };
             let to = at.target("to", &p.to)?;
-            if from == to {
+            let from = at.path("from", &p.from)?;
+            if from == to.path() {
                 return Err(at.error("`from` and `to` are the same field"));
             }
-            let from = LabelledPath::new(from);
             if kind == EditOp::Rename {
-                Op::Rename { from, to }
+                // `rename` removes its source, so the source is a target too.
+                let from = from
+                    .writable()
+                    .map_err(|e| at.error(format!("`from`: {e}")))?;
+                Op::Rename {
+                    from: Labelled::new(from),
+                    to,
+                }
             } else {
-                Op::Copy { from, to }
+                Op::Copy {
+                    from: Labelled::new(from),
+                    to,
+                }
             }
         }
         EditOp::Hash => {
             let p: HashParams = at.params(body)?;
-            let field = at.target("field", &p.field)?;
-            field
-                .accepts(&Value::String(String::new()))
-                .map_err(|e| at.error(format!("{e}; hash writes a string")))?;
             Op::Hash {
-                field: LabelledPath::new(field),
+                field: Labelled::new(at.target("field", &p.field)?),
             }
         }
         EditOp::Delete => {
@@ -336,37 +346,37 @@ impl Op {
     /// unchanged on `Err`.
     fn apply(&self, record: &mut Record, meta: &Meta) -> Result<(), Unapplied<'_>> {
         match self {
-            // Core accepted the literal for this field at load and `write` never reads the
-            // record, so this cannot refuse. The arm still needs an answer, and the
-            // three without a label are worse: a panic path, a swallowed error that goes
-            // silent exactly when core changes `write` to read the record, or a made-up
-            // label in a metric. So `set` carries a label it never emits today, one
-            // `Box<str>` per op at load, and stays visible if the invariant ever breaks.
-            Self::Set { field, value } => field
-                .path
-                .write(record, value.clone())
-                .map_err(|_| field.unapplied(EditCause::Type)),
+            // A write through a `WritePath` makes its path exist (issue #79), so `set`
+            // cannot be unapplied and carries no label.
+            Self::Set { field, value } => {
+                field.write(record, value.clone());
+                Ok(())
+            }
             Self::Rename { from, to } => {
-                let value = owned(from.path.read(record, meta))
+                // Read before removing, although `remove` would hand back the same value in
+                // one walk instead of two. `remove` can tell a key holding an explicit JSON
+                // `null` (`Some(Null)`) from one that is not there (`None`) — but only by
+                // mutating first, and both must count as unapplied with cause `absent`. So
+                // removing first would take the null key with it and leave the record
+                // changed by an op that did not apply.
+                let value = owned(from.path.read(record))
                     .ok_or_else(|| from.unapplied(EditCause::Absent))?;
-                to.write(record, value)
-                    .map_err(|_| from.unapplied(EditCause::Type))?;
-                // `remove` refuses only `meta.*` today, and this stage's load refuses a
-                // `meta.*` source for `rename`. Unlike `set`, the error is discarded: a
-                // refusal core adds to `remove` later would go silent here. The risk is
-                // accepted because `to` is already written, and `apply` promises an
-                // unchanged record on `Err`, which this arm could no longer keep.
+                // Then remove before writing. `to` may live under `from` (`{from: a, to:
+                // a.b}`), and removing afterwards would take the value just written away
+                // with it. Nothing has changed yet on the one `Err` above, so the record is
+                // still unchanged when this op cannot apply.
                 let _removed = from.path.remove(record);
+                to.write(record, value);
                 Ok(())
             }
             Self::Copy { from, to } => {
                 let value = owned(from.path.read(record, meta))
                     .ok_or_else(|| from.unapplied(EditCause::Absent))?;
-                to.write(record, value)
-                    .map_err(|_| from.unapplied(EditCause::Type))
+                to.write(record, value);
+                Ok(())
             }
             Self::Hash { field } => {
-                let digest = match field.path.read(record, meta) {
+                let digest = match field.path.read(record) {
                     FieldValue::Null => return Err(field.unapplied(EditCause::Absent)),
                     FieldValue::Str(s) => sha256_hex(s.as_bytes()),
                     value @ (FieldValue::Bool(_) | FieldValue::Num(_)) => {
@@ -379,14 +389,11 @@ impl Op {
                     // value this op does not know how to hash.
                     _ => return Err(field.unapplied(EditCause::Type)),
                 };
-                field
-                    .path
-                    .write(record, Value::String(digest))
-                    .map_err(|_| field.unapplied(EditCause::Type))
+                field.path.write(record, Value::String(digest));
+                Ok(())
             }
             Self::Delete { fields } => {
-                // An absent field is nothing to do, not an unapplied op. The discarded
-                // error is the same accepted risk as in `rename`; load refuses `meta.*`.
+                // An absent field is nothing to do, not an unapplied op.
                 for field in fields {
                     let _removed = field.remove(record);
                 }

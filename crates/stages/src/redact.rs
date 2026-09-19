@@ -16,12 +16,11 @@
 
 use fusion_core::config::{ConfigError, NodeConfig};
 use fusion_core::metrics::EngineLabel;
-use fusion_core::path::{FieldPath, FieldValue};
+use fusion_core::path::{FieldPath, FieldValue, WritePath};
 use fusion_core::record::Record;
 use fusion_core::stage::{Context, Stage, StageOutput};
 use fusion_regex::Regex;
 use serde::Deserialize;
-use serde_json::Value;
 
 use crate::regex_stage::{
     RegexParams, engine_label, log_node_engine, match_failure, write_strings,
@@ -40,7 +39,7 @@ struct Params {
 /// The `redact` stage.
 #[derive(Debug)]
 pub struct Redact {
-    fields: Vec<FieldPath>,
+    fields: Vec<WritePath>,
     regex: Regex,
     replace: String,
 }
@@ -51,9 +50,8 @@ impl Redact {
     /// # Errors
     ///
     /// [`ConfigError::InvalidParams`] naming the node when a parameter is missing or
-    /// unknown, `fields` is empty, a field is not a path or does not take any string
-    /// (`id`, `kind`, `severity_number` and the time fields do not), or the pattern does
-    /// not compile under the node's limits and ReDoS policy.
+    /// unknown, `fields` is empty, a field is not a path or names the read-only `meta`, or
+    /// the pattern does not compile under the node's limits and ReDoS policy.
     pub fn from_node(node: &NodeConfig) -> Result<Self, ConfigError> {
         let params: Params = node.parse_params()?;
         if params.fields.is_empty() {
@@ -65,14 +63,10 @@ impl Redact {
             .map(|field| {
                 let path = FieldPath::parse(field)
                     .map_err(|e| node.invalid_params(format!("field `{field}`: {e}")))?;
-                // A redaction writes a string of the operator's making, so the field must
-                // take any string: core's write rules decide.
-                path.accepts(&Value::String(String::new())).map_err(|e| {
-                    node.invalid_params(format!(
-                        "field `{field}` cannot be redacted: {e}; a redaction writes a string"
-                    ))
-                })?;
-                Ok(path)
+                // A redaction writes the masked text back where it read it, so the field
+                // must be the record's and not the pipeline's.
+                path.writable()
+                    .map_err(|e| node.invalid_params(format!("field `{field}`: {e}")))
             })
             .collect::<Result<Vec<_>, ConfigError>>()?;
         let regex = params.regex.compile(node, "pattern", &params.pattern)?;
@@ -98,9 +92,9 @@ impl Stage for Redact {
     fn process(&self, mut record: Record, ctx: &Context<'_>) -> StageOutput {
         // Every field is scanned before any is written, so a limit tripped on the second
         // field cannot leave the first half-redacted on a record that is then dropped.
-        let mut rewrites: Vec<(&FieldPath, String)> = Vec::new();
+        let mut rewrites: Vec<(&WritePath, String)> = Vec::new();
         for path in &self.fields {
-            let FieldValue::Str(text) = path.read(&record, ctx.meta) else {
+            let FieldValue::Str(text) = path.read(&record) else {
                 continue;
             };
             match self.regex.replace_all(text, &self.replace) {
@@ -113,10 +107,8 @@ impl Stage for Redact {
             ctx.metrics.regex_nonmatch();
             return StageOutput::Pass(record);
         }
-        match write_strings(ctx.node_id, &mut record, rewrites) {
-            Ok(()) => StageOutput::Pass(record),
-            Err(error) => StageOutput::Error(error),
-        }
+        write_strings(&mut record, rewrites);
+        StageOutput::Pass(record)
     }
 
     fn engine_label(&self) -> Option<EngineLabel> {

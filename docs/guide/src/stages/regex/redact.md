@@ -10,7 +10,7 @@
 
 | Key | Default | What it does |
 |---|---|---|
-| `fields` | required | The [field paths](../../field-paths.md) to mask, at least one. Each must take text, so `id`, `kind`, `severity_number`, the time fields and `meta.*` are refused. |
+| `fields` | required | The [field paths](../../field-paths.md) to mask, at least one. Any path but `meta.*`, which is read-only. A field that does not hold text on a given record is skipped. |
 | `pattern` | required | The regular expression. |
 | `replace` | required | The text that replaces each match. |
 | `limits` | see [Regex limits](../../regex-limits.md) | Limits for this pattern, applied to each field. |

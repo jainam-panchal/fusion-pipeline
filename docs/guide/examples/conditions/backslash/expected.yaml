@@ -1,4 +1,4 @@
 acks: [ack, ack]
 sinks:
   out:
-    - payload: {kind: log, body: 12 errors}
+    - payload: {body: 12 errors}

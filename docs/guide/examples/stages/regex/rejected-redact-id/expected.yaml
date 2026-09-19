@@ -1,1 +1,0 @@
-rejected: 'node `mask`: field `id` cannot be redacted: `id` takes a non-negative integer, not a string; a redaction writes a string'

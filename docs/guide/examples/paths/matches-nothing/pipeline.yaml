@@ -1,0 +1,11 @@
+nodes:
+  - id: keep_errors
+    type: filter
+    # `severty_text` is a typo. It names nothing, so it reads as null, the
+    # condition is never true, and `keep` keeps nothing.
+    condition: severty_text == "ERROR"
+    action: keep
+  - id: out
+    type: sink.nats
+    stream: PROCESSED
+    subject: processed.logs

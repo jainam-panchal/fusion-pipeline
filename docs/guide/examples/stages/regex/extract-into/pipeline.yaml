@@ -1,13 +1,9 @@
-source:
-  type: nats
-  stream: LOGS
-  consumer: pipeline
 nodes:
   - id: parse
     type: extract
     field: body
-    pattern: '(?<user>\w+)'
-    into: resource
+    into: parsed          # the groups go under `parsed`, not `attributes`
+    pattern: '^(?<level>[A-Z]+): (?<message>.+)$'
   - id: out
     type: sink.nats
     stream: PROCESSED

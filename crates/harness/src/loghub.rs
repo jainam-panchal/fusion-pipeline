@@ -20,7 +20,7 @@ pub const AUDIT: &str = "processed.loghub.audit";
 /// A vendored set.
 #[derive(Debug)]
 pub struct Set {
-    /// The set's name: its directory, its file prefix and its `resource.log.format`.
+    /// The set's name: its directory, its file prefix and its `resource."log.format"`.
     pub name: &'static str,
     /// The tenant its messages are published under, one per set, so the state store keeps
     /// each set's dedupe keys apart.

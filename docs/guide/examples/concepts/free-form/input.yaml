@@ -1,0 +1,6 @@
+- subject: logs.acme.checkout
+  headers: {Fusion-Record-Id: "1"}
+  payload: {level: error, msg: auth failure, rhost: 10.0.0.1, host: web-1}
+- subject: logs.acme.checkout
+  headers: {Fusion-Record-Id: "2"}
+  payload: {id: abc, severity_number: high, body: types that used to be refused}

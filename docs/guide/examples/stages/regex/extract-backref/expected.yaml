@@ -1,4 +1,4 @@
 acks: [ack]
 sinks:
   out:
-    - payload: {kind: log, body: "disk is is full", attributes: {word: is}}
+    - payload: {body: "disk is is full", attributes: {word: is}}

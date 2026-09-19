@@ -337,8 +337,8 @@ The script brings the stack up with `PIPELINE_CONFIG=pipeline-poc.yaml`, purges 
 - `loghub-producer` (`--rate`, `--count`, `--datasets Linux,OpenSSH,Apache,Mac`,
   `--dup-percent`, `--seed`, `--dedupe-window`, `--expectations`) publishes each distinct
   loghub line raw in `body` on `logs.<tenant>.loghub` (one tenant per set) with
-  `Fusion-Record-Id`, its `LineId` and replay cycle in `attributes.loghub.line_id` and
-  `attributes.loghub.cycle`, about 30% of them sent twice within 500ms under a new id, and
+  `Fusion-Record-Id`, its `LineId` and replay cycle in `attributes."loghub.line_id"` and
+  `attributes."loghub.cycle"`, about 30% of them sent twice within 500ms under a new id, and
   writes one expectation per acked message to `target/loghub/expectations.jsonl`: which
   subjects (no main subject for a line the `sample` node leaves out in that cycle), `drop:
   dedupe` for a duplicate, the line's row of the structured CSV and what the config's `edit`

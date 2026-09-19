@@ -8,9 +8,9 @@
   on_unapplied: skip
   ops:
     - set: {field: resource.env, value: prod}
-    - rename: {from: attributes.http.path, to: attributes.http.route}
+    - rename: {from: attributes."http.path", to: attributes."http.route"}
     - copy: {from: body, to: attributes.raw}
-    - hash: {field: attributes.user.email}
+    - hash: {field: attributes."user.email"}
     - delete: {fields: [attributes.debug]}
 ```
 

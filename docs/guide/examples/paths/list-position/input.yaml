@@ -1,0 +1,13 @@
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "1"}
+  payload:
+    body: connect
+    attributes:
+      - {key: db.port, value: {intValue: 5432}}
+      - {key: db.name, value: {stringValue: orders}}
+- subject: logs.acme.app
+  headers: {Fusion-Record-Id: "2"}
+  payload:
+    body: connect
+    attributes:
+      - {key: db.port, value: {intValue: 1521}}

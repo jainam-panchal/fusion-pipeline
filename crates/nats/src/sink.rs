@@ -21,6 +21,7 @@ use async_nats::jetstream;
 use fusion_core::io::{Outgoing, Sink, SinkError};
 use tokio::runtime::Runtime;
 
+use crate::codec::Encoding;
 use crate::headers;
 
 /// A JetStream sink. Build one through [`crate::Nats::sink`].
@@ -30,6 +31,8 @@ pub struct NatsSink {
     context: jetstream::Context,
     stream: String,
     subject: String,
+    /// How a record becomes a payload.
+    encoding: Encoding,
 }
 
 /// Why a write did not get its `PubAck`.
@@ -52,12 +55,14 @@ impl NatsSink {
         context: jetstream::Context,
         stream: String,
         subject: String,
+        encoding: Encoding,
     ) -> Self {
         Self {
             runtime,
             context,
             stream,
             subject,
+            encoding,
         }
     }
 
@@ -76,7 +81,7 @@ impl NatsSink {
         let mut acks = Vec::with_capacity(batch.len());
         let mut bytes = 0;
         for outgoing in batch {
-            let payload = outgoing.record.to_json()?;
+            let payload = self.encoding.encode(outgoing.record)?;
             bytes += payload.len() as u64;
             let ack = self
                 .context

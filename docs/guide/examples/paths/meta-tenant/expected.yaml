@@ -1,4 +1,4 @@
 acks: [ack, ack]
 sinks:
   out:
-    - payload: {kind: log, body: from acme, resource: {tenant.id: globex}}
+    - payload: {body: from acme, resource: {tenant.id: globex}}

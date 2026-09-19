@@ -71,6 +71,7 @@ use futures::StreamExt;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
+use crate::codec::Codec;
 use crate::headers::{self, DeadLetter, InvalidHeader, Received};
 use crate::subject;
 
@@ -319,6 +320,8 @@ pub struct NatsSource {
     signals: Signals,
     /// The first token of the subjects that name a tenant.
     tenant_prefix: String,
+    /// How a payload becomes a record.
+    codec: Codec,
     dead_letters: Arc<DeadLetters>,
 }
 
@@ -329,6 +332,7 @@ impl NatsSource {
         shutdown: watch::Receiver<bool>,
         signals: Signals,
         tenant_prefix: String,
+        codec: Codec,
         dead_letters: DeadLetters,
     ) -> Self {
         Self {
@@ -337,6 +341,7 @@ impl NatsSource {
             shutdown,
             signals,
             tenant_prefix,
+            codec,
             dead_letters: Arc::new(dead_letters),
         }
     }
@@ -405,7 +410,7 @@ impl NatsSource {
             // not decoded: the engine drops and acks it whatever the payload holds, and
             // never reads the empty record it is handed.
             let decoded = if arrival.is_log() {
-                serde_json::from_slice::<Record>(&message.payload)
+                self.codec.decode(&message.payload)
             } else {
                 Ok(Record::default())
             };

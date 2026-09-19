@@ -33,7 +33,7 @@ The pipeline prints the reason and exits. Most reasons start with `pipelined: `,
 `nats consumer info <stream> <consumer>` shows `Redelivered Messages`. A message comes back when its record failed. Each failure is logged as an event: in Loki when the stack sends logs there, or on standard error when no log endpoint is set. Common causes:
 
 - The message has no valid `Fusion-Record-Id`. Every delivery fails. Fix the producer.
-- The payload is not a JSON object, or a field has the wrong type. See [Concepts](concepts.md#message-and-record).
+- The payload cannot be read at all: it is not JSON under `codec: json`, or not UTF-8 under `codec: text`. Any JSON value is a record, and no field has a type, so nothing else fails here. See [Concepts](concepts.md#message-and-record).
 - A sink cannot store: the output stream is missing, full, or slow to confirm.
 - Dragonfly failed on a node with `on_state_error: nak`. See [State and failure policy](state-and-failure.md).
 - A `lua` script failed with `on_error: nak`. A `runtime` or `output` error usually fails again on every delivery.
@@ -48,7 +48,7 @@ Read one:
 nats sub 'dlq.>' --count 1
 ```
 
-`Fusion-Dlq-Reason` names the node that failed and why. `source` means the message had no record id or its payload was not a record. `Fusion-Dlq-Subject` is where it came from. After fixing the cause, publish the dead letter back to that subject, with its headers, to process it again. It keeps its record id, tenant and ingestion time. A dead letter from `source` fails again unless the replay fixes it: add a `Fusion-Record-Id`, or correct the payload. See [NATS](nats.md#redelivery-and-dead-letters).
+`Fusion-Dlq-Reason` names the node that failed and why. `source` means the message had no record id, or its payload could not be read at all: not JSON under `codec: json`, or not UTF-8 under `codec: text`. `Fusion-Dlq-Subject` is where it came from. After fixing the cause, publish the dead letter back to that subject, with its headers, to process it again. It keeps its record id, tenant and ingestion time. A dead letter from `source` fails again unless the replay fixes it: add a `Fusion-Record-Id`, or correct the payload. See [NATS](nats.md#redelivery-and-dead-letters).
 
 ## Records are missing from the output
 
@@ -79,15 +79,31 @@ The subject did not name a tenant and there was no valid `Fusion-Tenant` header.
 
 ## A field is missing or changed in the output
 
-- A top-level payload key that is not a record field is dropped. Move it under `attributes`.
-- `kind: log` is added when the payload had no `kind`.
+- Nothing is dropped for being unexpected, and nothing is added. If a key is missing, a stage removed it.
 - `extract` writes every value as text, so a number such as a PID comes out as `"4711"`.
 - Check the `edit` ops, which run in order.
+- A write makes its path exist and replaces what is in the way, so `set {field: body.parsed}` on a `body` that was text leaves an object and the text is gone. See [field paths](field-paths.md#reading-and-writing).
+- Object keys come back sorted. Every key and value survives; the order does not.
+
+## A stage keeps everything, or nothing, or drops everything
+
+Most often the path names nothing. A path that matches nothing is not an error: it reads as null on every record, so a whole stage gets one answer.
+
+| What you see | Likely cause |
+|---|---|
+| `filter action: keep` keeps nothing | The condition's path is misspelled, or a dotted name needs quotes. |
+| `filter action: drop` keeps everything | The same. |
+| Every record takes a `route` default | No label's condition can be true. |
+| `dedupe` drops everything after the first | Every record hashes the same, because the key names nothing. |
+| `sample mode: consistent` keeps all or none | The same. |
+| `edit` counts every record on `edit_unapplied_total` with cause `absent` | The op's `from` names nothing. |
+
+Check the path against a real message. A key whose name holds a dot needs quotes: `resource."log.format"`, not `resource.log.format`. See [field paths](field-paths.md#a-path-that-matches-nothing-is-not-an-error).
 
 ## A condition or pattern does not match
 
 - `503` and `"503"` are different. Check how the producer sends numbers.
-- `attributes.http.status` is the flat key `http.status`, not a nested object.
+- `attributes."http.status"` is the key `http.status`; `attributes.http.status` is the key `status` inside the key `http`. Quotes decide which.
 - `=~` searches anywhere in the text. Use `^` and `$` to match the whole text.
 - In a condition, write `"\\d"` for `\d`. In `pattern:`, use single YAML quotes and write `\d`.
 - A field that is not text never matches `=~`.
@@ -102,7 +118,7 @@ See [Conditions](conditions.md).
 | `` pipeline: lua `<id>` record <id>: `` | a lua script failed on a record |
 | `` pipeline: lua `<id>` record <id> info: `` or `warn:` | a script called `log.info` or `log.warn` |
 | `nats source: ignored a pipeline header` | a `Fusion-*` header did not fit its format |
-| `nats source: nak of undecodable message` | a payload was not a record |
+| `nats source: nak of undecodable message` | the payload is not JSON (`codec: json`), or not UTF-8 (`codec: text`) |
 | `nats source: not walked: an unreadable pipeline header` | a bad `Fusion-Record-Kind`; the message is dropped |
 | `` pipeline: node `<id>` on_redos_risk=warn `` | a pattern loaded under `warn` despite a finding |
 | `pipeline: ` and an event | a pipeline event, when no log endpoint is set |

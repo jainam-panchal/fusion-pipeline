@@ -1,11 +1,7 @@
-source:
-  type: nats
-  stream: LOGS
-  consumer: pipeline
 nodes:
-  - id: keep_disk
+  - id: postgres_only
     type: filter
-    condition: body.msg == "disk full"
+    condition: attributes.0.value.intValue == 5432
     action: keep
   - id: out
     type: sink.nats

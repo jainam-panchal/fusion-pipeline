@@ -6,8 +6,8 @@
 - id: by_format
   type: route
   routes:
-    linux: resource.log.format == "Linux"
-    apache: resource.log.format == "Apache"
+    linux: resource."log.format" == "Linux"
+    apache: resource."log.format" == "Apache"
   default: other
 ```
 

@@ -2,6 +2,6 @@ nodes:
   - id: by_format
     type: route
     routes:
-      linux: resource.log.format == "Linux"
+      linux: resource."log.format" == "Linux"
     default: drop
   - {id: linux_out, type: sink.nats, from: by_format.linux, stream: PROCESSED, subject: processed.linux}
