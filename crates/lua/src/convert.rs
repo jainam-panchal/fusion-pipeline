@@ -171,7 +171,7 @@ struct Reader<'l> {
     depth: usize,
     /// The mark of a table that is a list.
     list: &'l ListMark,
-    /// The marks of the record table, whose shape is carried rather than guessed.
+    /// The record marks, so a record table's shape is read rather than guessed.
     records: &'l RecordMark,
 }
 
@@ -295,26 +295,6 @@ impl Reader<'_> {
     }
 }
 
-/// The table the script returned as a record whose shape the stage already knows, because it
-/// is the record table it handed over (or a `record:copy()` of it). Reading it by that shape
-/// rather than by its contents is what keeps `return record` identity for a record that is an
-/// empty list, which is otherwise indistinguishable from an empty object.
-pub(crate) fn from_lua_record(
-    table: &Table,
-    shape: Shape,
-    output_bytes: usize,
-    list: &ListMark,
-    records: &RecordMark,
-) -> Result<Record, OutputError> {
-    let mut reader = Reader::new(output_bytes, list, records);
-    let field = "the returned record";
-    let value = match shape {
-        Shape::List => Value::Array(reader.items(table, field)?),
-        Shape::Object => Value::Object(reader.entries(table, field)?),
-    };
-    Ok(Record::new(value))
-}
-
 /// The value the script returned as a record, its strings together under `output_bytes`.
 /// Any JSON is a record, so nothing here judges a key or a type; what is refused is what has
 /// no JSON form at all (a function, a coroutine, userdata, a non-finite number, a string
@@ -367,7 +347,7 @@ impl Shape {
 
     /// The shape a table that is not a record table stands for: marked as a list, or holding
     /// positions, makes a list; anything else an object.
-    fn of_table(table: &Table, list: &ListMark) -> Self {
+    pub(crate) fn of_table(table: &Table, list: &ListMark) -> Self {
         if list.is_list(table) || table.raw_len() > 0 {
             Self::List
         } else {
@@ -416,7 +396,7 @@ pub(crate) struct RecordMark {
 impl RecordMark {
     pub(crate) fn new(lua: &mlua::Lua, lists: &ListMark) -> mlua::Result<Self> {
         let object = lua.create_table()?;
-        let list_flavour = lua.create_table()?;
+        let list = lua.create_table()?;
         // A script cannot read the list mark, so the copy asks Rust which tables carry it.
         let marker = lists.clone();
         let mark = lua.create_function(move |_, (from, to): (Table, Table)| {
@@ -428,7 +408,7 @@ impl RecordMark {
         // The copy of a record table is a record table of the same flavour.
         let this = Self {
             object: object.clone(),
-            list: list_flavour.clone(),
+            list: list.clone(),
         };
         let for_copy = this.clone();
         let finish = lua.create_function(move |_, (from, to): (Table, Table)| {
@@ -443,7 +423,7 @@ impl RecordMark {
             .call((mark, finish))?;
         let methods = lua.create_table()?;
         methods.raw_set("copy", copy)?;
-        for metatable in [&object, &list_flavour] {
+        for metatable in [&object, &list] {
             metatable.raw_set("__index", methods.clone())?;
             metatable.raw_set("__metatable", "record")?;
         }

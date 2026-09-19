@@ -1526,3 +1526,80 @@ nodes:
         h.finish();
     }
 }
+
+/// The record mark is read wherever a table appears, not only one level down, so a record
+/// nested two tables deep keeps its shape as well.
+#[test]
+fn a_record_table_nested_two_levels_deep_keeps_its_shape() {
+    const DEEP: &str = r#"
+nodes:
+  - id: wrap
+    type: lua
+    source: |
+      function process(record)
+        return {outer = {inner = record, copy = record:copy()}}
+      end
+  - id: out
+    type: sink.memory
+    from: wrap
+"#;
+    for shape in [json!([]), json!([1, 2]), json!({})] {
+        let h = start(DEEP, 1);
+        let probe = h.source.push_arrival(
+            Record::new(shape.clone()),
+            Arrival {
+                record_id: Some(RecordId(1)),
+                ..arrival_as(TENANT)
+            },
+        );
+        assert_eq!(probe.wait(WAIT), Some(AckOutcome::Ack), "{shape}");
+        assert_eq!(
+            h.sinks.records("out")[0].value(),
+            &json!({"outer": {"inner": shape, "copy": shape}}),
+            "{shape}"
+        );
+        h.finish();
+    }
+}
+
+/// What a script returns at the top level is one record or a split, so a table it builds with
+/// positions is a split whatever it holds. A list record travels by returning the record.
+#[test]
+fn a_fresh_table_of_positions_is_a_split_and_a_list_record_travels_as_the_record() {
+    let node = |body: &str| {
+        format!(
+            "nodes:\n  - id: s\n    type: lua\n    on_error: nak\n    source: |\n      function process(record)\n{body}\n      end\n  - id: out\n    type: sink.memory\n    from: s\n"
+        )
+    };
+    let push = |yaml: &str, value: Value| {
+        let h = start(yaml, 1);
+        let probe = h.source.push_arrival(
+            Record::new(value),
+            Arrival {
+                record_id: Some(RecordId(1)),
+                ..arrival_as(TENANT)
+            },
+        );
+        let settled = probe.wait(WAIT);
+        let out: Vec<Value> = h
+            .sinks
+            .records("out")
+            .iter()
+            .map(|r| r.value().clone())
+            .collect();
+        h.finish();
+        (settled, out)
+    };
+
+    // A fresh marked list of non-records is a split of things that are not records.
+    let (settled, _) = push(
+        &node("        return json.list({1, 2, 3})"),
+        json!("a raw line"),
+    );
+    assert_eq!(settled, Some(AckOutcome::Nak(None)), "read as a split");
+
+    // The record itself comes back as the list it is.
+    let (settled, out) = push(&node("        return record"), json!([1, 2, 3]));
+    assert_eq!(settled, Some(AckOutcome::Ack));
+    assert_eq!(out, vec![json!([1, 2, 3])]);
+}

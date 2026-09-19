@@ -577,3 +577,25 @@ fn rename_into_a_deeper_descendant_keeps_the_value() {
     assert_eq!(out[0].value()["a"], json!({"b": {"c": 7}}));
     h.finish();
 }
+
+/// A `rename` whose source holds an explicit JSON `null` is unapplied with cause `absent`,
+/// and the record keeps the null key: an op that did not apply changes nothing.
+#[test]
+fn rename_from_an_explicit_null_is_unapplied_and_leaves_the_key() {
+    let yaml = config("", "      - rename: { from: a, to: b }\n");
+    let (out, h) = run(&yaml, 1, vec![record(1, json!({"a": null}))]);
+    assert_eq!(
+        out[0].value()["a"],
+        json!(null),
+        "the null key is still there"
+    );
+    assert_eq!(out[0].value().get("b"), None, "nothing was written");
+    assert_eq!(
+        h.counter(
+            CounterMetric::EditUnapplied,
+            &unapplied("rename", "a", "absent")
+        ),
+        1
+    );
+    h.finish();
+}

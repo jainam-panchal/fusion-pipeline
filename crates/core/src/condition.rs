@@ -372,6 +372,13 @@ fn lex(expr: &str) -> Result<Vec<Token>, ConditionError> {
                     });
                 }
             }
+            // The *first* byte is deliberately narrower than a bare path segment, which also
+            // takes digits and `-`: a token starting with either of those is a number, and
+            // the lexer has to tell `0.5` from the path `.0` and `-1` from a key named
+            // `-foo`. So `-foo == 1` at the root is an invalid number where `a.-foo` is a
+            // clean path; the leading-dot form, `."-foo"`, is how such a root is written.
+            // Past the first byte there is no ambiguity, so the rule below is the same one
+            // every later segment follows.
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
                 i += 1;
                 // The first name follows the same rule as every later one,

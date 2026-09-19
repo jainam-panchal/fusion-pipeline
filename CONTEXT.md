@@ -196,7 +196,7 @@ A `lua` node's `on_error`: `pass` forwards the record as it entered the node (th
 _Avoid_: fallback, on_fail
 
 **Output check**:
-The validation of what `process` returned before it leaves the stage: every value has a JSON form (no function, coroutine, userdata, non-finite number or non-UTF-8 string), strings under the output cap, tables nested at most 127 below the record, not an empty table or list, not a boolean (return `nil` to drop), and every table read as a list (a marked one, one with keys `1..n`, or the list returned for a split) holding only its positions `1..n`. No key and no type is checked, since a record is any JSON. A returned table carrying the record metatable is one record whatever its shape. A refusal is a Lua error of kind `output`.
+The validation of what `process` returned before it leaves the stage: every value has a JSON form (no function, coroutine, userdata, non-finite number or non-UTF-8 string), strings under the output cap, tables nested at most 127 below the record, not an empty table or list, not a boolean unless the record arrived as one (return `nil` to drop), and every table read as a list (a marked one, one with keys `1..n`, or the list returned for a split) holding only its positions `1..n`. No key and no type is checked, since a record is any JSON. A returned table carrying the **record mark** is one record whatever its shape. A refusal is a Lua error of kind `output`.
 _Avoid_: schema validation, sanitising
 
 **Sandbox**:
@@ -324,3 +324,10 @@ _Avoid_: sentinel, flag file, lock
 A loghub harness run (`make chaos`) during which the pipeline container is killed at 20s and started at 25s, and Dragonfly is paused at 40s for 5s. It passes as any run does, and is judged at all only when the chaos landed: the source consumer redelivered messages, `dedupe_body` counted state errors, and nothing was nakked.
 _Avoid_: chaos test (the spec's name for the requirement), fault injection, soak
 
+**Record mark**:
+The pair of metatables a record table carries, one per JSON shape, so the way back reads a
+record in the shape it was handed over and an empty list does not come back an empty object.
+Both answer `"record"` to `getmetatable`, both refuse `setmetatable`, and both share `copy`.
+`record:copy()` carries the shape too. Distinct from the **list mark**, which marks an
+ordinary table as a JSON list.
+_Avoid_: record metatable (singular), type tag

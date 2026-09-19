@@ -353,12 +353,17 @@ impl Op {
                 Ok(())
             }
             Self::Rename { from, to } => {
+                // Read before removing, although `remove` would hand back the same value in
+                // one walk instead of two: `remove` cannot tell a key holding an explicit
+                // JSON `null` from one that is not there, and both must count as unapplied
+                // with cause `absent`. Removing first would take the null key with it and
+                // leave the record changed by an op that did not apply.
                 let value = owned(from.path.read(record))
                     .ok_or_else(|| from.unapplied(EditCause::Absent))?;
-                // Remove before writing. `to` may live under `from` (`{from: a, to: a.b}`),
-                // and removing afterwards would take the value just written away with it.
-                // Nothing has changed yet on the one `Err` above, so the record is still
-                // unchanged when this op cannot apply.
+                // Then remove before writing. `to` may live under `from` (`{from: a, to:
+                // a.b}`), and removing afterwards would take the value just written away
+                // with it. Nothing has changed yet on the one `Err` above, so the record is
+                // still unchanged when this op cannot apply.
                 let _removed = from.path.remove(record);
                 to.write(record, value);
                 Ok(())

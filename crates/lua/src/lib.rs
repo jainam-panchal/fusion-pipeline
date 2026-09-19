@@ -10,18 +10,19 @@
 //!   on_state_error: nak                # nak (default) | pass, when the script uses `state`
 //! ```
 //!
-//! The script defines `process(record, meta)`. It gets the record as the JSON value it is —
-//! an object or a list as a table, a `codec: text` line as a Lua string — and a read-only
-//! `meta` table (`id`, `tenant`, `ingestion_time`, `delivery_count`), and returns the record
-//! to pass, `nil` to drop (reason `lua_drop`), or a list of records to split; `record:copy()`
-//! makes a deep copy for a split, and exists only when the record is an object or a list, since a scalar record is a Lua value the script can copy by assigning it. Nothing is there unless the producer sent it, so a script
-//! adding to a table that may be absent writes `record.attributes = record.attributes or {}`
-//! first. Every key is payload: a script may write, change or drop any of them, and the
-//! pipeline keeps deciding with the record's `Meta` (ADR 0005), which every split record
-//! inherits. No key and no type is checked on the way out (issue #79, ADR 0008): what is
+//! The script defines `process(record, meta)`. It gets the record as the JSON value it is — an
+//! object or a list as a table, a `codec: text` line as a Lua string — and a read-only `meta`
+//! table (`id`, `tenant`, `ingestion_time`, `delivery_count`), and returns the record to pass,
+//! `nil` to drop (reason `lua_drop`), or a list of records to split; `record:copy()` makes a deep
+//! copy for a split, and exists only when the record is an object or a list, since a scalar record
+//! is a Lua value the script can copy by assigning it. Nothing is there unless the producer sent
+//! it, so a script adding to a table that may be absent writes `record.attributes =
+//! record.attributes or {}` first. Every key is payload: a script may write, change or drop any of
+//! them, and the pipeline keeps deciding with the record's `Meta` (ADR 0005), which every split
+//! record inherits. No key and no type is checked on the way out (issue #79, ADR 0008): what is
 //! refused is a value with no JSON form, a returned boolean (`nil` drops a record), an empty
-//! table, a table nested too deep, and strings that together pass `output_kib`; each counts
-//! as an error of kind `output`.
+//! table, a table nested too deep, and strings that together pass `output_kib`; each counts as an
+//! error of kind `output`.
 //!
 //! A record the script leaves alone, or copies, comes back unchanged. A JSON list is a table
 //! marked as a list, so `[]` stays a list, and `json.list(t)` marks a table the script

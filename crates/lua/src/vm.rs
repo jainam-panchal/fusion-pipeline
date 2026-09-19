@@ -292,19 +292,13 @@ impl Vm {
                 // metatable, so `return record` is one record whatever shape the record
                 // has — a list record would otherwise read as a split of its items — and it
                 // is read back in the shape it went out in.
-                if let Some(shape) = self.record_mark.shape(&t) {
-                    return convert::from_lua_record(
-                        &t,
-                        shape,
-                        output_bytes,
-                        &self.list,
-                        &self.record_mark,
-                    )
-                    .map(|record| Returned::Record(Box::new(record)))
-                    .map_err(output);
-                }
-                if t.raw_len() == 0 && !self.list.is_list(&t) {
-                    if t.is_empty() {
+                // The record table, and a `record:copy()` of it, carry the record mark, so
+                // `return record` is one record whatever shape it has. `from_lua` reads the
+                // mark itself, so the shape needs no second spelling here; the mark is asked
+                // only to tell a returned record from a returned split.
+                let returned_record = self.record_mark.shape(&t).is_some();
+                if returned_record || Shape::of_table(&t, &self.list) == Shape::Object {
+                    if !returned_record && t.is_empty() {
                         return Err(output(OutputError(
                             "an empty table is neither a record nor a list".to_owned(),
                         )));
@@ -335,22 +329,16 @@ impl Vm {
                     };
                     // An entry that is a record table (a `record:copy()`) is read in the
                     // shape it carries, like a returned record.
-                    let entry = match self.record_mark.shape(&item) {
-                        Some(shape) => convert::from_lua_record(
-                            &item,
-                            shape,
-                            output_bytes,
-                            &self.list,
-                            &self.record_mark,
-                        ),
-                        None => convert::from_lua(
+                    // A `record:copy()` entry carries the record mark; `from_lua` reads it.
+                    records.push(
+                        convert::from_lua(
                             &LuaValue::Table(item),
                             output_bytes,
                             &self.list,
                             &self.record_mark,
-                        ),
-                    };
-                    records.push(entry.map_err(output)?);
+                        )
+                        .map_err(output)?,
+                    );
                 }
                 Ok(Returned::Split(records))
             }
